@@ -2,6 +2,7 @@
 /wasmbox.wasm
 /wasm_exec.js
 /clients/hello/hello.wasm
+/clients/dock/dock.wasm
 /clients/quake/quake.wasm
 /bin/
 
