@@ -16,6 +16,7 @@ version: "3"
 
 vars:
   PORT: "8080"
+  ENGINE_DIR: '{{default "../../go-quake1/engine" .ENGINE_DIR}}'
 
 tasks:
   default:
@@ -27,6 +28,36 @@ tasks:
   build:
     desc: Build wasmbox.wasm + hello client + copy wasm_exec.js
     deps: [build:compositor, build:hello, build:serve]
+
+  build:all:
+    desc: Build everything incl. the external go-quake1 client
+    deps: [build:compositor, build:hello, build:quake, build:serve]
+
+  build:quake:
+    desc: Build the cmd/quake-wasmbox client from the sibling go-quake1/engine repo into clients/quake/quake.wasm (embeds the pak + music -- ~200 MB wasm). Override ENGINE_DIR if engine repo lives elsewhere.
+    env:
+      GOWORK: "off"
+      GOOS: js
+      GOARCH: wasm
+    cmds:
+      - mkdir -p clients/quake
+      - |
+        if [ ! -d "{{.ENGINE_DIR}}" ]; then
+          echo "engine dir not found: {{.ENGINE_DIR}}" >&2
+          echo "set ENGINE_DIR=/path/to/go-quake1/engine" >&2
+          exit 1
+        fi
+      - go build -trimpath -ldflags '-s -w' -o "$(pwd)/clients/quake/quake.wasm" "{{.ENGINE_DIR}}/cmd/quake-wasmbox/"
+      - 'echo "build:quake: wrote clients/quake/quake.wasm ($(wc -c < clients/quake/quake.wasm) bytes)"'
+    generates:
+      - clients/quake/quake.wasm
+
+  serve:all:
+    desc: Build wasmbox + hello + Quake clients, then serve on http://localhost:{{.PORT}}/. Right-click desktop -> spawn quake, or run wasmboxSpawnExternal('clients/quake/worker.js') in console.
+    deps: [build:all]
+    cmds:
+      - 'echo "serve:all: serving http://localhost:{{.PORT}}/ -- spawn Quake via desktop right-click"'
+      - ./bin/wasmbox-serve -addr :{{.PORT}}
 
   build:compositor:
     desc: Build wasmbox.wasm (embeds compositor.rb)
