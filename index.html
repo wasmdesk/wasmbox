@@ -54,8 +54,9 @@
 
 <script src="wasm_exec.js"></script>
 <script>
-// Mirror web/index.html: instantiate rbgo.wasm and start the Go runtime, which
-// publishes globalThis.rbgoEval / rbgoImage and sets globalThis.rbgoReady.
+// Instantiate wasmbox.wasm and start the Go runtime. The wasm has compositor.rb
+// baked in (//go:embed): main() runs it, then sets globalThis.wasmboxReady — or
+// globalThis.wasmboxError if the embedded Ruby failed. Nothing is fetched here.
 const statusEl = document.getElementById("status");
 function fail(msg) {
   statusEl.innerHTML = '<div class="err">' + msg + '</div>';
@@ -63,35 +64,24 @@ function fail(msg) {
 }
 
 const go = new Go();
-WebAssembly.instantiateStreaming(fetch("rbgo.wasm"), go.importObject)
+WebAssembly.instantiateStreaming(fetch("wasmbox.wasm"), go.importObject)
   .then(res => {
-    go.run(res.instance); // runs forever (the wasm main() blocks on select{})
-    waitForReady();
+    go.run(res.instance); // runs the embedded compositor, then blocks on select{}
+    waitForCompositor();
   })
-  .catch(e => fail("Failed to load rbgo.wasm: " + e + "<br><br>" +
+  .catch(e => fail("Failed to load wasmbox.wasm: " + e + "<br><br>" +
     "Serve this directory over http (the wasm needs the application/wasm MIME " +
     "type) — e.g. <code>task serve</code> — and open index.html."));
 
-// rbgoReady is a plain global set by main(); poll for it, then fetch and run the
-// Ruby compositor through the exposed rbgoEval(src) entry point.
-function waitForReady() {
-  if (!globalThis.rbgoReady) { setTimeout(waitForReady, 16); return; }
-  fetch("compositor.rb")
-    .then(r => {
-      if (!r.ok) throw new Error("HTTP " + r.status);
-      return r.text();
-    })
-    .then(src => {
-      const result = globalThis.rbgoEval(src);
-      // A non-empty error here is a real failure (parse/compile/runtime in Ruby).
-      if (result && result.error) {
-        fail("Ruby error while starting the compositor:<br><pre>" +
-          String(result.error) + "</pre>");
-        return;
-      }
-      statusEl.hidden = true; // the canvas takes over
-    })
-    .catch(e => fail("Could not fetch/run compositor.rb: " + e));
+// Poll for the flag main() publishes once the embedded compositor is running.
+function waitForCompositor() {
+  if (globalThis.wasmboxError) {
+    fail("Ruby error while starting the compositor:<br><pre>" +
+      String(globalThis.wasmboxError) + "</pre>");
+    return;
+  }
+  if (!globalThis.wasmboxReady) { setTimeout(waitForCompositor, 16); return; }
+  statusEl.hidden = true; // the canvas takes over
 }
 </script>
 </body>

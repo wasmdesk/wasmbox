@@ -23,8 +23,10 @@ maintains the stacking order, applies focus and placement policy, draws minimal
 decorations, and runs its own `requestAnimationFrame` render loop.
 
 It runs in one WebAssembly instance of the pure-Go (CGO=0)
-[`rbgo`](https://github.com/go-embedded-ruby/ruby) interpreter — there is no
-server-side code and no JavaScript application logic; the page is just a loader.
+[`rbgo`](https://github.com/go-embedded-ruby/ruby) interpreter, with `compositor.rb`
+**baked into the wasm binary** via `//go:embed` — there is no server-side code, no
+JavaScript application logic, and nothing fetched at runtime; the page is just a
+loader.
 It builds on `rbgo`'s `JS` bridge (a `JS` module plus `JS::Ref` handles that let
 Ruby reach the DOM and the Canvas 2D context, register event listeners, and
 schedule animation frames).
@@ -51,17 +53,19 @@ Uses [Task](https://taskfile.dev):
 
 ```sh
 task          # list the available tasks
-task build    # clones + builds rbgo.wasm and copies wasm_exec.js
-task serve    # builds, then serves http://localhost:8080/
+task build    # build wasmbox.wasm (embeds compositor.rb) and copy wasm_exec.js
+task serve    # build, then serve http://localhost:8080/
 ```
 
-(Point `RBGO_SRC` at a local go-embedded-ruby checkout to skip the clone:
-`RBGO_SRC=../ruby task build`.)
+`wasmbox` is a Go module that imports the interpreter, so `task build` is a plain
+`go build` for the `js/wasm` target (`GOOS=js GOARCH=wasm`) — Go fetches the
+interpreter as a dependency; there is no separate checkout to clone.
 
-Then open <http://localhost:8080/>. The page instantiates `rbgo.wasm`, waits for
-the interpreter's `rbgoReady` flag, fetches `compositor.rb`, and runs it through
-the exposed `rbgoEval(src)` function. Any static server that serves `.wasm` with
-the `application/wasm` MIME type works.
+Then open <http://localhost:8080/>. The page instantiates `wasmbox.wasm` and starts
+the Go runtime; `main()` runs the embedded `compositor.rb` and sets a
+`wasmboxReady` flag, at which point the loader hides and the canvas takes over.
+Nothing is fetched at runtime. Any static server that serves `.wasm` with the
+`application/wasm` MIME type works.
 
 ## Controls
 
@@ -91,10 +95,11 @@ policy and the JS-touching compositor is meant to make that move straightforward
 
 ## Validation note
 
-There is no headless browser in CI, so the in-browser rendering and interaction
-are validated **manually**. What is checked automatically: `compositor.rb` parses
-and compiles, the pure WM logic is exercised with native assertions, and the
-`GOOS=js GOARCH=wasm` interpreter build compiles.
+The in-browser rendering is validated with a **headless browser** (Playwright
+driving Chrome): after boot the loader overlay computes to `display: none`, the
+`<canvas>` is fully painted (the desktop plus the cascaded windows), and the
+console reports the compositor started with its windows at ~115 fps. The
+`GOOS=js GOARCH=wasm` binary build is also checked.
 
 ## Part of [wasmdesk](https://github.com/wasmdesk)
 

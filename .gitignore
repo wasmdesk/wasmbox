@@ -1,3 +1,3 @@
-# Build artifacts (produced by ./build.sh)
-/rbgo.wasm
+# Build artifacts (produced by `task build`)
+/wasmbox.wasm
 /wasm_exec.js
