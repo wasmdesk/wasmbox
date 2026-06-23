@@ -2,6 +2,7 @@
 /wasmbox.wasm
 /wasm_exec.js
 /clients/hello/hello.wasm
+/clients/quake/quake.wasm
 /bin/
 
 # Agent/CI test harness deps
