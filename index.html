@@ -67,7 +67,7 @@ WebAssembly.instantiateStreaming(fetch("rbgo.wasm"), go.importObject)
   })
   .catch(e => fail("Failed to load rbgo.wasm: " + e + "<br><br>" +
     "Serve this directory over http (the wasm needs the application/wasm MIME " +
-    "type) — e.g. <code>./build.sh serve</code> — and open index.html."));
+    "type) — e.g. <code>task serve</code> — and open index.html."));
 
 // rbgoReady is a plain global set by main(); poll for it, then fetch and run the
 // Ruby compositor through the exposed rbgoEval(src) entry point.

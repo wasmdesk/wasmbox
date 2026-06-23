@@ -1,0 +1,53 @@
+# Taskfile for wasmbox — https://taskfile.dev
+#
+#   task            # build rbgo.wasm + wasm_exec.js
+#   task serve      # build, then serve http://localhost:8080/
+#   task clean      # remove the build artifacts
+#
+# The compositor runs in the pure-Go (CGO=0) go-embedded-ruby interpreter compiled
+# to WebAssembly. `build` clones the interpreter once (override RBGO_SRC to point
+# at a local checkout) and builds its cmd/wasm entry point.
+version: "3"
+
+vars:
+  RBGO_SRC: '{{.RBGO_SRC | default "/tmp/go-embedded-ruby"}}'
+  PORT: "8080"
+
+tasks:
+  default:
+    desc: Build the wasm interpreter for the compositor
+    cmds:
+      - task: build
+
+  _src:
+    internal: true
+    status:
+      - test -d "{{.RBGO_SRC}}/.git"
+    cmds:
+      - git clone --depth 1 https://github.com/go-embedded-ruby/ruby "{{.RBGO_SRC}}"
+
+  build:
+    desc: Build rbgo.wasm (GOOS=js GOARCH=wasm) and copy the matching wasm_exec.js
+    deps: [_src]
+    env:
+      GOWORK: "off"
+      GOOS: js
+      GOARCH: wasm
+    cmds:
+      - go -C "{{.RBGO_SRC}}" build -o "$PWD/rbgo.wasm" ./cmd/wasm
+      - cp "$(go env GOROOT)/lib/wasm/wasm_exec.js" ./wasm_exec.js 2>/dev/null || cp "$(go env GOROOT)/misc/wasm/wasm_exec.js" ./wasm_exec.js
+    generates:
+      - rbgo.wasm
+      - wasm_exec.js
+
+  serve:
+    desc: Build, then serve the compositor at http://localhost:{{.PORT}}/
+    deps: [build]
+    cmds:
+      - 'echo "serving http://localhost:{{.PORT}}/ — open /index.html"'
+      - python3 -m http.server {{.PORT}}
+
+  clean:
+    desc: Remove the build artifacts (rbgo.wasm, wasm_exec.js)
+    cmds:
+      - rm -f rbgo.wasm wasm_exec.js

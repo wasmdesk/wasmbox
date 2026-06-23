@@ -47,10 +47,15 @@ rendering methods touch the bridge.
 
 ## Build & serve
 
+Uses [Task](https://taskfile.dev):
+
 ```sh
-./build.sh          # clones + builds rbgo.wasm and copies wasm_exec.js
-./build.sh serve    # builds, then serves http://localhost:8080/
+task          # clones + builds rbgo.wasm and copies wasm_exec.js
+task serve    # builds, then serves http://localhost:8080/
 ```
+
+(Point `RBGO_SRC` at a local go-embedded-ruby checkout to skip the clone:
+`RBGO_SRC=../ruby task build`.)
 
 Then open <http://localhost:8080/>. The page instantiates `rbgo.wasm`, waits for
 the interpreter's `rbgoReady` flag, fetches `compositor.rb`, and runs it through
