@@ -1,14 +1,17 @@
 # Taskfile for wasmbox — https://taskfile.dev
 #
 #   task            # list the available tasks
-#   task build      # build wasmbox.wasm (embeds compositor.rb) + wasm_exec.js
-#   task serve      # build, then serve http://localhost:8080/
+#   task build      # build wasmbox.wasm (embeds compositor.rb) + hello client + wasm_exec.js
+#   task serve      # build, then serve http://localhost:8080/ with COOP/COEP
+#   task test       # run native Go + Ruby unit tests
 #   task clean      # remove the build artifacts
 #
 # wasmbox is a Go module that imports the pure-Go (CGO=0) go-embedded-ruby
-# interpreter and bakes compositor.rb into the binary with //go:embed, so the
-# build is a plain `go build` for the js/wasm target — no interpreter checkout
-# and nothing fetched at runtime.
+# interpreter and bakes compositor.rb into the wasm with //go:embed. Step B
+# adds an external-client path: a Web Worker hosting a separate Go/wasm client
+# (clients/hello) talking to the compositor through postMessage +
+# SharedArrayBuffer. SAB needs COOP/COEP, which python3 -m http.server does
+# not set — cmd/serve does.
 version: "3"
 
 vars:
@@ -22,7 +25,11 @@ tasks:
       - task --list
 
   build:
-    desc: Build wasmbox.wasm (embeds compositor.rb) and copy the matching wasm_exec.js
+    desc: Build wasmbox.wasm + hello client + copy wasm_exec.js
+    deps: [build:compositor, build:hello, build:serve]
+
+  build:compositor:
+    desc: Build wasmbox.wasm (embeds compositor.rb)
     env:
       GOWORK: "off"
       GOOS: js
@@ -34,14 +41,43 @@ tasks:
       - wasmbox.wasm
       - wasm_exec.js
 
+  build:hello:
+    desc: Build the hello-world external client (clients/hello/hello.wasm)
+    env:
+      GOWORK: "off"
+      GOOS: js
+      GOARCH: wasm
+    cmds:
+      - go build -o clients/hello/hello.wasm ./clients/hello
+    generates:
+      - clients/hello/hello.wasm
+
+  build:serve:
+    desc: Build the native dev server (cmd/serve) with COOP/COEP headers
+    env:
+      GOWORK: "off"
+    cmds:
+      - go build -o bin/wasmbox-serve ./cmd/serve
+    generates:
+      - bin/wasmbox-serve
+
   serve:
-    desc: Build, then serve the compositor at http://localhost:{{.PORT}}/
+    desc: Build, then serve the compositor at http://localhost:{{.PORT}}/ with COOP/COEP
     deps: [build]
     cmds:
       - 'echo "serving http://localhost:{{.PORT}}/ — open /index.html"'
-      - python3 -m http.server {{.PORT}}
+      - ./bin/wasmbox-serve -addr :{{.PORT}}
+
+  test:
+    desc: Run native unit tests (Ruby + Go) — no browser required
+    env:
+      GOWORK: "off"
+    cmds:
+      - go test ./clients/hello/...
+      - go run ./cmd/rbtest
 
   clean:
-    desc: Remove the build artifacts (wasmbox.wasm, wasm_exec.js)
+    desc: Remove the build artifacts
     cmds:
-      - rm -f wasmbox.wasm wasm_exec.js
+      - rm -f wasmbox.wasm wasm_exec.js clients/hello/hello.wasm
+      - rm -rf bin

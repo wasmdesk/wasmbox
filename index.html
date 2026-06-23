@@ -47,16 +47,81 @@
     <li><kbd>Tab</kbd> — cycle focus · <kbd>Esc</kbd> — dismiss menu</li>
   </ul>
   <div class="foot">Wayland-inspired single-instance compositor +
-    Openbox-style WM policy, written in pure Ruby, running in WebAssembly.</div>
+    Openbox-style WM policy, written in pure Ruby, running in WebAssembly.
+    External clients run in Web Workers (step B).</div>
 </aside>
 
 <div id="status"><div>Loading the WebAssembly interpreter…</div></div>
 
 <script src="wasm_exec.js"></script>
 <script>
-// Instantiate wasmbox.wasm and start the Go runtime. The wasm has compositor.rb
-// baked in (//go:embed): main() runs it, then sets globalThis.wasmboxReady — or
-// globalThis.wasmboxError if the embedded Ruby failed. Nothing is fetched here.
+// ---------------------------------------------------------------------------
+// Helpers that the Ruby compositor calls through the JS bridge. The bridge can
+// invoke methods on refs and read/write properties, but it cannot use `new`,
+// so any constructor we need from Ruby is wrapped here as a plain function.
+// ---------------------------------------------------------------------------
+
+// Spawn a Web Worker by URL and return it. The worker boots an external client
+// (see clients/sdk/worker.js).
+globalThis.wasmboxSpawnWorker = function (url) {
+  return new Worker(url, { type: "classic" });
+};
+
+// Construct an ImageData backed by the client's SharedArrayBuffer, so the
+// compositor can putImageData() the SAB pixels straight onto the canvas with
+// no per-frame copy. Returns the ImageData; the underlying Uint8ClampedArray
+// is a view onto the SAB, so writes from the worker are immediately visible.
+globalThis.wasmboxNewImageData = function (sab, w, h) {
+  return new ImageData(new Uint8ClampedArray(sab), w, h);
+};
+
+// Build a plain JS object {k1:v1, k2:v2, ...} from a flat key/value list. Ruby
+// has no literal-object syntax across the bridge, so the compositor uses this
+// to assemble outgoing input/welcome/closed payloads.
+globalThis.wasmboxMakeObject = function () {
+  const o = {};
+  for (let i = 0; i < arguments.length; i += 2) o[arguments[i]] = arguments[i + 1];
+  return o;
+};
+
+// postMessage on a Worker ref. (Calling `.call("postMessage", obj)` works, but
+// going through a helper keeps the call site symmetric with the other ones.)
+globalThis.wasmboxPostMessage = function (worker, msg) {
+  worker.postMessage(msg);
+};
+
+// Bridge the worker's `message` event into a CustomEvent on a per-worker DOM
+// element ("__wasmbox_worker_N"). The Ruby compositor cannot register a JS
+// function directly (the bridge only wraps Ruby blocks via JS::Ref#on), so it
+// listens for `wasmbox-msg` on that element and we forward the message data
+// to it here. The bus element is created by Ruby (compositor.rb) and addressed
+// by id, so the lifecycle is one-shot.
+globalThis.wasmboxAttachWorker = function (worker, busId) {
+  worker.addEventListener("message", function (e) {
+    const bus = document.getElementById(busId);
+    if (!bus) return;
+    bus.dispatchEvent(new CustomEvent("wasmbox-msg", { detail: e.data }));
+  });
+};
+
+// Public hook: globalThis.wasmboxSpawnExternal(url) tells the Ruby compositor
+// to spawn a worker-backed window for `url`. It dispatches `wasmbox-spawn-
+// external` on the bus element the compositor created (__wasmbox_bus). If the
+// bus is not there yet (compositor still booting), we retry on rAF.
+globalThis.wasmboxSpawnExternal = function (url) {
+  function dispatch() {
+    const bus = document.getElementById("__wasmbox_bus");
+    if (!bus) { requestAnimationFrame(dispatch); return; }
+    bus.dispatchEvent(new CustomEvent("wasmbox-spawn-external", { detail: url }));
+  }
+  dispatch();
+};
+
+// ---------------------------------------------------------------------------
+// Compositor boot. wasmbox.wasm has compositor.rb baked in (//go:embed); main()
+// runs it, then sets globalThis.wasmboxReady — or globalThis.wasmboxError if
+// the embedded Ruby failed.
+// ---------------------------------------------------------------------------
 const statusEl = document.getElementById("status");
 function fail(msg) {
   statusEl.innerHTML = '<div class="err">' + msg + '</div>';
@@ -70,8 +135,8 @@ WebAssembly.instantiateStreaming(fetch("wasmbox.wasm"), go.importObject)
     waitForCompositor();
   })
   .catch(e => fail("Failed to load wasmbox.wasm: " + e + "<br><br>" +
-    "Serve this directory over http (the wasm needs the application/wasm MIME " +
-    "type) — e.g. <code>task serve</code> — and open index.html."));
+    "Serve this directory through <code>task serve</code> (the COOP/COEP " +
+    "headers + the application/wasm MIME type matter)."));
 
 // Poll for the flag main() publishes once the embedded compositor is running.
 function waitForCompositor() {
@@ -82,6 +147,10 @@ function waitForCompositor() {
   }
   if (!globalThis.wasmboxReady) { setTimeout(waitForCompositor, 16); return; }
   statusEl.hidden = true; // the canvas takes over
+
+  // Auto-spawn the hello-world external client so the protocol is exercised
+  // on first paint (visible in headless screenshots).
+  globalThis.wasmboxSpawnExternal("clients/hello/worker.js");
 }
 </script>
 </body>

@@ -1,3 +1,8 @@
 # Build artifacts (produced by `task build`)
 /wasmbox.wasm
 /wasm_exec.js
+/clients/hello/hello.wasm
+/bin/
+
+# Agent/CI test harness deps
+/test/node_modules/
