@@ -173,5 +173,58 @@ wm4 = WindowManager.new
 20.times { |i| wm4.handle_client_message({ type: "hello", title: "x#{i}", w: 100, h: 100 }) }
 assert(wm4.last_messages.length <= 16, "last_messages bounded to 16")
 
+# ---- panel role: hello with role "panel" ----------------------------------
+wmp = WindowManager.new
+res = wmp.handle_client_message({ type: "hello", title: "wasmdock", role: "panel",
+                                  w: 480, h: 120, sab: :sab, stride: 1920 })
+assert_eq(res, :welcome, "panel hello yields :welcome")
+panel = wmp.last_registered
+assert(panel.panel?, "panel window reports panel?")
+assert(panel.external?, "panel is external")
+# A panel is never focused and is excluded from the focus ring.
+assert(wmp.focused.nil?, "panel does not become focused")
+assert_eq(wmp.panels.length, 1, "one panel tracked")
+assert_eq(wmp.normal_windows.length, 0, "panel not counted as a normal window")
+# A normal window registered after the panel must NOT raise above it: panels
+# are always the top stratum in ordered_windows.
+nrm = wmp.register_external("app", 200, 150)
+assert(!nrm.panel?, "normal window is not a panel")
+ord = wmp.ordered_windows
+assert(ord.last.panel?, "panel is drawn last (always-on-top)")
+assert(!ord.first.panel?, "normal window drawn before the panel")
+# Anchoring: bottom-center of a 1000x800 desktop.
+wmp.anchor_panel(panel, 1000, 800)
+assert_eq(panel.x, (1000 - panel.w) / 2, "panel x centered")
+assert_eq(panel.y, 800 - panel.h, "panel y flush to bottom")
+# A panel carries no decoration: all three decoration hit-tests are no-hit and
+# the frame equals the body.
+assert(!panel.on_titlebar?(panel.x + 5, panel.y + 2), "panel titlebar not hittable")
+assert(!panel.on_close?(panel.x + panel.w - 5, panel.y + 2), "panel close not hittable")
+assert(!panel.on_resize?(panel.x + panel.w - 2, panel.y + panel.h - 2), "panel resize not hittable")
+fr = panel.frame_rect
+br = panel.body_rect
+assert_eq(fr, br, "panel frame_rect equals body_rect")
+# Cycle ignores the panel: with only the panel + one normal window, the normal
+# stays focused (a single normal window cannot cycle).
+wmp.cycle
+assert(wmp.focused.equal?(nrm), "cycle keeps the only normal window focused")
+
+# ---- launch registry: known id -> :launch, unknown id -> :ignored ---------
+wml = WindowManager.new
+assert_eq(wml.handle_client_message({ type: "launch", app: "terminal" }), :launch,
+          "known launch id yields :launch")
+assert_eq(wml.handle_client_message({ type: "launch", app: "editor" }), :launch,
+          "editor is launchable")
+assert_eq(wml.handle_client_message({ type: "launch", app: "files" }), :launch,
+          "files is launchable")
+assert_eq(wml.handle_client_message({ type: "launch", app: "rm -rf /" }), :ignored,
+          "unknown launch id is dropped")
+assert_eq(wml.handle_client_message({ type: "launch" }), :ignored,
+          "missing app is dropped")
+assert(!wml.launchable_url("terminal").nil?, "terminal maps to a worker url")
+assert(wml.launchable_url("nope").nil?, "unknown id has no url")
+# A launch never spawns a window itself (the Compositor does, JS-side).
+assert_eq(wml.windows.length, 0, "launch dispatch creates no window in the WM")
+
 puts "rbtest: ran all pure-WM assertions"
 `

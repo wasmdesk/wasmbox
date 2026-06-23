@@ -175,6 +175,13 @@ function waitForCompositor() {
   // Auto-spawn the hello-world external client so the protocol is exercised
   // on first paint (visible in headless screenshots).
   globalThis.wasmboxSpawnExternal("clients/hello/worker.js");
+
+  // Auto-spawn the wasmdock dock. It asks for the "panel" role, so the
+  // compositor anchors it bottom-center, undecorated and always-on-top. Each
+  // dock icon, when clicked, posts {type:"launch", app} which the compositor
+  // validates against its LAUNCHABLE registry and spawns through the normal
+  // external-client path — so clicking an icon visibly opens a window.
+  globalThis.wasmboxSpawnExternal("clients/dock/worker.js");
 }
 </script>
 </body>
