@@ -1,0 +1,95 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>rbgo compositor · a Ruby-written window manager in your browser</title>
+<style>
+  html, body { margin: 0; height: 100%; background: #0b0d12; color: #e6e7ee;
+    font: 13px/1.5 ui-monospace, "SF Mono", Menlo, Consolas, monospace; overflow: hidden; }
+  /* The compositor draws the whole desktop onto this canvas. */
+  #screen { display: block; position: fixed; inset: 0; width: 100vw; height: 100vh;
+    cursor: default; touch-action: none; }
+  /* Boot status, hidden once the wasm interpreter is live. */
+  #status { position: fixed; inset: 0; display: grid; place-items: center;
+    background: #0b0d12; z-index: 10; text-align: center; }
+  #status .err { color: #f87171; max-width: 40rem; padding: 1rem; }
+  /* On-screen legend of the controls. */
+  #legend { position: fixed; top: 10px; right: 12px; z-index: 5;
+    background: rgba(20, 21, 28, .82); border: 1px solid #2a2d3a; border-radius: 8px;
+    padding: .6rem .75rem; color: #9aa0b4; max-width: 19rem; pointer-events: none; }
+  #legend b { color: #e6e7ee; }
+  #legend kbd { background: #1d1f29; border: 1px solid #3a3d4a; border-radius: 4px;
+    padding: 0 .35em; color: #e6e7ee; }
+  #legend h1 { font-size: .82rem; margin: 0 0 .4rem; color: #ef4444; }
+  #legend ul { margin: 0; padding-left: 1.1rem; }
+  #legend li { margin: .12rem 0; }
+  #legend .foot { margin-top: .5rem; color: #5b6072; }
+  #legend a { color: #ef4444; }
+</style>
+</head>
+<body>
+
+<canvas id="screen"></canvas>
+
+<aside id="legend">
+  <h1>rbgo compositor</h1>
+  <ul>
+    <li><b>Drag titlebar</b> — move a window</li>
+    <li><b>Drag bottom-right corner</b> — resize</li>
+    <li><b>Click</b> a window — focus &amp; raise</li>
+    <li><b>×</b> in a titlebar — close</li>
+    <li><b>Right-click desktop</b> — root menu (spawn)</li>
+    <li><b>Right-click a window</b> — raise / close</li>
+    <li><kbd>Tab</kbd> — cycle focus · <kbd>Esc</kbd> — dismiss menu</li>
+  </ul>
+  <div class="foot">Wayland-inspired single-instance compositor +
+    Openbox-style WM policy, written in pure Ruby, running in WebAssembly.</div>
+</aside>
+
+<div id="status"><div>Loading the WebAssembly interpreter…</div></div>
+
+<script src="wasm_exec.js"></script>
+<script>
+// Mirror web/index.html: instantiate rbgo.wasm and start the Go runtime, which
+// publishes globalThis.rbgoEval / rbgoImage and sets globalThis.rbgoReady.
+const statusEl = document.getElementById("status");
+function fail(msg) {
+  statusEl.innerHTML = '<div class="err">' + msg + '</div>';
+  statusEl.hidden = false;
+}
+
+const go = new Go();
+WebAssembly.instantiateStreaming(fetch("rbgo.wasm"), go.importObject)
+  .then(res => {
+    go.run(res.instance); // runs forever (the wasm main() blocks on select{})
+    waitForReady();
+  })
+  .catch(e => fail("Failed to load rbgo.wasm: " + e + "<br><br>" +
+    "Serve this directory over http (the wasm needs the application/wasm MIME " +
+    "type) — e.g. <code>./build.sh serve</code> — and open index.html."));
+
+// rbgoReady is a plain global set by main(); poll for it, then fetch and run the
+// Ruby compositor through the exposed rbgoEval(src) entry point.
+function waitForReady() {
+  if (!globalThis.rbgoReady) { setTimeout(waitForReady, 16); return; }
+  fetch("compositor.rb")
+    .then(r => {
+      if (!r.ok) throw new Error("HTTP " + r.status);
+      return r.text();
+    })
+    .then(src => {
+      const result = globalThis.rbgoEval(src);
+      // A non-empty error here is a real failure (parse/compile/runtime in Ruby).
+      if (result && result.error) {
+        fail("Ruby error while starting the compositor:<br><pre>" +
+          String(result.error) + "</pre>");
+        return;
+      }
+      statusEl.hidden = true; // the canvas takes over
+    })
+    .catch(e => fail("Could not fetch/run compositor.rb: " + e));
+}
+</script>
+</body>
+</html>
