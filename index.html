@@ -10,7 +10,10 @@
   /* The compositor draws the whole desktop onto this canvas. */
   #screen { display: block; position: fixed; inset: 0; width: 100vw; height: 100vh;
     cursor: default; touch-action: none; }
-  /* Boot status, hidden once the wasm interpreter is live. */
+  /* Boot status, hidden once the wasm interpreter is live. The [hidden] rule must
+     be explicit: an author `display` declaration otherwise beats the user-agent
+     `[hidden] { display: none }`, so el.hidden = true would not hide it. */
+  #status[hidden] { display: none; }
   #status { position: fixed; inset: 0; display: grid; place-items: center;
     background: #0b0d12; z-index: 10; text-align: center; }
   #status .err { color: #f87171; max-width: 40rem; padding: 1rem; }
