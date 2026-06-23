@@ -1,0 +1,123 @@
+# Headless CI for wasmbox — the pure-Go Ruby WASM compositor.
+#
+# Two jobs:
+#   build-and-test  — go vet, build every wasm target + cmd/serve, run the
+#                     native scene tests, and run cmd/rbtest (proving
+#                     compositor.rb parses + executes under the native
+#                     go-embedded-ruby interpreter, not only under MRI).
+#   render          — build the wasm, serve it with cmd/serve (COOP/COEP so
+#                     SharedArrayBuffer works), and drive a headless Chromium
+#                     through test/render.mjs to prove the compositor actually
+#                     boots, paints, persists its layout, and renders the dock.
+#
+# CGO is off everywhere (the whole stack is pure Go); GOWORK=off keeps the
+# module self-contained.
+name: CI
+
+on:
+  push:
+    branches: [main, ci-headless]
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+
+env:
+  GOWORK: "off"
+  CGO_ENABLED: "0"
+
+jobs:
+  build-and-test:
+    name: Build + native tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.26.4"
+          check-latest: true
+          cache: true
+
+      - name: go vet
+        run: go vet ./...
+
+      - name: Build the compositor wasm (embeds compositor.rb)
+        run: GOOS=js GOARCH=wasm go build -o wasmbox.wasm .
+
+      - name: Build every external client wasm
+        run: |
+          for dir in clients/*/; do
+            name="$(basename "$dir")"
+            if [ -f "${dir}main.go" ]; then
+              echo "building ${name}.wasm"
+              GOOS=js GOARCH=wasm go build -o "${dir}${name}.wasm" "./clients/${name}"
+            fi
+          done
+
+      - name: Build the dev server (cmd/serve)
+        run: go build -o bin/wasmbox-serve ./cmd/serve
+
+      - name: Native scene tests
+        run: go test ./...
+
+      - name: rbtest — compositor.rb under go-embedded-ruby
+        run: go run ./cmd/rbtest
+
+  render:
+    name: Headless render (boot + persistence + dock)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.26.4"
+          check-latest: true
+          cache: true
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+
+      - name: Build wasm + clients + serve (task build)
+        uses: arduino/setup-task@v2
+        with:
+          version: 3.x
+          repo-token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: task build
+        run: task build
+
+      - name: Install render-test deps
+        working-directory: test
+        run: npm install
+
+      - name: Install Playwright bundled Chromium
+        working-directory: test
+        run: npx playwright install --with-deps chromium
+
+      - name: Serve the compositor (cmd/serve, COOP/COEP) in the background
+        run: |
+          ./bin/wasmbox-serve -addr :8137 > serve.log 2>&1 &
+          echo "$!" > serve.pid
+          # Wait for the server to answer before launching the browser.
+          for i in $(seq 1 50); do
+            if curl -fsS -o /dev/null "http://127.0.0.1:8137/wasmbox.wasm"; then
+              echo "cmd/serve is up"; break
+            fi
+            sleep 0.2
+          done
+
+      - name: Run headless render test
+        working-directory: test
+        env:
+          WASMBOX_BASE_URL: "http://127.0.0.1:8137"
+        run: node render.mjs
+
+      - name: Stop the server
+        if: always()
+        run: |
+          if [ -f serve.pid ]; then kill "$(cat serve.pid)" 2>/dev/null || true; fi
+          echo "---- serve.log ----"; cat serve.log || true
