@@ -956,8 +956,9 @@ class Compositor
   def draw_window(win)
     # A panel (the dock) is undecorated: no titlebar, no close box, no resize
     # grip, no frame border. Its surface IS the window, so we blit the SAB
-    # straight at the body rectangle (putImageData preserves the SAB's alpha, so
-    # the transparent corners outside the dock bar show the desktop through).
+    # straight at the body rectangle. The blit composites (source-over, see
+    # wasmboxBlitFromSAB), so the transparent corners outside the dock bar show
+    # the desktop through instead of a black rectangle.
     if win.panel?
       blit_external(win) if win.external?
       return

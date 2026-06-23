@@ -96,7 +96,19 @@ globalThis.wasmboxBlitFromSAB = function (ctx, slot, dx, dy, sx, sy, sw, sh) {
     const dstOff = (sy + row) * stride + sx * 4;
     dst.set(slot.src.subarray(srcOff, srcOff + sw * 4), dstOff);
   }
-  ctx.putImageData(slot.image, dx, dy, sx, sy, sw, sh);
+  // Composite, don't replace. putImageData ignores alpha blending, so a client's
+  // transparent pixels (e.g. the dock's rounded corners) would overwrite the
+  // desktop with black. Stage the surface on a per-slot offscreen canvas, then
+  // drawImage it onto the main canvas with the default source-over blend so
+  // transparent areas show the desktop beneath. Opaque clients are unaffected.
+  if (!slot.canvas) {
+    slot.canvas = document.createElement("canvas");
+    slot.canvas.width = slot.w;
+    slot.canvas.height = slot.h;
+    slot.octx = slot.canvas.getContext("2d");
+  }
+  slot.octx.putImageData(slot.image, 0, 0, sx, sy, sw, sh);
+  ctx.drawImage(slot.canvas, sx, sy, sw, sh, dx + sx, dy + sy, sw, sh);
 };
 
 // Build a plain JS object {k1:v1, k2:v2, ...} from a flat key/value list. Ruby
