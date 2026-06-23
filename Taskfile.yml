@@ -1,6 +1,7 @@
 # Taskfile for wasmbox — https://taskfile.dev
 #
-#   task            # build rbgo.wasm + wasm_exec.js
+#   task            # list the available tasks
+#   task build      # build rbgo.wasm + wasm_exec.js
 #   task serve      # build, then serve http://localhost:8080/
 #   task clean      # remove the build artifacts
 #
@@ -15,9 +16,10 @@ vars:
 
 tasks:
   default:
-    desc: Build the wasm interpreter for the compositor
+    desc: List the available tasks
+    silent: true
     cmds:
-      - task: build
+      - task --list
 
   _src:
     internal: true

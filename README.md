@@ -50,7 +50,8 @@ rendering methods touch the bridge.
 Uses [Task](https://taskfile.dev):
 
 ```sh
-task          # clones + builds rbgo.wasm and copies wasm_exec.js
+task          # list the available tasks
+task build    # clones + builds rbgo.wasm and copies wasm_exec.js
 task serve    # builds, then serves http://localhost:8080/
 ```
 
