@@ -59,6 +59,39 @@ tasks:
       - 'echo "serve:all: serving http://localhost:{{.PORT}}/ -- spawn Quake via desktop right-click"'
       - ./bin/wasmbox-serve -addr :{{.PORT}}
 
+  # ----- mirrors of go-quake1/engine's demo tasks so the user can run
+  # ----- the full Quake-in-wasmbox flow from either repo -----
+
+  demo-wasmbox:
+    desc: Mirror of go-quake1/engine `task demo-wasmbox` -- build embedded-assets Quake client + start wasmbox at http://localhost:{{.PORT}}/.
+    cmds:
+      - task -d "{{.ENGINE_DIR}}" demo-wasmbox
+
+  demo-wasmbox-oci:
+    desc: Mirror of go-quake1/engine `task demo-wasmbox-oci` -- pack pak+music, push to local registry, build OCI-streaming client, start wasmbox. Requires Docker + oras CLI.
+    cmds:
+      - task -d "{{.ENGINE_DIR}}" demo-wasmbox-oci
+
+  oci-pack:
+    desc: Mirror -- pack local pak+music into OCI image layout.
+    cmds:
+      - task -d "{{.ENGINE_DIR}}" oci-pack
+
+  oci-registry-up:
+    desc: Mirror -- start local OCI registry on :5000 via Docker.
+    cmds:
+      - task -d "{{.ENGINE_DIR}}" oci-registry-up
+
+  oci-registry-down:
+    desc: Mirror -- stop the local OCI registry container.
+    cmds:
+      - task -d "{{.ENGINE_DIR}}" oci-registry-down
+
+  oci-push:
+    desc: Mirror -- push the packed image layout to the local registry via oras.
+    cmds:
+      - task -d "{{.ENGINE_DIR}}" oci-push
+
   build:compositor:
     desc: Build wasmbox.wasm (embeds compositor.rb)
     env:
