@@ -186,15 +186,64 @@ end
 class WindowManager
   attr_reader :stack
 
+  # Geometry restored from browser storage, keyed by window title:
+  # { "xterm" => { x:, y:, w:, h: }, ... }. Compositor#restore_layout loads it
+  # from localStorage at boot (before the initial spawns); spawn and
+  # register_external apply it. Pure data — no JS lives in this class.
+  attr_accessor :saved_layout
+
   PALETTE = ["#1f6feb", "#2ea043", "#d29922", "#8957e5", "#db61a2", "#1f9da6"].freeze
+
+  LAYOUT_SEP = "\t"
 
   def initialize
     @stack = []
     @next_id = 0
     @cascade = 0
+    @saved_layout = {}
     # Records the most recent commit/lifecycle messages we have processed, for
     # introspection from tests. (Bounded to the last 16 — pure data.)
     @last_messages = []
+  end
+
+  # Apply any persisted geometry for win.title (size + position), overriding the
+  # default cascade slot. No-op when nothing was saved for this title.
+  def apply_saved(win)
+    s = @saved_layout[win.title]
+    return nil unless s
+    win.move_to(s[:x], s[:y])
+    win.resize_to(s[:w], s[:h])
+    win
+  end
+
+  # A cheap string that changes whenever geometry or stacking order changes, so
+  # the Compositor only writes storage on a real change.
+  def layout_signature
+    @stack.map { |w| "#{w.id}:#{w.x}:#{w.y}:#{w.w}:#{w.h}" }.join("|")
+  end
+
+  # Serialize the current layout to a storage string: one tab-separated
+  # "title<TAB>x<TAB>y<TAB>w<TAB>h" record per line (titles sanitized).
+  def serialize_layout
+    lines = []
+    @stack.each do |w|
+      key = w.title.to_s.gsub("\t", " ").gsub("\n", " ")
+      lines << [key, w.x, w.y, w.w, w.h].join(LAYOUT_SEP)
+    end
+    lines.join("\n")
+  end
+
+  # Parse serialize_layout output into @saved_layout. Malformed or short records
+  # are skipped; the last record for a given title wins.
+  def parse_layout(text)
+    out = {}
+    text.to_s.split("\n").each do |line|
+      parts = line.split(LAYOUT_SEP)
+      if parts.length >= 5
+        out[parts[0]] = { x: parts[1].to_i, y: parts[2].to_i, w: parts[3].to_i, h: parts[4].to_i }
+      end
+    end
+    @saved_layout = out
   end
 
   def windows = @stack
@@ -226,6 +275,7 @@ class WindowManager
     win = Window.new(@next_id, title, x, y, w, h, fill)
     @stack.push(win)
     focus(win)
+    apply_saved(win)
     win
   end
 
@@ -289,6 +339,7 @@ class WindowManager
     win = ExternalWindow.new(@next_id, title, x, y, granted_w, granted_h)
     @stack.push(win)
     focus(win)
+    apply_saved(win)
     win
   end
 
@@ -364,6 +415,30 @@ class Compositor
     @frames = 0
     @last_t = 0.0
     @fps = 0.0
+    @last_layout_sig = nil
+  end
+
+  # --- persistence ---------------------------------------------------------
+  # The window layout (size + position per title) survives a page reload by
+  # round-tripping through localStorage. restore_layout runs at boot, before the
+  # initial spawns; tick writes back whenever the layout actually changes.
+  LAYOUT_KEY = "wasmbox.layout"
+
+  # Load the saved layout into the WM so spawn/register_external can apply it.
+  # Degrades to an empty layout when storage is unavailable (e.g. private mode).
+  def restore_layout
+    store = JS.window.get("localStorage")
+    return nil unless store
+    raw = store.call("getItem", LAYOUT_KEY)
+    text = raw.nil? ? "" : raw.to_s
+    @wm.parse_layout(text)
+  end
+
+  # Persist the current layout. Called from tick only when the signature changed.
+  def save_layout
+    store = JS.window.get("localStorage")
+    return nil unless store
+    store.call("setItem", LAYOUT_KEY, @wm.serialize_layout)
   end
 
   # --- bridge wiring -------------------------------------------------------
@@ -665,6 +740,14 @@ class Compositor
       @fps = @fps == 0.0 ? inst : (@fps * 0.9 + inst * 0.1) # smoothed
     end
     @last_t = t
+
+    # Persist the layout whenever it actually changed (a move, resize, spawn,
+    # close or restack), not every frame.
+    sig = @wm.layout_signature
+    if sig != @last_layout_sig
+      @last_layout_sig = sig
+      save_layout
+    end
   end
 
   def render
@@ -796,11 +879,13 @@ end
 # Boot: build the WM, spawn a few clients, attach to the canvas and run.
 # ---------------------------------------------------------------------------
 wm = WindowManager.new
+comp = Compositor.new(wm)
+comp.restore_layout # localStorage -> wm.saved_layout, before the spawns apply it
+
 wm.spawn("xterm")
 wm.spawn("editor", 300, 190)
 wm.spawn("about rbgo", 220, 130)
 
-comp = Compositor.new(wm)
 comp.attach_to_canvas("screen")
 comp.start
 
