@@ -8,7 +8,7 @@
 "use strict";
 
 importScripts("./sdk.js");
-importScripts("./wasm_exec.js");
+importScripts("../../wasm_exec.js");
 
 // The dock is a bottom-anchored panel spanning a wide, short surface. It asks
 // for the "panel" role (anchored, always-on-top, undecorated); the compositor

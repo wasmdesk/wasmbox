@@ -49,9 +49,9 @@ end
 # Pure data + math; no JS here.
 # ---------------------------------------------------------------------------
 class Window
-  attr_accessor :id, :title, :x, :y, :w, :h, :fill, :focused
+  attr_accessor :id, :title, :x, :y, :w, :h, :fill, :focused, :role
 
-  def initialize(id, title, x, y, w, h, fill)
+  def initialize(id, title, x, y, w, h, fill, role = "window")
     @id = id
     @title = title
     @x = x
@@ -60,30 +60,45 @@ class Window
     @h = h
     @fill = fill
     @focused = false
+    # role is "window" (normal, decorated, cascade-placed) or "panel" (the dock:
+    # undecorated, bottom-center anchored, always-on-top). An unknown role MUST
+    # behave like a normal window, so anything that is not exactly "panel" is
+    # treated as a window. See docs/protocol.md + wasmdock INTEGRATION.md.
+    @role = role
   end
 
   def focused? = @focused
 
-  # Outer frame (decoration included): the titlebar sits above the body.
-  def frame_top = @y - Theme::TITLE_H
+  # A panel (dock-style surface) has no decoration and is anchored, never
+  # cascade-placed. Anything else is a normal window.
+  def panel? = @role == "panel"
+
+  # Outer frame (decoration included): the titlebar sits above the body. For a
+  # panel there is no titlebar, so the frame top is the body top.
+  def frame_top = panel? ? @y : @y - Theme::TITLE_H
   def right     = @x + @w
   def bottom    = @y + @h
 
-  # Rectangles, each as [x, y, w, h].
-  def titlebar_rect = [@x, frame_top, @w, Theme::TITLE_H]
+  # Rectangles, each as [x, y, w, h]. Panels carry no decoration rectangles, so
+  # the titlebar / close / resize hit-rects collapse to empty (zero-size) and
+  # the frame equals the body.
+  def titlebar_rect = panel? ? [@x, @y, 0, 0] : [@x, frame_top, @w, Theme::TITLE_H]
   def body_rect     = [@x, @y, @w, @h]
 
   def close_rect
+    return [@x, @y, 0, 0] if panel?
     pad = (Theme::TITLE_H - Theme::CLOSE_SZ) / 2
     [right - Theme::CLOSE_SZ - pad, frame_top + pad, Theme::CLOSE_SZ, Theme::CLOSE_SZ]
   end
 
   def resize_rect
+    return [@x, @y, 0, 0] if panel?
     [right - Theme::GRIP, bottom - Theme::GRIP, Theme::GRIP, Theme::GRIP]
   end
 
   # The whole decorated extent, used for "did the click land on me at all?".
-  def frame_rect = [@x, frame_top, @w, @h + Theme::TITLE_H]
+  # For a panel the decorated extent is just the body.
+  def frame_rect = panel? ? [@x, @y, @w, @h] : [@x, frame_top, @w, @h + Theme::TITLE_H]
 
   def hit?(rect, px, py)
     rx, ry, rw, rh = rect
@@ -91,9 +106,11 @@ class Window
   end
 
   def contains?(px, py)   = hit?(frame_rect, px, py)
-  def on_titlebar?(px, py)= hit?(titlebar_rect, px, py)
-  def on_close?(px, py)   = hit?(close_rect, px, py)
-  def on_resize?(px, py)  = hit?(resize_rect, px, py)
+  # A panel is never draggable, closable-by-box or resizable, so all three
+  # decoration hit-tests report "no hit" — those gestures can never start.
+  def on_titlebar?(px, py)= panel? ? false : hit?(titlebar_rect, px, py)
+  def on_close?(px, py)   = panel? ? false : hit?(close_rect, px, py)
+  def on_resize?(px, py)  = panel? ? false : hit?(resize_rect, px, py)
 
   def move_to(nx, ny)
     @x = nx
@@ -128,8 +145,8 @@ class ExternalWindow < Window
   # a sentinel through to Window#initialize because the existing decoration
   # path never reads `fill` for external windows (Compositor.draw_window
   # branches on #external? before fill_rect).
-  def initialize(id, title, x, y, w, h)
-    super(id, title, x, y, w, h, "#000000")
+  def initialize(id, title, x, y, w, h, role = "window")
+    super(id, title, x, y, w, h, "#000000", role)
     @worker = nil
     @sab = nil
     @image_data = nil
@@ -194,6 +211,22 @@ class WindowManager
 
   PALETTE = ["#1f6feb", "#2ea043", "#d29922", "#8957e5", "#db61a2", "#1f9da6"].freeze
 
+  # LAUNCHABLE is the trust boundary for the `launch` protocol message: it maps
+  # an opaque app id (sent by a client, e.g. the dock) to a COMPOSITOR-OWNED
+  # worker URL. A `launch` message never carries a URL/path/argv — only an id —
+  # and an id that is not a key here is dropped. This means a malicious client
+  # can at most ask to open one of the already-installed clients, never run
+  # arbitrary code. See wasmdock INTEGRATION.md §1.
+  #
+  # The dock ships ids "terminal"/"editor"/"files"; until those clients exist as
+  # their own workers they all map to the bundled hello client so a dock click
+  # visibly spawns a window through the normal external-client path.
+  LAUNCHABLE = {
+    "terminal" => "clients/hello/worker.js",
+    "editor"   => "clients/hello/worker.js",
+    "files"    => "clients/hello/worker.js",
+  }.freeze
+
   LAYOUT_SEP = "\t"
 
   def initialize
@@ -201,6 +234,11 @@ class WindowManager
     @next_id = 0
     @cascade = 0
     @saved_layout = {}
+    # The most recently registered external window. The Compositor wires the
+    # incoming worker to this on `welcome`. We track it explicitly because a
+    # panel is never focused, so wm.focused cannot identify a freshly-registered
+    # panel.
+    @last_registered = nil
     # Records the most recent commit/lifecycle messages we have processed, for
     # introspection from tests. (Bounded to the last 16 — pure data.)
     @last_messages = []
@@ -248,7 +286,10 @@ class WindowManager
 
   def windows = @stack
 
-  def focused = @stack.last
+  # The keyboard-focused window: the top-most NORMAL window. Panels (the dock)
+  # are excluded from the focus ring, so a panel is never "focused" even though
+  # it sits on top visually. Returns nil when no normal window exists.
+  def focused = normal_windows.last
 
   # Look up a window (in or out of process) by its compositor id.
   # Implemented as a manual scan because rbgo's block-`return` does not return
@@ -257,6 +298,42 @@ class WindowManager
     found = nil
     @stack.each { |w| found = w if w.id == id }
     found
+  end
+
+  # Map a launchable app id to its compositor-owned worker URL, or nil when the
+  # id is unknown. This is the registry lookup the `launch` handler validates
+  # against — it never trusts a URL from the message itself.
+  def launchable_url(app)
+    LAUNCHABLE[app.to_s]
+  end
+
+  # Normal (non-panel) windows, bottom-to-top, in stacking order.
+  def normal_windows
+    @stack.reject { |w| w.panel? }
+  end
+
+  # Panel windows (the dock), bottom-to-top. Drawn after every normal window so
+  # panels are always-on-top: a new normal window can never raise above a panel.
+  def panels
+    @stack.select { |w| w.panel? }
+  end
+
+  # The compositing order: every normal window first, then every panel on top.
+  # render() walks this so panels stay above the normal-window pool each frame
+  # regardless of focus/raise activity.
+  def ordered_windows
+    normal_windows + panels
+  end
+
+  # Anchor a panel to the bottom-center of a canvas_w x canvas_h desktop: the
+  # surface is horizontally centered and its bottom edge is flush to the canvas
+  # bottom (the dock paints its own bottom margin inside the surface). Because a
+  # panel is undecorated the surface IS the whole window, so no titlebar offset.
+  # Pure geometry — no JS. No-op for a non-panel window.
+  def anchor_panel(win, canvas_w, canvas_h)
+    return nil unless win&.panel?
+    win.move_to((canvas_w - win.w) / 2, canvas_h - win.h)
+    win
   end
 
   attr_reader :last_messages
@@ -286,11 +363,17 @@ class WindowManager
   end
 
   # Raise + focus. Moving to the end of the array puts the window on top.
+  #
+  # Panels are excluded from the keyboard-focus / raise policy: a panel is never
+  # the focused window and clicking it never steals focus from an app window. It
+  # still lives in the stack (so it renders and receives hover input), it just
+  # does not participate in focus. So for a panel we leave focus untouched.
   def focus(win)
     return nil unless win
+    return win if win.panel?
     unstack(win)
     @stack.push(win)
-    @stack.each { |o| o.focused = false }
+    @stack.each { |o| o.focused = false unless o.panel? }
     win.focused = true
     win
   end
@@ -309,15 +392,18 @@ class WindowManager
     hit
   end
 
-  # Alt+Tab-ish cycle: send the current top to the bottom and focus the next
-  # window down, so repeated presses walk the whole stack.
+  # Alt+Tab-ish cycle over the NORMAL windows only — panels (the dock) are
+  # excluded from the focus ring so Tab never lands on the dock. Sends the
+  # current focused window to the bottom of the normal pool and focuses the next
+  # normal window down, so repeated presses walk the whole app stack.
   def cycle
-    return nil if @stack.length < 2
-    top = @stack.last
-    next_win = @stack[-2]
+    normals = normal_windows
+    return nil if normals.length < 2
+    top = normals.last
+    next_win = normals[-2]
     unstack(top)            # drop the old top...
     @stack = [top] + @stack # ...and reinsert it at the bottom
-    focus(next_win)         # then raise+focus the one that was just below
+    focus(next_win)         # then raise+focus the next normal window down
   end
 
   # -------------------------------------------------------------------------
@@ -326,22 +412,43 @@ class WindowManager
   # to Worker.postMessage / onmessage lives in Compositor.
   # -------------------------------------------------------------------------
 
-  # Allocate a fresh window id + cascade slot for an external client, build an
-  # ExternalWindow and push it onto the stack with focus. Returns the window.
-  def register_external(title, req_w, req_h)
+  # Allocate a fresh window id for an external client, build an ExternalWindow
+  # and push it onto the stack. Returns the window.
+  #
+  # A normal window gets the next cascade slot and is raised+focused. A panel
+  # (role "panel", e.g. the dock) skips cascade placement entirely (the
+  # Compositor anchors it to the bottom-center each frame), is never focused,
+  # and is not subject to saved-layout geometry — its size is its own.
+  def register_external(title, req_w, req_h, role = "window")
     @next_id += 1
-    step = 28
-    x = 60 + (@cascade % 6) * step
-    y = 60 + (@cascade % 6) * step
-    @cascade += 1
     granted_w = [req_w, Theme::MIN_W].max
     granted_h = [req_h, Theme::MIN_H].max
-    win = ExternalWindow.new(@next_id, title, x, y, granted_w, granted_h)
+    panel = role == "panel"
+    if panel
+      x = 0
+      y = 0
+    else
+      step = 28
+      x = 60 + (@cascade % 6) * step
+      y = 60 + (@cascade % 6) * step
+      @cascade += 1
+    end
+    win = ExternalWindow.new(@next_id, title, x, y, granted_w, granted_h, role)
     @stack.push(win)
-    focus(win)
-    apply_saved(win)
-    win
+    @last_registered = win
+    if panel
+      win
+    else
+      focus(win)
+      apply_saved(win)
+      win
+    end
   end
+
+  # The window most recently created by register_external. The Compositor uses
+  # this to wire an incoming worker to its window on `welcome` (a panel is never
+  # focused, so wm.focused would not identify it).
+  def last_registered = @last_registered
 
   # Route a decoded client message (a Hash) to the right window. Returns the
   # symbol :welcome / :commit / :title / :closed / :ignored describing what we
@@ -350,10 +457,17 @@ class WindowManager
     record(msg)
     case msg[:type]
     when "hello"
-      win = register_external(msg[:title] || "client", msg[:w] || 200, msg[:h] || 150)
+      role = msg[:role].to_s == "panel" ? "panel" : "window"
+      win = register_external(msg[:title] || "client", msg[:w] || 200, msg[:h] || 150, role)
       win.sab = msg[:sab]
       win.stride = msg[:stride] || (4 * win.w)
       :welcome
+    when "launch"
+      # A client asks the compositor to start another client. Validate the app
+      # id against the LAUNCHABLE registry; an unknown id is dropped (never spawn
+      # from an untrusted id). The actual Worker spawn is JS-touching, so it lives
+      # in the Compositor — here we only report whether the id is launchable.
+      launchable_url(msg[:app]).nil? ? :ignored : :launch
     when "commit"
       win = find(msg[:window_id])
       return :ignored unless win&.external?
@@ -499,7 +613,9 @@ class Compositor
     result = @wm.handle_client_message(msg)
     case result
     when :welcome
-      win = @wm.focused
+      # The just-registered window is the one we want to wire to this worker.
+      # A panel is never focused, so we use last_registered rather than focused.
+      win = @wm.last_registered
       win.worker = worker
       build_image_data(win)
       welcome = JS.global.call("wasmboxMakeObject",
@@ -508,6 +624,12 @@ class Compositor
         "granted_w", win.w,
         "granted_h", win.h)
       JS.global.call("wasmboxPostMessage", worker, welcome)
+    when :launch
+      # Validated launch: map the app id to its compositor-owned worker URL and
+      # spawn it exactly like any other external client. The registry guarantees
+      # the URL is trusted; handle_client_message already dropped unknown ids.
+      url = @wm.launchable_url(msg[:app])
+      spawn_external(url) unless url.nil?
     when :closed
       # handle_client_message already removed the window; tell the worker.
       win_id = msg[:window_id]
@@ -525,7 +647,7 @@ class Compositor
     type = data.get("type")
     return nil if type.nil?
     h = { type: type.to_s }
-    %w[window_id w h stride title].each do |k|
+    %w[window_id w h stride title role app].each do |k|
       v = data.get(k)
       h[k.to_sym] = v unless v.nil?
     end
@@ -635,6 +757,15 @@ class Compositor
       return
     end
 
+    # A panel (the dock) is always-on-top and takes the click on geometric
+    # hover without stealing focus from the app windows. Forward mousedown to it
+    # (so an icon click reaches the dock, which then posts a `launch`) and stop.
+    panel = panel_at(mx, my)
+    if panel
+      forward_mouse_to_client(panel, "mousedown", mx, my, e) if panel.external?
+      return
+    end
+
     win = @wm.window_at(mx, my)
     unless win
       return # empty desktop, left button: nothing (right button = menu)
@@ -666,13 +797,31 @@ class Compositor
       end
       return
     end
-    # No drag in progress: forward hovers to the focused external window.
-    win = @wm.focused
-    return nil unless win&.external?
     mx = e.get("offsetX")
     my = e.get("offsetY")
+    # No drag in progress. A panel (the dock) receives pointer events on
+    # geometric HOVER, not on focus — so its magnification tracks the cursor
+    # without it ever being the keyboard-focused window. A hovered panel wins
+    # over the focused window (panels are always-on-top).
+    panel = panel_at(mx, my)
+    if panel
+      forward_mouse_to_client(panel, "mousemove", mx, my, e)
+      return
+    end
+    # Otherwise forward hovers to the focused external window.
+    win = @wm.focused
+    return nil unless win&.external?
     return nil unless win.hit?(win.body_rect, mx, my)
     forward_mouse_to_client(win, "mousemove", mx, my, e)
+  end
+
+  # The top-most panel whose body is under (px, py), or nil. Panels are the
+  # always-on-top stratum, so a panel under the pointer takes hover input even
+  # when a normal window is focused.
+  def panel_at(px, py)
+    hit = nil
+    @wm.panels.each { |p| hit = p if p.hit?(p.body_rect, px, py) }
+    hit
   end
 
   def on_contextmenu(e)
@@ -752,7 +901,11 @@ class Compositor
 
   def render
     draw_desktop
-    @wm.windows.each { |win| draw_window(win) } # bottom-to-top
+    # Re-anchor every panel to the bottom-center of the current canvas, so the
+    # dock tracks viewport resizes and never cascades.
+    @wm.panels.each { |p| @wm.anchor_panel(p, @width, @height) }
+    # Draw normal windows first, then panels on top (always-on-top stratum).
+    @wm.ordered_windows.each { |win| draw_window(win) }
     draw_menu if @menu
     draw_hud
   end
@@ -801,6 +954,15 @@ class Compositor
   end
 
   def draw_window(win)
+    # A panel (the dock) is undecorated: no titlebar, no close box, no resize
+    # grip, no frame border. Its surface IS the window, so we blit the SAB
+    # straight at the body rectangle (putImageData preserves the SAB's alpha, so
+    # the transparent corners outside the dock bar show the desktop through).
+    if win.panel?
+      blit_external(win) if win.external?
+      return
+    end
+
     active = win.focused?
 
     # Titlebar.
