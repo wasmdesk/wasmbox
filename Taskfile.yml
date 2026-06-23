@@ -25,8 +25,8 @@ tasks:
       - task --list
 
   build:
-    desc: Build wasmbox.wasm + hello client + copy wasm_exec.js
-    deps: [build:compositor, build:hello, build:serve]
+    desc: Build wasmbox.wasm + hello + dock clients + copy wasm_exec.js
+    deps: [build:compositor, build:hello, build:dock, build:serve]
 
   build:compositor:
     desc: Build wasmbox.wasm (embeds compositor.rb)
@@ -52,6 +52,18 @@ tasks:
     generates:
       - clients/hello/hello.wasm
 
+  build:dock:
+    desc: Build the wasmdock dock external client (clients/dock/dock.wasm)
+    env:
+      GOWORK: "off"
+      GOOS: js
+      GOARCH: wasm
+      CGO_ENABLED: "0"
+    cmds:
+      - go build -o clients/dock/dock.wasm ./clients/dock
+    generates:
+      - clients/dock/dock.wasm
+
   build:serve:
     desc: Build the native dev server (cmd/serve) with COOP/COEP headers
     env:
@@ -73,11 +85,11 @@ tasks:
     env:
       GOWORK: "off"
     cmds:
-      - go test ./clients/hello/...
+      - go test ./clients/hello/... ./clients/dock/...
       - go run ./cmd/rbtest
 
   clean:
     desc: Remove the build artifacts
     cmds:
-      - rm -f wasmbox.wasm wasm_exec.js clients/hello/hello.wasm
+      - rm -f wasmbox.wasm wasm_exec.js clients/hello/hello.wasm clients/dock/dock.wasm
       - rm -rf bin
