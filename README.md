@@ -1,3 +1,7 @@
+<p align="center">
+  <img src="https://raw.githubusercontent.com/wasmdesk/brand/main/png/color/256/wasmdesk.png" alt="wasmdesk" width="88" height="88">
+</p>
+
 <h1 align="center">wasmbox</h1>
 <p align="center"><strong>A window manager, in your browser, written in Ruby.</strong></p>
 
