@@ -1,0 +1,177 @@
+// Command rbtest runs the pure-Ruby half of compositor.rb (Theme, Window,
+// ExternalWindow, WindowManager) on the native go-embedded-ruby interpreter
+// and asserts the step-B window-manager logic — message dispatch, external
+// window registration, damage merging, input translation — behaves correctly.
+//
+// The JS-touching Compositor class plus the boot block at the bottom of
+// compositor.rb are deliberately skipped: the test loads only the bytes BEFORE
+// `class Compositor`, then appends a Ruby assertion script. This way the same
+// file that ships inside wasmbox.wasm is the file under test — no shadow copy
+// to drift from.
+//
+// Exit code is 0 on success, 1 on any failed assertion (Ruby `raise`s and the
+// Go wrapper surfaces the error). `task test` invokes it.
+//
+//go:build !js
+// +build !js
+
+package main
+
+import (
+	"bytes"
+	"flag"
+	"fmt"
+	"os"
+	"strings"
+
+	ruby "github.com/go-embedded-ruby/ruby"
+)
+
+// splitMarker is the first line of the Compositor class definition. Everything
+// before it is the pure WM half (safe off-wasm); everything from it onward
+// touches the JS bridge.
+const splitMarker = "class Compositor"
+
+func main() {
+	path := flag.String("rb", "compositor.rb", "path to compositor.rb (relative to cwd)")
+	raw := flag.Bool("raw", false, "run -rb file as-is without splitting on `class Compositor` or appending the WM test script (debug aid)")
+	flag.Parse()
+	src, err := os.ReadFile(*path)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "rbtest: read %s: %v\n", *path, err)
+		os.Exit(2)
+	}
+	compositorRB := string(src)
+	var script string
+	if *raw {
+		script = compositorRB
+	} else {
+		idx := strings.Index(compositorRB, splitMarker)
+		if idx < 0 {
+			fmt.Fprintln(os.Stderr, "rbtest: cannot locate `class Compositor` in compositor.rb")
+			os.Exit(2)
+		}
+		pure := compositorRB[:idx]
+		script = pure + "\n" + testScript
+	}
+	var out bytes.Buffer
+	if err := ruby.Run(script, &out); err != nil {
+		fmt.Fprintln(os.Stderr, out.String())
+		fmt.Fprintf(os.Stderr, "rbtest FAIL: %v\n", err)
+		os.Exit(1)
+	}
+	// Pass-through Ruby's stdout so test reports show.
+	os.Stdout.Write(out.Bytes())
+	fmt.Println("rbtest: PASS")
+}
+
+// testScript exercises the pure WM logic. Each `assert` raises on failure so
+// ruby.Run returns a non-nil error and rbtest exits non-zero. Stays free of
+// JS calls — the same script could run under MRI in principle.
+const testScript = `
+def assert(cond, msg)
+  raise "ASSERT FAILED: #{msg}" unless cond
+end
+
+def assert_eq(actual, expected, msg)
+  unless actual == expected
+    raise "ASSERT_EQ FAILED (#{msg}): expected #{expected.inspect}, got #{actual.inspect}"
+  end
+end
+
+# ---- WindowManager#spawn + focus ------------------------------------------
+wm = WindowManager.new
+w1 = wm.spawn("a")
+w2 = wm.spawn("b")
+assert_eq(wm.windows.length, 2, "spawn count")
+assert(wm.focused.equal?(w2), "focus on most recent spawn")
+assert(w2.focused?, "focused window marks itself")
+assert(!w1.focused?, "non-focused window is not focused")
+
+# ---- WindowManager#cycle (Alt+Tab) ----------------------------------------
+wm.cycle
+assert(wm.focused.equal?(w1), "cycle moves focus to next window")
+
+# ---- handle_client_message :welcome path ----------------------------------
+wm2 = WindowManager.new
+res = wm2.handle_client_message({ type: "hello", title: "ext", w: 200, h: 150,
+                                  sab: :fake_sab, stride: 800 })
+assert_eq(res, :welcome, "hello yields :welcome")
+ext = wm2.focused
+assert(ext.external?, "registered external window is external")
+assert_eq(ext.w, 200, "granted_w")
+assert_eq(ext.h, 150, "granted_h")
+assert_eq(ext.title, "ext", "title carried through")
+assert_eq(ext.sab, :fake_sab, "sab stored")
+assert_eq(ext.stride, 800, "stride stored")
+
+# ---- handle_client_message :commit + damage merge -------------------------
+# Fresh ExternalWindow comes pre-populated with full-surface damage so the
+# first frame is never blank — clear it before testing pure union semantics.
+ext.clear_damage
+res = wm2.handle_client_message({ type: "commit", window_id: ext.id,
+                                  damage: { x: 10, y: 10, w: 20, h: 20 } })
+assert_eq(res, :commit, "commit yields :commit")
+res = wm2.handle_client_message({ type: "commit", window_id: ext.id,
+                                  damage: { x: 100, y: 100, w: 30, h: 30 } })
+assert_eq(res, :commit, "second commit yields :commit")
+d = ext.pending_damage
+assert_eq(d[:x], 10, "merged damage x")
+assert_eq(d[:y], 10, "merged damage y")
+assert_eq(d[:w], 120, "merged damage w spans union")
+assert_eq(d[:h], 120, "merged damage h spans union")
+
+# ---- clip damage to surface bounds ----------------------------------------
+ext.clear_damage
+ext.merge_damage({ x: -5, y: -5, w: 1000, h: 1000 })
+cd = ext.clipped_damage
+assert_eq(cd[:x], 0, "clip x to 0")
+assert_eq(cd[:y], 0, "clip y to 0")
+assert_eq(cd[:w], 200, "clip w to surface w")
+assert_eq(cd[:h], 150, "clip h to surface h")
+
+# ---- handle_client_message :title + :closed -------------------------------
+res = wm2.handle_client_message({ type: "set_title", window_id: ext.id, title: "new" })
+assert_eq(res, :title, "set_title yields :title")
+assert_eq(ext.title, "new", "title updated")
+res = wm2.handle_client_message({ type: "request_close", window_id: ext.id })
+assert_eq(res, :closed, "request_close yields :closed")
+assert_eq(wm2.windows.length, 0, "window removed on close")
+
+# ---- handle_client_message :ignored paths ---------------------------------
+res = wm2.handle_client_message({ type: "commit", window_id: 999, damage: {} })
+assert_eq(res, :ignored, "commit on unknown id is ignored")
+res = wm2.handle_client_message({ type: "set_title", window_id: 999, title: "x" })
+assert_eq(res, :ignored, "set_title on unknown id is ignored")
+res = wm2.handle_client_message({ type: "request_close", window_id: 999 })
+assert_eq(res, :ignored, "close on unknown id is ignored")
+res = wm2.handle_client_message({ type: "request_resize", window_id: 1, w: 1, h: 1 })
+assert_eq(res, :ignored, "request_resize is reserved → :ignored")
+res = wm2.handle_client_message({ type: "what", window_id: 1 })
+assert_eq(res, :ignored, "unknown type is :ignored")
+
+# ---- ExternalWindow geometry inherits from Window -------------------------
+wm3 = WindowManager.new
+ew = wm3.register_external("g", 90, 60)
+assert_eq(ew.w, 90, "MIN_W honoured (= 90)")
+assert_eq(ew.h, 60, "MIN_H honoured (= 60)")
+# Below-min request gets clamped.
+ew2 = wm3.register_external("tiny", 10, 10)
+assert_eq(ew2.w, Theme::MIN_W, "clamp below MIN_W")
+assert_eq(ew2.h, Theme::MIN_H, "clamp below MIN_H")
+
+# ---- translate_input surface-local coordinates ----------------------------
+ew.move_to(50, 80)
+payload = wm3.translate_input(ew, :mousedown, 70, 100, button: 0)
+assert_eq(payload[:kind], :mousedown, "translate_input kind")
+assert_eq(payload[:x], 20, "translate_input x = screen_x - win.x")
+assert_eq(payload[:y], 20, "translate_input y = screen_y - win.y")
+assert_eq(payload[:button], 0, "translate_input button forwarded")
+
+# ---- last_messages bounded to 16 ------------------------------------------
+wm4 = WindowManager.new
+20.times { |i| wm4.handle_client_message({ type: "hello", title: "x#{i}", w: 100, h: 100 }) }
+assert(wm4.last_messages.length <= 16, "last_messages bounded to 16")
+
+puts "rbtest: ran all pure-WM assertions"
+`

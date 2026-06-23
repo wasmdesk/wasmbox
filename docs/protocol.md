@@ -175,10 +175,16 @@ Sent once. After this the worker may shut itself down (`self.close()`).
 ## Reading the SAB from Ruby
 
 Ruby code receives `sab` as a `JS::Ref` to the underlying
-`SharedArrayBuffer`. The SDK wraps it as a `Uint8ClampedArray` so the
-compositor can copy slices straight into an `ImageData`. The compositor uses
-`canvas.getContext('2d').putImageData(image, x, y, dx, dy, dw, dh)` for the
-blit, where `image` is created once per window and shares the SAB.
+`SharedArrayBuffer`. The compositor wraps it once as a `Uint8ClampedArray`
+view and keeps a sibling non-shared `ImageData` of the same size
+(`wasmboxNewImageData`). On every commit, the JS helper
+`wasmboxBlitFromSAB` copies the damage sub-rectangle out of the SAB view
+into the ImageData's own buffer and then calls
+`putImageData(image, x, y, dx, dy, dw, dh)`. The copy is needed because
+modern Chromium refuses to construct an `ImageData` over a
+SAB-backed array ("The provided Uint8ClampedArray value must not be
+shared"); the SAB still avoids an extra structured-clone of the surface
+across the worker/main boundary, which was the protocol's main goal.
 
 ## Out of scope for step B
 

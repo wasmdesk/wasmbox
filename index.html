@@ -67,12 +67,36 @@ globalThis.wasmboxSpawnWorker = function (url) {
   return new Worker(url, { type: "classic" });
 };
 
-// Construct an ImageData backed by the client's SharedArrayBuffer, so the
-// compositor can putImageData() the SAB pixels straight onto the canvas with
-// no per-frame copy. Returns the ImageData; the underlying Uint8ClampedArray
-// is a view onto the SAB, so writes from the worker are immediately visible.
+// Construct an ImageData of size w×h that the compositor will populate from
+// the client's SharedArrayBuffer on every blit. Browsers (Chrome included)
+// forbid constructing an ImageData directly over a SAB-backed Uint8ClampedArray
+// ("The provided Uint8ClampedArray value must not be shared"), so we keep a
+// non-shared backing store on the compositor side and copy the damage rect
+// out of the SAB at blit time via wasmboxBlitFromSAB. Returns an object
+// carrying the destination ImageData and the SAB view we copy from.
 globalThis.wasmboxNewImageData = function (sab, w, h) {
-  return new ImageData(new Uint8ClampedArray(sab), w, h);
+  return {
+    image: new ImageData(w, h),
+    src:   new Uint8ClampedArray(sab),
+    w: w, h: h,
+  };
+};
+
+// Copy the damage sub-rectangle from the SAB view into the ImageData's own
+// non-shared buffer, then putImageData onto the canvas at (dx, dy). Doing the
+// copy here (one tight typed-array slice loop) keeps the Ruby/JS bridge to a
+// single call per frame; the in-page memcpy is the only work we add over the
+// (currently unimplementable) shared-buffer fast path.
+globalThis.wasmboxBlitFromSAB = function (ctx, slot, dx, dy, sx, sy, sw, sh) {
+  const stride = slot.w * 4;
+  const dst = slot.image.data;
+  // Row-by-row copy of [sy..sy+sh) × [sx..sx+sw) from src to dst.
+  for (let row = 0; row < sh; row++) {
+    const srcOff = (sy + row) * stride + sx * 4;
+    const dstOff = (sy + row) * stride + sx * 4;
+    dst.set(slot.src.subarray(srcOff, srcOff + sw * 4), dstOff);
+  }
+  ctx.putImageData(slot.image, dx, dy, sx, sy, sw, sh);
 };
 
 // Build a plain JS object {k1:v1, k2:v2, ...} from a flat key/value list. Ruby

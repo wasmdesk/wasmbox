@@ -202,9 +202,12 @@ class WindowManager
   def focused = @stack.last
 
   # Look up a window (in or out of process) by its compositor id.
+  # Implemented as a manual scan because rbgo's block-`return` does not return
+  # from the enclosing method (it returns from the block).
   def find(id)
-    @stack.each { |w| return w if w.id == id }
-    nil
+    found = nil
+    @stack.each { |w| found = w if w.id == id }
+    found
   end
 
   attr_reader :last_messages
@@ -329,8 +332,11 @@ class WindowManager
   def translate_input(win, kind, screen_x, screen_y, extra = {})
     return nil unless win
     payload = { kind: kind }
-    if [:mousedown, :mouseup, :mousemove, :wheel].include?(kind) ||
-       ["mousedown", "mouseup", "mousemove", "wheel"].include?(kind)
+    # `||` line-continuation is unreliable in rbgo, so collect the two acceptable
+    # kind forms (symbol + string) into a single array first.
+    sym_kinds = [:mousedown, :mouseup, :mousemove, :wheel]
+    str_kinds = ["mousedown", "mouseup", "mousemove", "wheel"]
+    if sym_kinds.include?(kind) || str_kinds.include?(kind)
       payload[:x] = screen_x - win.x
       payload[:y] = screen_y - win.y
     end
@@ -338,8 +344,8 @@ class WindowManager
     payload
   end
 
-  private
-
+  # NOTE: `record` is logically private but rbgo does not implement Ruby's
+  # `private` modifier yet, so we leave the method public.
   def record(msg)
     @last_messages << msg
     @last_messages.shift while @last_messages.length > 16
@@ -414,7 +420,7 @@ class Compositor
   # welcome/closed postMessage) live here.
   def route_worker_message(worker, data)
     msg = decode_message(data)
-    return unless msg
+    return nil unless msg
     result = @wm.handle_client_message(msg)
     case result
     when :welcome
@@ -472,8 +478,8 @@ class Compositor
   # Tell a client its window is going away. Safe to call with an in-process
   # window — only external windows carry a worker ref.
   def notify_closed(win, reason)
-    return unless win.external?
-    return unless win.worker
+    return nil unless win.external?
+    return nil unless win.worker
     msg = JS.global.call("wasmboxMakeObject",
       "type", "closed",
       "window_id", win.id,
@@ -502,21 +508,21 @@ class Compositor
   def on_mouseup(e)
     @drag = nil
     win = @wm.focused
-    return unless win&.external?
+    return nil unless win&.external?
     mx = e.get("offsetX")
     my = e.get("offsetY")
-    return unless win.hit?(win.body_rect, mx, my)
+    return nil unless win.hit?(win.body_rect, mx, my)
     forward_mouse_to_client(win, "mouseup", mx, my, e)
   end
 
   def on_keyup(e)
     win = @wm.focused
-    return unless win&.external?
+    return nil unless win&.external?
     forward_key_to_client(win, "keyup", e)
   end
 
   def forward_mouse_to_client(win, kind, mx, my, e)
-    return unless win.worker
+    return nil unless win.worker
     button = e.get("button")
     payload = JS.global.call("wasmboxMakeObject",
       "type", "input",
@@ -530,7 +536,7 @@ class Compositor
   end
 
   def forward_key_to_client(win, kind, e)
-    return unless win.worker
+    return nil unless win.worker
     key  = e.get("key")
     code = e.get("code")
     payload = JS.global.call("wasmboxMakeObject",
@@ -587,10 +593,10 @@ class Compositor
     end
     # No drag in progress: forward hovers to the focused external window.
     win = @wm.focused
-    return unless win&.external?
+    return nil unless win&.external?
     mx = e.get("offsetX")
     my = e.get("offsetY")
-    return unless win.hit?(win.body_rect, mx, my)
+    return nil unless win.hit?(win.body_rect, mx, my)
     forward_mouse_to_client(win, "mousemove", mx, my, e)
   end
 
@@ -754,14 +760,15 @@ class Compositor
     stroke_rect(win.frame_rect, active ? Theme::BORDER_ACTIVE : Theme::BORDER_INACTIVE, Theme::BORDER)
   end
 
-  # Blit an external window's SharedArrayBuffer onto the canvas. The ImageData
-  # is a view onto the SAB (no per-frame copy), so we just call putImageData
-  # with the merged damage rectangle.
+  # Blit an external window's SharedArrayBuffer onto the canvas. Chrome forbids
+  # constructing an ImageData over a SAB-backed Uint8ClampedArray, so the JS
+  # helper wasmboxBlitFromSAB() owns a non-shared ImageData and copies the
+  # damage rect out of the SAB into it before putImageData.
   def blit_external(win)
-    return unless win.image_data
+    return nil unless win.image_data
     d = win.clipped_damage || { x: 0, y: 0, w: win.w, h: win.h }
-    @ctx.call("putImageData", win.image_data, win.x, win.y,
-              d[:x], d[:y], d[:w], d[:h])
+    JS.global.call("wasmboxBlitFromSAB", @ctx, win.image_data,
+                   win.x, win.y, d[:x], d[:y], d[:w], d[:h])
     win.clear_damage
   end
 
