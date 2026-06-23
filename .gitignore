@@ -3,6 +3,8 @@
 /wasm_exec.js
 /clients/hello/hello.wasm
 /clients/quake/quake.wasm
+/clients/dock/dock.wasm
+/clients/dock/wasm_exec.js
 /bin/
 
 # Agent/CI test harness deps

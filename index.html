@@ -175,6 +175,19 @@ function waitForCompositor() {
   // Auto-spawn the hello-world external client so the protocol is exercised
   // on first paint (visible in headless screenshots).
   globalThis.wasmboxSpawnExternal("clients/hello/worker.js");
+
+  // Auto-spawn Quake when its worker has been built into clients/quake/. The
+  // probe is a HEAD fetch so we don't 404 in the console when the asset is
+  // absent (developers running `task build`/`task serve` without the OCI
+  // demo flow will simply not see Quake -- not see an error). Same idea for
+  // wasmdock once it's been copied into clients/dock/.
+  function autoSpawnIfPresent(workerUrl) {
+    fetch(workerUrl, { method: "HEAD" })
+      .then(r => { if (r.ok) globalThis.wasmboxSpawnExternal(workerUrl); })
+      .catch(() => {});
+  }
+  autoSpawnIfPresent("clients/quake/worker.js");
+  autoSpawnIfPresent("clients/dock/worker.js");
 }
 </script>
 </body>

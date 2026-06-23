@@ -17,6 +17,7 @@ version: "3"
 vars:
   PORT: "8080"
   ENGINE_DIR: '{{default "../../go-quake1/engine" .ENGINE_DIR}}'
+  DOCK_DIR: '{{default "../wasmdock" .DOCK_DIR}}'
 
 tasks:
   default:
@@ -30,8 +31,36 @@ tasks:
     deps: [build:compositor, build:hello, build:serve]
 
   build:all:
-    desc: Build everything incl. the external go-quake1 client
-    deps: [build:compositor, build:hello, build:quake, build:serve]
+    desc: Build everything incl. the external go-quake1 + wasmdock clients
+    deps: [build:compositor, build:hello, build:quake, build:dock, build:serve]
+
+  build:dock:
+    desc: Build the wasmdock external client from the sibling wasmdesk/wasmdock repo into clients/dock/dock.wasm. The dock's worker.js + sdk.js are committed in clients/dock/; only the wasm + wasm_exec.js are built. Override DOCK_DIR if wasmdock repo lives elsewhere.
+    env:
+      GOWORK: "off"
+      GOOS: js
+      GOARCH: wasm
+      CGO_ENABLED: "0"
+    cmds:
+      - mkdir -p clients/dock
+      - |
+        if [ ! -d "{{.DOCK_DIR}}" ]; then
+          echo "wasmdock dir not found: {{.DOCK_DIR}}" >&2
+          echo "set DOCK_DIR=/path/to/wasmdesk/wasmdock" >&2
+          exit 1
+        fi
+      - go build -trimpath -ldflags '-s -w' -o "$(pwd)/clients/dock/dock.wasm" "{{.DOCK_DIR}}/"
+      - |
+        root="$(go env GOROOT)"
+        if [ -f "$root/lib/wasm/wasm_exec.js" ]; then
+          cp "$root/lib/wasm/wasm_exec.js" clients/dock/wasm_exec.js
+        else
+          cp "$root/misc/wasm/wasm_exec.js" clients/dock/wasm_exec.js
+        fi
+      - 'echo "build:dock: wrote clients/dock/dock.wasm ($(wc -c < clients/dock/dock.wasm) bytes) + clients/dock/wasm_exec.js"'
+    generates:
+      - clients/dock/dock.wasm
+      - clients/dock/wasm_exec.js
 
   build:quake:
     desc: Build the cmd/quake-wasmbox client from the sibling go-quake1/engine repo into clients/quake/quake.wasm (embeds the pak + music -- ~200 MB wasm). Override ENGINE_DIR if engine repo lives elsewhere.
@@ -143,5 +172,5 @@ tasks:
   clean:
     desc: Remove the build artifacts
     cmds:
-      - rm -f wasmbox.wasm wasm_exec.js clients/hello/hello.wasm
+      - rm -f wasmbox.wasm wasm_exec.js clients/hello/hello.wasm clients/dock/dock.wasm clients/dock/wasm_exec.js
       - rm -rf bin
