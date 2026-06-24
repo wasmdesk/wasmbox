@@ -1,0 +1,112 @@
+# Deploy the wasmbox demo to GitHub Pages.
+#
+# wasmbox is a pure-Go (CGO=0) Ruby WASM desktop: index.html instantiates
+# wasmbox.wasm (the compositor, with compositor.rb baked in via //go:embed) and
+# auto-spawns external clients (clients/{hello,dock}) that talk to it over
+# postMessage + SharedArrayBuffer. SAB needs the page to be cross-origin
+# isolated (COOP same-origin + COEP). GitHub Pages cannot set response headers,
+# so index.html ships the coi-serviceworker shim, which installs a service
+# worker that injects those headers and reloads the page once. No server config
+# is needed on Pages — the shim alone makes crossOriginIsolated === true.
+#
+# This workflow builds the wasm targets, assembles a static site mirroring the
+# repo layout the worker.js files expect (relative ../sdk/sdk.js etc.), and
+# deploys it with actions/deploy-pages. The published URL is
+# https://wasmdesk.github.io/wasmbox/ (org project page).
+#
+# clients/quake/quake.wasm is built from the sibling go-quake1/engine repo and
+# is large; we do NOT block the deploy on it. If it is not present the page's
+# autoSpawnIfPresent simply skips the Quake window (no error).
+name: Pages
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+# Pages deploy needs id-token + pages write; contents read for checkout.
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+# Allow only one in-flight Pages deployment; don't cancel a running one.
+concurrency:
+  group: pages
+  cancel-in-progress: false
+
+env:
+  GOWORK: "off"
+  CGO_ENABLED: "0"
+
+jobs:
+  build:
+    name: Build the static site
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.26.4"
+          check-latest: true
+          cache: true
+
+      - name: Build the compositor wasm (embeds compositor.rb)
+        run: GOOS=js GOARCH=wasm go build -o wasmbox.wasm .
+
+      - name: Build the external client wasm (hello + dock)
+        run: |
+          for name in hello dock; do
+            echo "building clients/${name}/${name}.wasm"
+            GOOS=js GOARCH=wasm go build -o "clients/${name}/${name}.wasm" "./clients/${name}"
+          done
+
+      - name: Copy Go's wasm_exec.js
+        run: |
+          src="$(go env GOROOT)/lib/wasm/wasm_exec.js"
+          [ -f "$src" ] || src="$(go env GOROOT)/misc/wasm/wasm_exec.js"
+          cp "$src" ./wasm_exec.js
+
+      - name: Assemble the static site (_site)
+        run: |
+          mkdir -p _site
+          # Page shell + shims.
+          cp index.html coi-serviceworker.min.js wasm_exec.js _site/
+          # Compositor wasm.
+          cp wasmbox.wasm _site/
+          # External clients: ship the worker.js + sdk.js + built wasm,
+          # mirroring the repo layout the relative importScripts() paths expect.
+          mkdir -p _site/clients/sdk
+          cp clients/sdk/sdk.js _site/clients/sdk/
+          for name in hello dock; do
+            mkdir -p "_site/clients/${name}"
+            cp "clients/${name}/worker.js" "_site/clients/${name}/"
+            cp "clients/${name}/${name}.wasm" "_site/clients/${name}/"
+            # dock ships its own sdk.js alongside worker.js; copy if present.
+            [ -f "clients/${name}/sdk.js" ] && cp "clients/${name}/sdk.js" "_site/clients/${name}/" || true
+          done
+          # Quake client: worker.js only. quake.wasm is built from the sibling
+          # engine repo and is large, so it is intentionally absent here; the
+          # page skips the Quake window when ./quake.wasm 404s (no hard error).
+          mkdir -p _site/clients/quake
+          cp clients/quake/worker.js _site/clients/quake/
+          echo "---- _site tree ----"
+          find _site -type f | sort
+
+      - name: Upload the Pages artifact
+        uses: actions/upload-pages-artifact@v3
+        with:
+          path: _site
+
+  deploy:
+    name: Deploy to GitHub Pages
+    needs: build
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - name: Deploy
+        id: deployment
+        uses: actions/deploy-pages@v4
