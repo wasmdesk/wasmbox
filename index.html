@@ -53,6 +53,30 @@
 
 <div id="status"><div>Loading the WebAssembly interpreter…</div></div>
 
+<!-- coi-serviceworker (https://github.com/gzuidhof/coi-serviceworker, MIT,
+     © Guido Zuidhof and contributors) must run FIRST. GitHub Pages cannot set
+     response headers, but SharedArrayBuffer needs the page to be cross-origin
+     isolated (COOP same-origin + COEP). This shim installs a service worker
+     that injects those headers on every response and reloads the page once so
+     `crossOriginIsolated === true` holds on Pages — no server config needed.
+     We opt into COEP `credentialless` (not `require-corp`) via window.coi so
+     cross-origin asset fetches (e.g. the Quake pak streamed from ghcr) are not
+     each required to carry a Cross-Origin-Resource-Policy header. -->
+<script>
+  window.coi = {
+    // coi-serviceworker reads these as predicates (it calls them), so each
+    // must be a FUNCTION, not a bare boolean. Returning true here selects
+    // COEP `credentialless` over `require-corp`, so cross-origin no-cors
+    // fetches (e.g. the Quake pak streamed from an OCI source) are allowed
+    // without each carrying a Cross-Origin-Resource-Policy header.
+    coepCredentialless: () => true,
+    // Keep the desktop quiet if the SW can't register (e.g. file://): the
+    // compositor + in-process windows still run; only SAB clients need COI.
+    quiet: true,
+  };
+</script>
+<script src="coi-serviceworker.min.js"></script>
+
 <script src="wasm_exec.js"></script>
 <script>
 // ---------------------------------------------------------------------------
