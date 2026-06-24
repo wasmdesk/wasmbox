@@ -54,6 +54,7 @@ const WASMBOX_BRIDGE = Object.freeze({
   M2C_RESIZE:            "resize",
   M2C_DOM_EVENT:         "dom_event",
   M2C_SPAWN_EXTERNAL:    "spawn_external",
+  M2C_SPAWN_FROM_OCI:    "spawn_from_oci",
 
   // compositor -> main
   C2M_READY:             "ready",
@@ -70,6 +71,14 @@ const WASMBOX_BRIDGE = Object.freeze({
   // of the public docs/protocol.md surface: it is purely the transport-setup
   // message that hands a freshly-spawned client its private MessagePort.
   COMP_TO_CLIENT_PORT: "__wasmbox_port",
+
+  // compositor -> external-client OCI asset handoff. Used only by the OCI
+  // launch path (wasmboxSpawnFromOCI): the compositor pulls the app's blobs
+  // out of an OCI registry, wraps each file in a Blob URL, and tells the
+  // freshly-spawned worker which URLs to load wasm_exec.js + <app>.wasm
+  // from. Static-path workers do not see this message + keep using their
+  // hard-coded relative paths -- backward compatible.
+  COMP_TO_CLIENT_ASSETS: "__wasmbox_assets",
 });
 
 // Expose for plain-script consumers (importScripts inside the worker).

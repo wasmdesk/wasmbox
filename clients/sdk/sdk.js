@@ -87,6 +87,33 @@
     swapChannel(m.port);
   });
 
+  // OCI assets handoff: when the compositor spawned us via
+  // `wasmboxSpawnFromOCI`, it sends a one-shot `__wasmbox_assets` envelope
+  // with blob URLs for wasm_exec.js + the app's <name>.wasm + the rest of
+  // the app's files. The worker.js can read these by awaiting
+  // `WasmboxClient.bootFromOCIAssets()` and use them in place of the
+  // hard-coded `./wasm_exec.js` / `./<app>.wasm` paths that work for the
+  // static spawn path. Static-path workers never receive this message; the
+  // returned promise resolves to `null` only on a fallback timeout (set via
+  // `WasmboxClient.bootFromOCIAssets({fallbackMs})`), so a worker that opts
+  // in to OCI loading can still race-detect the static path.
+  let ociAssets = null;
+  let ociAssetsResolve = null;
+  const ociAssetsPromise = new Promise((resolve) => { ociAssetsResolve = resolve; });
+  g.addEventListener("message", function bootAssetsHandler(ev) {
+    const m = ev.data;
+    if (!m || m.type !== "__wasmbox_assets") return;
+    g.removeEventListener("message", bootAssetsHandler);
+    ociAssets = {
+      wasm_exec_url: m.wasm_exec_url || null,
+      wasm_url:      m.wasm_url      || null,
+      wasm_name:     m.wasm_name     || null,
+      files:         m.files         || {},
+      ref:           m.ref           || null,
+    };
+    if (ociAssetsResolve) { ociAssetsResolve(ociAssets); ociAssetsResolve = null; }
+  });
+
   class WasmboxClient {
     constructor(opts) {
       const w = opts.w | 0;
@@ -220,6 +247,42 @@
   // call this -- the port arrives via the `__wasmbox_port` handoff -- but the
   // wire_test.js harness uses it to inject a synthetic port.
   WasmboxClient.useMessagePort = function (port) { swapChannel(port); };
+
+  // OCI assets accessor. Returns a Promise that resolves to the envelope
+  // the compositor sent via wasmboxSpawnFromOCI ({wasm_exec_url, wasm_url,
+  // wasm_name, files, ref}), or to `null` when the spawn was static. The
+  // promise model is necessary because postMessage delivery is async even
+  // for queued messages -- the worker's top-level script runs before its
+  // message handlers fire on the assets envelope.
+  //
+  // Worker.js implementations typically:
+  //
+  //   const assets = await WasmboxClient.bootFromOCIAssets({fallbackMs: 50});
+  //   const wasmExecURL = assets ? assets.wasm_exec_url : "../../wasm_exec.js";
+  //   const wasmURL     = assets ? assets.wasm_url      : "./hello.wasm";
+  //   importScripts(wasmExecURL);
+  //   ...
+  //
+  // The fallbackMs option (default 50 ms) is how long to wait before
+  // declaring "no assets envelope arrived, treat this as a static spawn".
+  // Set to 0 to disable the fallback (the promise then only resolves on a
+  // real envelope) -- useful for hard-OCI workers that have no static path.
+  WasmboxClient.bootFromOCIAssets = function (opts) {
+    if (ociAssets) return Promise.resolve(ociAssets);
+    const fallbackMs = (opts && typeof opts.fallbackMs === "number") ? opts.fallbackMs : 50;
+    if (fallbackMs <= 0) return ociAssetsPromise;
+    return Promise.race([
+      ociAssetsPromise,
+      new Promise((resolve) => setTimeout(() => resolve(ociAssets), fallbackMs)),
+    ]);
+  };
+
+  // Test seam: inject a canned OCI assets envelope, for harnesses that load
+  // the SDK directly (without going through the compositor's spawn path).
+  WasmboxClient._setOCIAssets = function (a) {
+    ociAssets = a;
+    if (ociAssetsResolve) { ociAssetsResolve(ociAssets); ociAssetsResolve = null; }
+  };
 
   g.WasmboxClient = WasmboxClient;
 })(self);

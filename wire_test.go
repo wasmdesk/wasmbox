@@ -166,3 +166,112 @@ func TestBridgeExportsPortHandoffConstant(t *testing.T) {
 		t.Errorf("bridge.js does not define COMP_TO_CLIENT_PORT = \"__wasmbox_port\"")
 	}
 }
+
+// TestBridgeExportsAssetsHandoffConstant pins the OCI-launch assets envelope
+// type next to the port handoff: both are transport-setup messages flowing
+// over the implicit `self` channel before application traffic starts on the
+// MessageChannel. A regression that splits the constant between files would
+// silently break the OCI client boot path.
+func TestBridgeExportsAssetsHandoffConstant(t *testing.T) {
+	bridge := readSource(t, "bridge.js")
+	if !strings.Contains(bridge, "COMP_TO_CLIENT_ASSETS") {
+		t.Errorf("bridge.js does not export COMP_TO_CLIENT_ASSETS (OCI assets handoff type)")
+	}
+	if !strings.Contains(bridge, `"__wasmbox_assets"`) {
+		t.Errorf("bridge.js does not define COMP_TO_CLIENT_ASSETS = \"__wasmbox_assets\"")
+	}
+}
+
+// TestCompositorSpawnsFromOCI pins the OCI launch path in the compositor
+// worker: it must import the loader, expose wasmboxSpawnFromOCI, send the
+// assets envelope BEFORE the port handoff, and dispatch the assets envelope
+// over `self` (not the per-client MessageChannel that does not exist yet at
+// assets-handoff time).
+func TestCompositorSpawnsFromOCI(t *testing.T) {
+	src := readSource(t, "compositor.worker.js")
+
+	// 1. The OCI loader is imported into the worker scope.
+	if !strings.Contains(src, `importScripts("./ociapps-loader.js")`) {
+		t.Errorf("compositor.worker.js does not importScripts ociapps-loader.js")
+	}
+
+	// 2. The public hook exists.
+	if !strings.Contains(src, "wasmboxSpawnFromOCI") {
+		t.Errorf("compositor.worker.js does not expose wasmboxSpawnFromOCI")
+	}
+
+	// 3. The spawn helper resolves an app through OCIAppsLoader.loadApp.
+	if !strings.Contains(src, ".loadApp(") {
+		t.Errorf("compositor.worker.js does not call loader.loadApp from the OCI spawn path")
+	}
+
+	// 4. Each pulled file is wrapped in a Blob URL.
+	if !strings.Contains(src, "URL.createObjectURL(new Blob(") {
+		t.Errorf("compositor.worker.js does not wrap OCI blobs in createObjectURL")
+	}
+
+	// 5. The assets envelope uses the bridge constant.
+	if !strings.Contains(src, "B.COMP_TO_CLIENT_ASSETS") {
+		t.Errorf("compositor.worker.js does not use B.COMP_TO_CLIENT_ASSETS for the assets handoff")
+	}
+
+	// 6. The Ruby-facing bus dispatcher exists (lets compositor.rb spawn an
+	//    OCI app via a CustomEvent on the same bus as static spawns).
+	if !strings.Contains(src, "wasmboxSpawnExternalOCI") {
+		t.Errorf("compositor.worker.js does not expose wasmboxSpawnExternalOCI")
+	}
+	if !strings.Contains(src, "wasmboxSpawnFromOCIAndAttach") {
+		t.Errorf("compositor.worker.js does not expose wasmboxSpawnFromOCIAndAttach (async spawn+attach helper)")
+	}
+
+	// 7. The OCI registry override hook is documented (we read it lazily so
+	//    a late assignment is honoured).
+	if !strings.Contains(src, "WASMBOX_OCI_REGISTRIES") {
+		t.Errorf("compositor.worker.js does not honour globalThis.WASMBOX_OCI_REGISTRIES")
+	}
+}
+
+// TestSDKExposesOCIAssetsBoot pins the SDK end of the OCI launch path: a
+// module-load assets listener stashes the envelope, and the public helper
+// returns a Promise so worker.js can await it before importScripts.
+func TestSDKExposesOCIAssetsBoot(t *testing.T) {
+	src := readSource(t, "clients/sdk/sdk.js")
+
+	// 1. The SDK listens on `self` for the magic assets type at module load.
+	if !strings.Contains(src, `"__wasmbox_assets"`) {
+		t.Errorf("clients/sdk/sdk.js does not handle the __wasmbox_assets envelope")
+	}
+
+	// 2. The helper exists.
+	if !strings.Contains(src, "bootFromOCIAssets") {
+		t.Errorf("clients/sdk/sdk.js does not expose WasmboxClient.bootFromOCIAssets")
+	}
+
+	// 3. Test seam exposed.
+	if !strings.Contains(src, "_setOCIAssets") {
+		t.Errorf("clients/sdk/sdk.js does not expose WasmboxClient._setOCIAssets (test seam)")
+	}
+}
+
+// TestOCIAppsLoaderShape pins the public API of the browser-side loader so
+// the compositor worker can rely on it without poking at internals. The Go
+// twin (github.com/wasmdesk/ociapps) carries the same surface; we re-pin
+// here because the JS loader is shipped as a separate file.
+func TestOCIAppsLoaderShape(t *testing.T) {
+	src := readSource(t, "ociapps-loader.js")
+	for _, want := range []string{
+		"class OCIAppsLoader",
+		"loadApp(",
+		"fetchManifest(",
+		"fetchBlob(",
+		"verifyDigest",
+		"ociapps.path/",
+		"sha256:",
+		"MemoryCache",
+		"IDBCache",
+	} {
+		if !strings.Contains(src, want) {
+			t.Errorf("ociapps-loader.js is missing required token %q", want)
+		}
+	}
+}

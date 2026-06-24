@@ -232,5 +232,25 @@ assert_eq(wml.launchable_url("terminal"), "clients/terminal/worker.js",
 assert_eq(wml.launchable_url("files"), "clients/files/worker.js",
           "files maps to its dedicated worker")
 
+# ---- launch registry: OCI descriptor shape (hash with :oci key) -----------
+# The "hello-oci" entry is a {oci: "hello:latest"} hash. handle_client_message
+# treats it as launchable (regardless of descriptor shape); launchable_url
+# returns nil for the hash shape and launchable_oci returns the ref. The
+# Compositor's :launch arm dispatches on which of the two is non-nil.
+assert(wml.launchable?("hello-oci"), "hello-oci is launchable (hash shape)")
+assert_eq(wml.handle_client_message({ type: "launch", app: "hello-oci" }), :launch,
+          "OCI-shape launch id yields :launch")
+assert(wml.launchable_url("hello-oci").nil?,
+       "launchable_url returns nil for the OCI-shape descriptor")
+assert_eq(wml.launchable_oci("hello-oci"), "hello:latest",
+          "launchable_oci returns the ref string")
+# Conversely, a static-path descriptor must not surface as an OCI ref.
+assert(wml.launchable_oci("terminal").nil?,
+       "launchable_oci returns nil for a static-path descriptor")
+# Unknown ids: every probe returns nil/false.
+assert(!wml.launchable?("nope"), "unknown id is not launchable")
+assert(wml.launchable_url("nope").nil?, "unknown id has no static url")
+assert(wml.launchable_oci("nope").nil?, "unknown id has no OCI ref")
+
 puts "rbtest: ran all pure-WM assertions"
 `

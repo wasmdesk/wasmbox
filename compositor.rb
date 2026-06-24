@@ -213,10 +213,27 @@ class WindowManager
 
   # LAUNCHABLE is the trust boundary for the `launch` protocol message: it maps
   # an opaque app id (sent by a client, e.g. the dock) to a COMPOSITOR-OWNED
-  # worker URL. A `launch` message never carries a URL/path/argv — only an id —
-  # and an id that is not a key here is dropped. This means a malicious client
-  # can at most ask to open one of the already-installed clients, never run
-  # arbitrary code. See wasmdock INTEGRATION.md §1.
+  # spawn descriptor. A `launch` message never carries a URL/path/argv — only
+  # an id — and an id that is not a key here is dropped. This means a
+  # malicious client can at most ask to open one of the already-installed
+  # apps, never run arbitrary code. See wasmdock INTEGRATION.md §1.
+  #
+  # Two descriptor shapes are supported (both equally trusted, since both live
+  # inside the compositor source):
+  #
+  #   String           — a static path to a worker.js the compositor serves
+  #                       from its own asset tree. Dispatched via
+  #                       `wasmboxSpawnWorker(url)`. Backward-compatible with
+  #                       every pre-OCI launch entry.
+  #
+  #   {oci: "<ref>"}   — an OCI image reference ("repo:tag"). Resolved at
+  #                       launch time via `wasmboxSpawnFromOCI(ref)`, which
+  #                       pulls the worker.js + wasm_exec.js + <app>.wasm out
+  #                       of the registry, wraps each in a Blob URL, and
+  #                       spawns a worker from those URLs. The default
+  #                       registry list is set by the compositor worker
+  #                       (DEFAULT_OCI_REGISTRIES); the caller can override
+  #                       it via `globalThis.WASMBOX_OCI_REGISTRIES`.
   #
   # The dock ships ids "terminal"/"editor"/"files". "terminal" and "files" map
   # to their dedicated placeholder clients (recognizable titles, distinct
@@ -224,9 +241,14 @@ class WindowManager
   # editor client lands. A click on a dock icon thus opens a window whose
   # title matches the icon, completing the user-visible launch chain.
   LAUNCHABLE = {
-    "terminal" => "clients/terminal/worker.js",
-    "editor"   => "clients/hello/worker.js",
-    "files"    => "clients/files/worker.js",
+    "terminal"  => "clients/terminal/worker.js",
+    "editor"    => "clients/hello/worker.js",
+    "files"     => "clients/files/worker.js",
+    # OCI demo ids (resolved against WASMBOX_OCI_REGISTRIES or the default
+    # http://127.0.0.1:5000 registry). The id "hello-oci" mirrors the bundled
+    # hello client but pulls it from the registry instead of from disk; it
+    # is what the Playwright OCI probe drives via wasmboxSpawnFromOCI.
+    "hello-oci" => { oci: "hello:latest" },
   }.freeze
 
   LAYOUT_SEP = "\t"
@@ -302,11 +324,31 @@ class WindowManager
     found
   end
 
-  # Map a launchable app id to its compositor-owned worker URL, or nil when the
-  # id is unknown. This is the registry lookup the `launch` handler validates
-  # against — it never trusts a URL from the message itself.
+  # Map a launchable app id to its compositor-owned worker URL, or nil when
+  # the id is unknown OR when the descriptor is an OCI-shaped Hash (in which
+  # case use launchable_oci instead). Kept as the original static-spawn lookup
+  # so legacy callers (and the rbtest assertions on built-in ids) still pass.
   def launchable_url(app)
-    LAUNCHABLE[app.to_s]
+    desc = LAUNCHABLE[app.to_s]
+    desc.is_a?(String) ? desc : nil
+  end
+
+  # Map a launchable app id to its OCI image reference ("repo:tag"), or nil
+  # when the id is unknown OR when the descriptor is a static-path String.
+  # The `:launch` dispatcher in the Compositor checks both shapes and routes
+  # to wasmboxSpawnWorker / wasmboxSpawnFromOCI accordingly.
+  def launchable_oci(app)
+    desc = LAUNCHABLE[app.to_s]
+    return nil unless desc.is_a?(Hash)
+    ref = desc[:oci]
+    ref.nil? ? nil : ref.to_s
+  end
+
+  # Generic "is this id launchable" probe — true if either shape is present.
+  # handle_client_message uses this so a new descriptor shape added in the
+  # future doesn't need a new gate; only the dispatcher needs to learn it.
+  def launchable?(app)
+    LAUNCHABLE.key?(app.to_s)
   end
 
   # Normal (non-panel) windows, bottom-to-top, in stacking order.
@@ -468,8 +510,9 @@ class WindowManager
       # A client asks the compositor to start another client. Validate the app
       # id against the LAUNCHABLE registry; an unknown id is dropped (never spawn
       # from an untrusted id). The actual Worker spawn is JS-touching, so it lives
-      # in the Compositor — here we only report whether the id is launchable.
-      launchable_url(msg[:app]).nil? ? :ignored : :launch
+      # in the Compositor — here we only report whether the id is launchable
+      # (under any supported descriptor shape: static path, OCI ref, ...).
+      launchable?(msg[:app]) ? :launch : :ignored
     when "commit"
       win = find(msg[:window_id])
       return :ignored unless win&.external?
@@ -575,7 +618,9 @@ class Compositor
   # The bridge cannot wrap a Ruby Proc into a JS function directly — only
   # JS::Ref#on does — so we route everything cross-language through DOM event
   # targets. A `__wasmbox_bus` element receives spawn requests; per-worker
-  # `__wasmbox_worker_N` elements receive incoming messages.
+  # `__wasmbox_worker_N` elements receive incoming messages. The OCI twin
+  # (`wasmboxSpawnExternalOCI(ref)`) dispatches `wasmbox-spawn-external-oci`
+  # on the same bus and we route it through spawn_external_oci.
   def expose_external_spawner
     @bus = @doc.call("createElement", "div")
     @bus.set("id", "__wasmbox_bus")
@@ -583,6 +628,10 @@ class Compositor
     @bus.on("wasmbox-spawn-external") do |e|
       url = e.get("detail")
       spawn_external(url.to_s)
+    end
+    @bus.on("wasmbox-spawn-external-oci") do |e|
+      ref = e.get("detail")
+      spawn_external_oci(ref.to_s)
     end
     @worker_seq = 0
     @workers_by_id = {}
@@ -603,6 +652,36 @@ class Compositor
     bus.on("wasmbox-msg") { |e| route_worker_message(worker, e.get("detail")) }
     JS.global.call("wasmboxAttachWorker", worker, bus_id)
     worker
+  end
+
+  # OCI twin of spawn_external. We register the bus + the wasmbox-msg
+  # listener up front (same shape as the static path), then hand the JS side
+  # a `wasmboxSpawnFromOCIAndAttach(ref, bus_id)` call which asynchronously
+  # pulls the manifest + blobs, spawns the worker from the resulting blob
+  # URLs, and attaches its `message` listener to the bus. The wrapper ref
+  # cannot be captured synchronously here (the JS spawn is async); instead,
+  # `wasmboxSpawnFromOCIAndAttach` stashes it on the bus element under
+  # `_wasmboxWrapper`, and route_worker_message pulls it back when the first
+  # inbound message lands. This keeps the static path lean while letting the
+  # async OCI path slot into the same wm/Compositor wiring as a static spawn.
+  def spawn_external_oci(ref)
+    @worker_seq += 1
+    seq = @worker_seq
+    bus_id = "__wasmbox_worker_#{seq}"
+    bus = @doc.call("createElement", "div")
+    bus.set("id", bus_id)
+    @doc.get("body").call("appendChild", bus)
+    # We do NOT have a worker ref yet — the JS spawn is async. The listener
+    # closes over the bus, which after the JS spawn carries _wasmboxWrapper;
+    # we pass that to route_worker_message as the worker ref for outbound
+    # postMessage on welcome/closed/launch.
+    @workers_by_id[seq] = { worker: nil, bus: bus, ref: ref }
+    bus.on("wasmbox-msg") do |e|
+      wrapper = bus.get("_wasmboxWrapper")
+      route_worker_message(wrapper, e.get("detail")) unless wrapper.nil?
+    end
+    JS.global.call("wasmboxSpawnFromOCIAndAttach", ref, bus_id)
+    nil
   end
 
   # Decode a JS message and route it. The pure-Ruby dispatch
@@ -627,11 +706,18 @@ class Compositor
         "granted_h", win.h)
       JS.global.call("wasmboxPostMessage", worker, welcome)
     when :launch
-      # Validated launch: map the app id to its compositor-owned worker URL and
-      # spawn it exactly like any other external client. The registry guarantees
-      # the URL is trusted; handle_client_message already dropped unknown ids.
+      # Validated launch: route by descriptor shape.
+      #   String      → wasmboxSpawnWorker(url) via spawn_external
+      #   {oci: ref}  → wasmboxSpawnFromOCI(ref) via spawn_external_oci
+      # The registry guarantees the descriptor is trusted; handle_client_message
+      # already dropped unknown ids.
       url = @wm.launchable_url(msg[:app])
-      spawn_external(url) unless url.nil?
+      if !url.nil?
+        spawn_external(url)
+      else
+        ref = @wm.launchable_oci(msg[:app])
+        spawn_external_oci(ref) unless ref.nil?
+      end
     when :closed
       # handle_client_message already removed the window; tell the worker.
       win_id = msg[:window_id]

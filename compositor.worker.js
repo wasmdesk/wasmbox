@@ -37,9 +37,60 @@
 "use strict";
 
 importScripts("./bridge.js");
+importScripts("./ociapps-loader.js");
 importScripts("./wasm_exec.js");
 
 const B = globalThis.WASMBOX_BRIDGE;
+
+// --- OCI launch path -----------------------------------------------------
+// `wasmboxSpawnFromOCI(ref)` is the OCI twin of `wasmboxSpawnWorker(url)`:
+// it pulls a wasmbox client app (worker.js + wasm_exec.js + <app>.wasm) out
+// of an OCI registry using the same multi-registry resolver shape as the
+// Go package github.com/wasmdesk/ociapps, then spawns a fresh Web Worker
+// from the BLOB URL of the pulled worker.js. Before the worker boots its
+// own client SDK we postMessage it a `__wasmbox_assets` envelope so the
+// worker.js can load wasm_exec.js + the app's .wasm from blob URLs instead
+// of from compositor-relative paths (the OCI app has no path of its own).
+//
+// Backward-compat: static-path workers (clients/hello/worker.js etc.) never
+// see this message and keep working unchanged. The port handoff (step C.1)
+// is identical -- spawnFromOCI just builds the Worker differently.
+//
+// Registries:
+//   The default is a single registry at http://127.0.0.1:5000 (matching the
+//   Taskfile oci-registry-up demo). Override either by setting
+//     globalThis.WASMBOX_OCI_REGISTRIES = [{url:"https://r1"},{url:"https://r2"}]
+//   from index.html / the compositor bootstrap BEFORE the worker boots, or
+//   by passing the M2C_BOOT message a `registries` field. We refresh the
+//   loader lazily on first spawnFromOCI so a late assignment is honoured.
+const DEFAULT_OCI_REGISTRIES = [{ url: "http://127.0.0.1:5000" }];
+
+let _ociLoader = null;
+function ociLoader() {
+  if (_ociLoader) return _ociLoader;
+  const regs = (globalThis.WASMBOX_OCI_REGISTRIES && globalThis.WASMBOX_OCI_REGISTRIES.length)
+    ? globalThis.WASMBOX_OCI_REGISTRIES
+    : DEFAULT_OCI_REGISTRIES;
+  _ociLoader = new globalThis.OCIAppsLoader(regs);
+  return _ociLoader;
+}
+
+// Test seam: replace the loader (e.g. with one whose cache is a MemoryCache
+// pre-seeded with canned bytes). Real callers never use this; the Playwright
+// OCI probe does.
+globalThis.wasmboxSetOCILoader = function (loader) { _ociLoader = loader; };
+
+// Pick the entrypoint .wasm file out of the app's file map. Convention: the
+// loader stores files keyed by their VFS-relative name; the app .wasm is the
+// single key ending in ".wasm". The compositor worker does not care about the
+// stem ("hello.wasm" vs "myapp.wasm") -- there is exactly one.
+function pickWasmFile(files) {
+  let pick = null;
+  for (const name of files.keys()) {
+    if (name.endsWith(".wasm")) { pick = name; break; }
+  }
+  return pick;
+}
 
 // --- DOM shim -------------------------------------------------------------
 // Synthetic event target used for `document.createElement("div")` results +
@@ -229,6 +280,103 @@ globalThis.wasmboxSpawnWorker = function (url) {
   };
 };
 
+// wasmboxSpawnFromOCI(ref): the OCI-launch twin of wasmboxSpawnWorker.
+//
+// Pipeline:
+//   1. loader.loadApp(ref): pull manifest + every annotated blob from the
+//      registry cluster (sha256-verified, IndexedDB-cached by digest).
+//   2. createObjectURL() per file -> {worker.js: <blob>, wasm_exec.js: <blob>,
+//      <app>.wasm: <blob>}. The browser keeps blob URLs alive for the
+//      lifetime of the worker -- we hold a strong ref on the wrapper so
+//      they outlive the spawn even if the page revokes its own refs.
+//   3. new Worker(blobURLOf("worker.js")) — Chromium + Firefox both accept a
+//      blob: URL as the script source for a dedicated worker, including
+//      under cross-origin isolation (the worker inherits COOP/COEP).
+//   4. postMessage `{type: COMP_TO_CLIENT_ASSETS, wasm_exec_url, wasm_url}`
+//      to the freshly-spawned worker BEFORE the existing port handoff. The
+//      client SDK's bootPortHandler is registered at module load, but the
+//      assets listener (in sdk.js) is too -- so a worker.js that opts in
+//      via WasmboxClient.bootFromOCIAssets gets the URLs in time.
+//   5. Hand the worker its MessageChannel port2 (same step-C.1 path as
+//      wasmboxSpawnWorker), so application traffic flows over the dedicated
+//      wire from message #1.
+//
+// Returns the same wrapper shape as wasmboxSpawnWorker so Ruby's
+// wasmboxAttachWorker / wasmboxPostMessage just work.
+globalThis.wasmboxSpawnFromOCI = async function (ref) {
+  const app = await ociLoader().loadApp(String(ref));
+  // Wrap every file in a blob URL so the spawned worker can fetch them by
+  // ordinary URL. The mime-type hints help the browser pick the right
+  // loader path (e.g. wasm streaming for application/wasm), though the
+  // worker code typically calls fetch() + instantiateStreaming itself.
+  const blobURLs = {};
+  const fileNames = Array.from(app.files.keys());
+  for (const name of fileNames) {
+    const bytes = app.files.get(name);
+    const mime = name.endsWith(".wasm")
+      ? "application/wasm"
+      : name.endsWith(".js")
+        ? "application/javascript"
+        : "application/octet-stream";
+    blobURLs[name] = URL.createObjectURL(new Blob([bytes], { type: mime }));
+  }
+  if (!blobURLs["worker.js"]) {
+    throw new Error("ociapps: app " + ref + " missing required file worker.js");
+  }
+  if (!blobURLs["wasm_exec.js"]) {
+    throw new Error("ociapps: app " + ref + " missing required file wasm_exec.js");
+  }
+  const wasmName = pickWasmFile(app.files);
+  if (!wasmName) {
+    throw new Error("ociapps: app " + ref + " has no .wasm file");
+  }
+
+  const worker = new Worker(blobURLs["worker.js"], { type: "classic" });
+
+  // 1. assets envelope -- delivered as message #1 so the worker's SDK has
+  // the blob URLs before it tries to importScripts wasm_exec.js. We send
+  // this on `self.onmessage` (the implicit nested-worker channel) rather
+  // than on the MessageChannel, because the SDK's bootPortHandler also
+  // listens on `self` for the port handoff -- one transport for setup,
+  // the other for application traffic. The asset listener fires before
+  // the SDK is even constructed, so it cannot be racy.
+  worker.postMessage({
+    type: B.COMP_TO_CLIENT_ASSETS,
+    wasm_exec_url: blobURLs["wasm_exec.js"],
+    wasm_url: blobURLs[wasmName],
+    wasm_name: wasmName,
+    // Forward every file so a richer client can pull additional assets
+    // (icons, fonts, ...) without re-implementing the manifest walk.
+    files: blobURLs,
+    ref: String(ref),
+  });
+
+  // 2. port handoff -- identical to wasmboxSpawnWorker.
+  const channel = new MessageChannel();
+  worker.postMessage({ type: B.COMP_TO_CLIENT_PORT, port: channel.port2 }, [channel.port2]);
+
+  return {
+    _worker: worker,
+    _port:   channel.port1,
+    _blobURLs: blobURLs, // strong ref so the URLs survive the spawn frame
+    postMessage(msg, transfer) {
+      if (transfer && transfer.length) channel.port1.postMessage(msg, transfer);
+      else                              channel.port1.postMessage(msg);
+    },
+    addEventListener(name, cb) { channel.port1.addEventListener(name, cb); },
+    removeEventListener(name, cb) { channel.port1.removeEventListener(name, cb); },
+    terminate() {
+      try { channel.port1.close(); } catch (_) {}
+      // Revoke blob URLs to free memory. Safe to call after the worker has
+      // already imported them.
+      for (const name of Object.keys(this._blobURLs)) {
+        try { URL.revokeObjectURL(this._blobURLs[name]); } catch (_) {}
+      }
+      worker.terminate();
+    },
+  };
+};
+
 // Build an ImageData of size w*h plus a non-shared backing copy that the blit
 // helper reads from. Identical to the step-A/B helper that used to live in
 // index.html -- moved here because the canvas now lives in the worker.
@@ -298,6 +446,62 @@ globalThis.wasmboxSpawnExternal = function (url) {
   dispatch();
 };
 
+// `wasmboxSpawnExternalOCI(ref)` -- OCI twin of wasmboxSpawnExternal. Dispatches
+// a `wasmbox-spawn-external-oci` CustomEvent on the bus; compositor.rb listens
+// for it and runs spawn_external_oci(ref), which then calls
+// wasmboxSpawnFromOCI(ref) + wires the resulting worker into the same per-
+// client bus as a static spawn. Decoupled via the bus pattern so the Ruby
+// side can register the bus listener up front, just like the static path.
+globalThis.wasmboxSpawnExternalOCI = function (ref) {
+  function dispatch() {
+    const bus = fakeDocument.getElementById("__wasmbox_bus");
+    if (!bus) { setTimeout(dispatch, 16); return; }
+    bus.dispatchEvent(new CustomEvent("wasmbox-spawn-external-oci", { detail: ref }));
+  }
+  dispatch();
+};
+
+// `wasmboxSpawnFromOCIAndAttach(ref, busId)` -- the bridge Ruby calls when it
+// wants the full spawn + wire-up done in one shot for an OCI app. The JS side
+// awaits the OCI fetch + spawn, then attaches the resulting wrapper to the
+// per-worker bus by id so subsequent compositor->client postMessages land on
+// the bus's wasmbox-msg listener. Errors are surfaced through console.error
+// (the relay forwards them to the page) so a fetch failure does not silently
+// no-op. Returns nothing -- the Promise is awaited inside this function.
+globalThis.wasmboxSpawnFromOCIAndAttach = function (ref, busId) {
+  (async () => {
+    let wrapper;
+    try {
+      wrapper = await globalThis.wasmboxSpawnFromOCI(ref);
+    } catch (e) {
+      console.error("wasmboxSpawnFromOCIAndAttach(" + ref + "): " + (e && e.stack ? e.stack : e));
+      return;
+    }
+    // Register a bus mapping so route_worker_message can find the wrapper
+    // by id later (the Ruby side stored the wrapper-by-bus too, but only
+    // for synchronous spawns; for OCI we publish the mapping here).
+    const bus = fakeDocument.getElementById(busId);
+    if (!bus) {
+      console.error("wasmboxSpawnFromOCIAndAttach(" + ref + "): bus " + busId + " not registered");
+      return;
+    }
+    // Same listener shape as wasmboxAttachWorker.
+    wrapper.addEventListener("message", function (e) {
+      bus.dispatchEvent(new CustomEvent("wasmbox-msg", { detail: e.data }));
+    });
+    if (wrapper._port && typeof wrapper._port.start === "function") {
+      wrapper._port.start();
+    }
+    // Republish the wrapper on the bus element so Ruby's
+    // route_worker_message can pull it back when an inbound message lands
+    // (in the static path, Ruby kept the wrapper in @workers_by_id; we
+    // attach it here so the OCI path matches without Ruby having to await
+    // a promise). Storing on the bus element via setAttribute is a no-op
+    // for JS; we use a plain property assignment instead.
+    bus._wasmboxWrapper = wrapper;
+  })();
+};
+
 // --- console relay (so Ruby's JS.log surfaces on the page) ---------------
 function postLog(level, text) {
   self.postMessage({ type: B.C2M_CONSOLE, level: level, text: String(text) });
@@ -351,6 +555,13 @@ self.addEventListener("message", async (ev) => {
 
     case B.M2C_SPAWN_EXTERNAL:
       globalThis.wasmboxSpawnExternal(String(m.url));
+      return;
+
+    case B.M2C_SPAWN_FROM_OCI:
+      // OCI spawn relay. Dispatched on the Ruby-listened bus so the
+      // compositor's per-worker wiring is identical to a static spawn (bus
+      // listener attached up front, JS spawn finishes asynchronously).
+      globalThis.wasmboxSpawnExternalOCI(String(m.ref));
       return;
   }
 });

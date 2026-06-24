@@ -200,6 +200,14 @@ window.addEventListener("resize", () => {
 globalThis.wasmboxSpawnExternal = function (url) {
   worker.postMessage({ type: B.M2C_SPAWN_EXTERNAL, url: String(url) });
 };
+
+// OCI twin: relay a `wasmboxSpawnFromOCI(ref)` call from the devtools console
+// (or a Playwright probe) to the compositor worker, which pulls the app's
+// blobs out of the registry and spawns a Worker from blob URLs. The page does
+// not own the OCI loader -- it only forwards the ref.
+globalThis.wasmboxSpawnFromOCI = function (ref) {
+  worker.postMessage({ type: B.M2C_SPAWN_FROM_OCI, ref: String(ref) });
+};
 </script>
 </body>
 </html>
