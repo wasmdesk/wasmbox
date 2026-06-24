@@ -7,12 +7,14 @@
 <style>
   html, body { margin: 0; height: 100%; background: #0b0d12; color: #e6e7ee;
     font: 13px/1.5 ui-monospace, "SF Mono", Menlo, Consolas, monospace; overflow: hidden; }
-  /* The compositor draws the whole desktop onto this canvas. */
+  /* The compositor draws the whole desktop onto this canvas. Step C: the
+     canvas backing store is transferred to a Web Worker via
+     transferControlToOffscreen(); main only owns the element + input. */
   #screen { display: block; position: fixed; inset: 0; width: 100vw; height: 100vh;
     cursor: default; touch-action: none; }
-  /* Boot status, hidden once the wasm interpreter is live. The [hidden] rule must
-     be explicit: an author `display` declaration otherwise beats the user-agent
-     `[hidden] { display: none }`, so el.hidden = true would not hide it. */
+  /* Boot status, hidden once the compositor worker signals ready. The [hidden]
+     rule must be explicit: an author `display` declaration otherwise beats the
+     user-agent `[hidden] { display: none }`. */
   #status[hidden] { display: none; }
   #status { position: fixed; inset: 0; display: grid; place-items: center;
     background: #0b0d12; z-index: 10; text-align: center; }
@@ -48,159 +50,156 @@
   </ul>
   <div class="foot">Wayland-inspired single-instance compositor +
     Openbox-style WM policy, written in pure Ruby, running in WebAssembly.
-    External clients run in Web Workers (step B).</div>
+    Step C: the compositor itself runs in a dedicated Web Worker; external
+    clients run in their own Web Workers and talk to the compositor worker
+    directly via postMessage + SharedArrayBuffer.</div>
 </aside>
 
-<div id="status"><div>Loading the WebAssembly interpreter…</div></div>
+<div id="status"><div>Loading the WebAssembly compositor worker…</div></div>
 
-<script src="wasm_exec.js"></script>
+<script src="bridge.js"></script>
 <script>
 // ---------------------------------------------------------------------------
-// Helpers that the Ruby compositor calls through the JS bridge. The bridge can
-// invoke methods on refs and read/write properties, but it cannot use `new`,
-// so any constructor we need from Ruby is wrapped here as a plain function.
+// Step C bootstrap. The main thread is a thin shell:
+//   - owns the <canvas> + <div id="status">
+//   - transfers the canvas's backing store to the compositor worker
+//   - forwards DOM events to the compositor worker
+//   - relays write-through localStorage messages to the real localStorage
+// All Ruby + wasm activity happens in compositor.worker.js.
 // ---------------------------------------------------------------------------
+"use strict";
 
-// Spawn a Web Worker by URL and return it. The worker boots an external client
-// (see clients/sdk/worker.js).
-globalThis.wasmboxSpawnWorker = function (url) {
-  return new Worker(url, { type: "classic" });
-};
-
-// Construct an ImageData of size w×h that the compositor will populate from
-// the client's SharedArrayBuffer on every blit. Browsers (Chrome included)
-// forbid constructing an ImageData directly over a SAB-backed Uint8ClampedArray
-// ("The provided Uint8ClampedArray value must not be shared"), so we keep a
-// non-shared backing store on the compositor side and copy the damage rect
-// out of the SAB at blit time via wasmboxBlitFromSAB. Returns an object
-// carrying the destination ImageData and the SAB view we copy from.
-globalThis.wasmboxNewImageData = function (sab, w, h) {
-  return {
-    image: new ImageData(w, h),
-    src:   new Uint8ClampedArray(sab),
-    w: w, h: h,
-  };
-};
-
-// Copy the damage sub-rectangle from the SAB view into the ImageData's own
-// non-shared buffer, then putImageData onto the canvas at (dx, dy). Doing the
-// copy here (one tight typed-array slice loop) keeps the Ruby/JS bridge to a
-// single call per frame; the in-page memcpy is the only work we add over the
-// (currently unimplementable) shared-buffer fast path.
-globalThis.wasmboxBlitFromSAB = function (ctx, slot, dx, dy, sx, sy, sw, sh) {
-  const stride = slot.w * 4;
-  const dst = slot.image.data;
-  // Row-by-row copy of [sy..sy+sh) × [sx..sx+sw) from src to dst.
-  for (let row = 0; row < sh; row++) {
-    const srcOff = (sy + row) * stride + sx * 4;
-    const dstOff = (sy + row) * stride + sx * 4;
-    dst.set(slot.src.subarray(srcOff, srcOff + sw * 4), dstOff);
-  }
-  // Composite, don't replace. putImageData ignores alpha blending, so a client's
-  // transparent pixels (e.g. the dock's rounded corners) would overwrite the
-  // desktop with black. Stage the surface on a per-slot offscreen canvas, then
-  // drawImage it onto the main canvas with the default source-over blend so
-  // transparent areas show the desktop beneath. Opaque clients are unaffected.
-  if (!slot.canvas) {
-    slot.canvas = document.createElement("canvas");
-    slot.canvas.width = slot.w;
-    slot.canvas.height = slot.h;
-    slot.octx = slot.canvas.getContext("2d");
-  }
-  slot.octx.putImageData(slot.image, 0, 0, sx, sy, sw, sh);
-  ctx.drawImage(slot.canvas, sx, sy, sw, sh, dx + sx, dy + sy, sw, sh);
-};
-
-// Build a plain JS object {k1:v1, k2:v2, ...} from a flat key/value list. Ruby
-// has no literal-object syntax across the bridge, so the compositor uses this
-// to assemble outgoing input/welcome/closed payloads.
-globalThis.wasmboxMakeObject = function () {
-  const o = {};
-  for (let i = 0; i < arguments.length; i += 2) o[arguments[i]] = arguments[i + 1];
-  return o;
-};
-
-// postMessage on a Worker ref. (Calling `.call("postMessage", obj)` works, but
-// going through a helper keeps the call site symmetric with the other ones.)
-globalThis.wasmboxPostMessage = function (worker, msg) {
-  worker.postMessage(msg);
-};
-
-// Bridge the worker's `message` event into a CustomEvent on a per-worker DOM
-// element ("__wasmbox_worker_N"). The Ruby compositor cannot register a JS
-// function directly (the bridge only wraps Ruby blocks via JS::Ref#on), so it
-// listens for `wasmbox-msg` on that element and we forward the message data
-// to it here. The bus element is created by Ruby (compositor.rb) and addressed
-// by id, so the lifecycle is one-shot.
-globalThis.wasmboxAttachWorker = function (worker, busId) {
-  worker.addEventListener("message", function (e) {
-    const bus = document.getElementById(busId);
-    if (!bus) return;
-    bus.dispatchEvent(new CustomEvent("wasmbox-msg", { detail: e.data }));
-  });
-};
-
-// Public hook: globalThis.wasmboxSpawnExternal(url) tells the Ruby compositor
-// to spawn a worker-backed window for `url`. It dispatches `wasmbox-spawn-
-// external` on the bus element the compositor created (__wasmbox_bus). If the
-// bus is not there yet (compositor still booting), we retry on rAF.
-globalThis.wasmboxSpawnExternal = function (url) {
-  function dispatch() {
-    const bus = document.getElementById("__wasmbox_bus");
-    if (!bus) { requestAnimationFrame(dispatch); return; }
-    bus.dispatchEvent(new CustomEvent("wasmbox-spawn-external", { detail: url }));
-  }
-  dispatch();
-};
-
-// ---------------------------------------------------------------------------
-// Compositor boot. wasmbox.wasm has compositor.rb baked in (//go:embed); main()
-// runs it, then sets globalThis.wasmboxReady — or globalThis.wasmboxError if
-// the embedded Ruby failed.
-// ---------------------------------------------------------------------------
+const B = globalThis.WASMBOX_BRIDGE;
 const statusEl = document.getElementById("status");
+const canvas = document.getElementById("screen");
+
 function fail(msg) {
   statusEl.innerHTML = '<div class="err">' + msg + '</div>';
   statusEl.hidden = false;
+  globalThis.wasmboxError = msg;
 }
 
-const go = new Go();
-WebAssembly.instantiateStreaming(fetch("wasmbox.wasm"), go.importObject)
-  .then(res => {
-    go.run(res.instance); // runs the embedded compositor, then blocks on select{}
-    waitForCompositor();
-  })
-  .catch(e => fail("Failed to load wasmbox.wasm: " + e + "<br><br>" +
-    "Serve this directory through <code>task serve</code> (the COOP/COEP " +
-    "headers + the application/wasm MIME type matter)."));
-
-// Poll for the flag main() publishes once the embedded compositor is running.
-function waitForCompositor() {
-  if (globalThis.wasmboxError) {
-    fail("Ruby error while starting the compositor:<br><pre>" +
-      String(globalThis.wasmboxError) + "</pre>");
-    return;
-  }
-  if (!globalThis.wasmboxReady) { setTimeout(waitForCompositor, 16); return; }
-  statusEl.hidden = true; // the canvas takes over
-
-  // Auto-spawn the hello-world external client so the protocol is exercised
-  // on first paint (visible in headless screenshots).
-  globalThis.wasmboxSpawnExternal("clients/hello/worker.js");
-
-  // Auto-spawn Quake when its worker has been built into clients/quake/. The
-  // probe is a HEAD fetch so we don't 404 in the console when the asset is
-  // absent (developers running `task build`/`task serve` without the OCI
-  // demo flow will simply not see Quake -- not see an error). Same idea for
-  // wasmdock once it's been copied into clients/dock/.
-  function autoSpawnIfPresent(workerUrl) {
-    fetch(workerUrl, { method: "HEAD" })
-      .then(r => { if (r.ok) globalThis.wasmboxSpawnExternal(workerUrl); })
-      .catch(() => {});
-  }
-  autoSpawnIfPresent("clients/quake/worker.js");
-  autoSpawnIfPresent("clients/dock/worker.js");
+// Match the canvas backing store to the viewport BEFORE transferControlToOff-
+// screen -- once the control is transferred we can no longer set width/height
+// from the main thread; the compositor's fit_canvas() does it in the worker.
+function sizeCanvasToViewport() {
+  canvas.width  = window.innerWidth;
+  canvas.height = window.innerHeight;
 }
+sizeCanvasToViewport();
+
+let offscreen;
+try {
+  offscreen = canvas.transferControlToOffscreen();
+} catch (e) {
+  fail("OffscreenCanvas is not available in this browser: " + e);
+  throw e;
+}
+
+const worker = new Worker("compositor.worker.js", { type: "classic" });
+
+// Boot the compositor: send the canvas + the initial viewport + the current
+// localStorage snapshot so restore_layout sees what survived the reload.
+const storageSnapshot = {};
+try {
+  for (let i = 0; i < localStorage.length; i++) {
+    const k = localStorage.key(i);
+    if (k != null) storageSnapshot[k] = localStorage.getItem(k);
+  }
+} catch (_) { /* private mode etc. -- harmless */ }
+
+worker.postMessage({
+  type: B.M2C_BOOT,
+  canvas: offscreen,
+  w: canvas.width,
+  h: canvas.height,
+  storage: storageSnapshot,
+}, [offscreen]);
+
+worker.addEventListener("message", (ev) => {
+  const m = ev.data;
+  if (!m || typeof m.type !== "string") return;
+  switch (m.type) {
+    case B.C2M_READY:
+      statusEl.hidden = true;
+      globalThis.wasmboxReady = true;
+      return;
+    case B.C2M_ERROR:
+      fail("Ruby error while starting the compositor:<br><pre>" + m.message + "</pre>");
+      return;
+    case B.C2M_CONSOLE:
+      // Surface Ruby's console.log lines on the page console so the headless
+      // harness (test/render.mjs) can match its startup-line assertion. We
+      // re-emit with console.log/console.error rather than going through the
+      // worker's own console (which the harness doesn't observe).
+      if (m.level === "error") console.error(m.text);
+      else                     console.log(m.text);
+      return;
+    case B.C2M_STORAGE_SET:
+      try { localStorage.setItem(m.key, m.value); } catch (_) { /* private mode */ }
+      return;
+    case B.C2M_STORAGE_REMOVE:
+      try { localStorage.removeItem(m.key); } catch (_) { /* private mode */ }
+      return;
+  }
+});
+
+// --- DOM event relay ------------------------------------------------------
+// Forward the events compositor.rb listens for. The compositor's shim
+// dispatches them on the matching synthetic EventTarget inside the worker so
+// the Ruby callbacks fire exactly as they did on the main thread.
+
+function relayKey(kind) {
+  return (e) => {
+    // Tab/F-keys move focus or trigger browser shortcuts; the Ruby compositor
+    // calls preventDefault() in its keydown handler when it consumes Tab, but
+    // that runs asynchronously in the worker -- too late. Pre-emptively
+    // suppress the keys the compositor is known to consume.
+    if (e.key === "Tab") e.preventDefault();
+    worker.postMessage({
+      type: B.M2C_DOM_EVENT,
+      target: B.TARGET_WINDOW,
+      kind: kind,
+      key: e.key,
+      code: e.code,
+    });
+  };
+}
+window.addEventListener("keydown", relayKey("keydown"));
+window.addEventListener("keyup",   relayKey("keyup"));
+
+function relayMouse(kind) {
+  return (e) => {
+    if (kind === "contextmenu") e.preventDefault();
+    worker.postMessage({
+      type: B.M2C_DOM_EVENT,
+      target: B.TARGET_CANVAS,
+      kind: kind,
+      offsetX: e.offsetX,
+      offsetY: e.offsetY,
+      button: e.button,
+    });
+  };
+}
+canvas.addEventListener("mousedown",   relayMouse("mousedown"));
+canvas.addEventListener("mousemove",   relayMouse("mousemove"));
+canvas.addEventListener("mouseup",     relayMouse("mouseup"));
+canvas.addEventListener("contextmenu", relayMouse("contextmenu"));
+
+// Viewport resize: send the new size to the worker so it can update its
+// shim's innerWidth/innerHeight + run the Ruby fit_canvas handler.
+window.addEventListener("resize", () => {
+  worker.postMessage({ type: B.M2C_RESIZE, w: window.innerWidth, h: window.innerHeight });
+});
+
+// --- public hook: legacy wasmboxSpawnExternal -----------------------------
+// In step B the page exposed `globalThis.wasmboxSpawnExternal(url)` to let the
+// devtools console spawn a client. Keep the call site by relaying it to the
+// compositor worker, which dispatches it on its own internal bus exactly like
+// the in-worker auto-spawns do.
+globalThis.wasmboxSpawnExternal = function (url) {
+  worker.postMessage({ type: B.M2C_SPAWN_EXTERNAL, url: String(url) });
+};
 </script>
 </body>
 </html>

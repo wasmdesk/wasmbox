@@ -203,6 +203,7 @@ tasks:
       GOWORK: "off"
     cmds:
       - go test ./clients/hello/... ./clients/dock/... ./clients/terminal/... ./clients/files/...
+      - go test ./
       - go run ./cmd/rbtest
 
   clean:

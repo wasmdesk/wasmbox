@@ -38,6 +38,7 @@ import { readFile } from "node:fs/promises";
 import { extname, join, normalize } from "node:path";
 import { fileURLToPath } from "node:url";
 import { chromium } from "playwright";
+import { PNG } from "pngjs";
 
 // Repo root is the parent of this test/ directory.
 const ROOT = fileURLToPath(new URL("..", import.meta.url));
@@ -180,33 +181,37 @@ try {
     }
 
     // --- Assertion 2: canvas painted -------------------------------------
-    const px = await page.evaluate(() => {
+    // Since step C the canvas's control was transferred to the compositor
+    // Web Worker via transferControlToOffscreen(), so the main thread can no
+    // longer call getContext on the <canvas> element. We rely on Playwright's
+    // page screenshot instead -- it captures the rendered surface from the
+    // browser's compositor, which gives the same ground truth.
+    const dim = await page.evaluate(() => {
       const c = document.getElementById("screen");
       if (!c) return { error: "no #screen canvas" };
-      const ctx = c.getContext("2d");
-      if (!ctx) return { error: "no 2d context" };
-      const { width, height } = c;
-      if (!width || !height) return { error: `zero-sized canvas ${width}x${height}` };
-      const data = ctx.getImageData(0, 0, width, height).data;
+      return { width: c.width, height: c.height };
+    });
+    if (dim.error) {
+      fail(`canvas readback failed: ${dim.error}`);
+    } else {
+      const shotBuf = await page.screenshot({ type: "png", fullPage: false });
+      const png = PNG.sync.read(shotBuf);
       let painted = 0;
       const colors = new Set();
-      for (let i = 0; i < data.length; i += 4) {
-        const r = data[i], g = data[i + 1], b = data[i + 2];
+      for (let i = 0; i < png.data.length; i += 4) {
+        const r = png.data[i], g = png.data[i + 1], b = png.data[i + 2];
         if (r || g || b) {
           painted++;
           if (colors.size < 4096) colors.add((r << 16) | (g << 8) | b);
         }
       }
-      return { width, height, painted, colors: colors.size };
-    });
-    if (px.error) {
-      fail(`canvas readback failed: ${px.error}`);
-    } else if (px.painted > MIN_PAINTED_PX) {
-      console.log(
-        `ok  canvas ${px.width}x${px.height} painted: ${px.painted} non-blank px, ${px.colors} colors`,
-      );
-    } else {
-      fail(`canvas looks blank: only ${px.painted} non-blank px (need > ${MIN_PAINTED_PX})`);
+      if (painted > MIN_PAINTED_PX) {
+        console.log(
+          `ok  canvas ${dim.width}x${dim.height} painted: ${painted} non-blank px in screenshot, ${colors.size} colors`,
+        );
+      } else {
+        fail(`canvas looks blank: only ${painted} non-blank px (need > ${MIN_PAINTED_PX})`);
+      }
     }
 
     // --- Assertion 3: startup line ---------------------------------------
@@ -280,35 +285,41 @@ try {
     try {
       // Give the worker time to spawn, send hello, and blit a frame.
       await page.waitForTimeout(1500);
-      const dock = await page.evaluate(() => {
+      // Like assertion 2, we now sample the screenshot instead of the canvas
+      // because step C transferred control to the compositor worker.
+      const dim2 = await page.evaluate(() => {
         const c = document.getElementById("screen");
-        const ctx = c.getContext("2d");
-        const { width: W, height: H } = c;
+        return { W: c.width, H: c.height };
+      });
+      const shot2 = await page.screenshot({ type: "png", fullPage: false });
+      const png2 = PNG.sync.read(shot2);
+      const dock = (() => {
+        const W = png2.width, H = png2.height;
         const cx = Math.floor(W / 2);
-        const halfBand = 260; // x within W/2 ± 260
+        const halfBand = 260;
         const x0 = Math.max(0, cx - halfBand);
         const bandW = Math.min(W, cx + halfBand) - x0;
-
-        // Bottom ~130px band should carry the dock bar + icons.
         const bandH = 130;
         const by = H - bandH;
-        const bd = ctx.getImageData(x0, by, bandW, bandH).data;
         let bandPainted = 0;
-        for (let i = 0; i < bd.length; i += 4) {
-          if (bd[i] || bd[i + 1] || bd[i + 2]) bandPainted++;
+        for (let y = by; y < by + bandH; y++) {
+          for (let x = x0; x < x0 + bandW; x++) {
+            const i = (y * W + x) * 4;
+            if (png2.data[i] || png2.data[i + 1] || png2.data[i + 2]) bandPainted++;
+          }
         }
-
-        // The 15px strip just above the dock band must be blank (no titlebar):
-        // a panel has no decoration.
         const stripH = 15;
         const sy = by - stripH;
-        const sd = ctx.getImageData(x0, sy, bandW, stripH).data;
         let stripPainted = 0;
-        for (let i = 0; i < sd.length; i += 4) {
-          if (sd[i] || sd[i + 1] || sd[i + 2]) stripPainted++;
+        for (let y = sy; y < sy + stripH; y++) {
+          for (let x = x0; x < x0 + bandW; x++) {
+            const i = (y * W + x) * 4;
+            if (png2.data[i] || png2.data[i + 1] || png2.data[i + 2]) stripPainted++;
+          }
         }
-        return { W, H, bandPainted, bandTotal: (bandW * bandH), stripPainted };
-      });
+        return { W, H, bandPainted, bandTotal: bandW * bandH, stripPainted };
+      })();
+      void dim2; // dim2 only kept to document the canvas size source.
       const bandOk = dock.bandPainted > 2000; // dock is a wide painted bar
       const stripBlank = dock.stripPainted === 0;
       if (bandOk) {
