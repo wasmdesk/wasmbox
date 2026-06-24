@@ -27,12 +27,12 @@ tasks:
       - task --list
 
   build:
-    desc: Build wasmbox.wasm + hello + dock clients + copy wasm_exec.js
-    deps: [build:compositor, build:hello, build:dock, build:serve]
+    desc: Build wasmbox.wasm + hello + dock + terminal + files clients + copy wasm_exec.js
+    deps: [build:compositor, build:hello, build:dock, build:terminal, build:files, build:serve]
 
   build:all:
     desc: Build everything incl. the external go-quake1 + wasmdock clients
-    deps: [build:compositor, build:hello, build:quake, build:dock, build:serve]
+    deps: [build:compositor, build:hello, build:quake, build:dock, build:terminal, build:files, build:serve]
 
   build:dock:
     desc: Build the wasmdock external client from the sibling wasmdesk/wasmdock repo into clients/dock/dock.wasm. The dock's worker.js + sdk.js are committed in clients/dock/; only the wasm + wasm_exec.js are built. Override DOCK_DIR if wasmdock repo lives elsewhere.
@@ -157,6 +157,30 @@ tasks:
     generates:
       - clients/dock/dock.wasm
 
+  build:terminal:
+    desc: Build the terminal placeholder external client (clients/terminal/terminal.wasm)
+    env:
+      GOWORK: "off"
+      GOOS: js
+      GOARCH: wasm
+      CGO_ENABLED: "0"
+    cmds:
+      - go build -o clients/terminal/terminal.wasm ./clients/terminal
+    generates:
+      - clients/terminal/terminal.wasm
+
+  build:files:
+    desc: Build the files placeholder external client (clients/files/files.wasm)
+    env:
+      GOWORK: "off"
+      GOOS: js
+      GOARCH: wasm
+      CGO_ENABLED: "0"
+    cmds:
+      - go build -o clients/files/files.wasm ./clients/files
+    generates:
+      - clients/files/files.wasm
+
   build:serve:
     desc: Build the native dev server (cmd/serve) with COOP/COEP headers
     env:
@@ -178,11 +202,11 @@ tasks:
     env:
       GOWORK: "off"
     cmds:
-      - go test ./clients/hello/... ./clients/dock/...
+      - go test ./clients/hello/... ./clients/dock/... ./clients/terminal/... ./clients/files/...
       - go run ./cmd/rbtest
 
   clean:
     desc: Remove the build artifacts
     cmds:
-      - rm -f wasmbox.wasm wasm_exec.js clients/hello/hello.wasm clients/dock/dock.wasm
+      - rm -f wasmbox.wasm wasm_exec.js clients/hello/hello.wasm clients/dock/dock.wasm clients/terminal/terminal.wasm clients/files/files.wasm
       - rm -rf bin

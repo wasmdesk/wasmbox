@@ -6,6 +6,8 @@
 /clients/quake/quake.wasm
 /clients/dock/dock.wasm
 /clients/dock/wasm_exec.js
+/clients/terminal/terminal.wasm
+/clients/files/files.wasm
 /bin/
 
 # Agent/CI test harness deps

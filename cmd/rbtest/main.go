@@ -225,6 +225,12 @@ assert(!wml.launchable_url("terminal").nil?, "terminal maps to a worker url")
 assert(wml.launchable_url("nope").nil?, "unknown id has no url")
 # A launch never spawns a window itself (the Compositor does, JS-side).
 assert_eq(wml.windows.length, 0, "launch dispatch creates no window in the WM")
+# terminal + files must map to their own dedicated workers (recognizable
+# titles + distinct surfaces), not to the generic hello placeholder.
+assert_eq(wml.launchable_url("terminal"), "clients/terminal/worker.js",
+          "terminal maps to its dedicated worker")
+assert_eq(wml.launchable_url("files"), "clients/files/worker.js",
+          "files maps to its dedicated worker")
 
 puts "rbtest: ran all pure-WM assertions"
 `

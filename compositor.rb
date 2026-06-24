@@ -218,13 +218,15 @@ class WindowManager
   # can at most ask to open one of the already-installed clients, never run
   # arbitrary code. See wasmdock INTEGRATION.md §1.
   #
-  # The dock ships ids "terminal"/"editor"/"files"; until those clients exist as
-  # their own workers they all map to the bundled hello client so a dock click
-  # visibly spawns a window through the normal external-client path.
+  # The dock ships ids "terminal"/"editor"/"files". "terminal" and "files" map
+  # to their dedicated placeholder clients (recognizable titles, distinct
+  # surfaces); "editor" stays on the bundled hello client until a dedicated
+  # editor client lands. A click on a dock icon thus opens a window whose
+  # title matches the icon, completing the user-visible launch chain.
   LAUNCHABLE = {
-    "terminal" => "clients/hello/worker.js",
+    "terminal" => "clients/terminal/worker.js",
     "editor"   => "clients/hello/worker.js",
-    "files"    => "clients/hello/worker.js",
+    "files"    => "clients/files/worker.js",
   }.freeze
 
   LAYOUT_SEP = "\t"
