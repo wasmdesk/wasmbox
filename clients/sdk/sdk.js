@@ -5,6 +5,16 @@
 // waits for `welcome`, exposes a `commit(damage)` flusher, and dispatches
 // incoming `input` events to a user-supplied callback.
 //
+// Channel (step C.1, MessageChannel-direct):
+//   The compositor sends each freshly-spawned client a dedicated MessagePort
+//   as its very first message: `{type:"__wasmbox_port", port: <MessagePort>}`.
+//   The SDK swaps from the implicit `self.parent` channel to that port before
+//   any application traffic, so every client gets a private wire to the
+//   compositor (Wayland-style). Until the port arrives, the SDK falls back to
+//   posting on `self` (which routes to `self.parent`), so a test harness that
+//   never sends a port still works -- backward-compatible with the step-C
+//   nested-worker direct path.
+//
 // See ../../docs/protocol.md for the wire format.
 //
 // Usage (inside the worker):
@@ -20,6 +30,63 @@
 "use strict";
 
 (function (g) {
+  // ---- channel ----------------------------------------------------------
+  // The channel is the EventTarget the SDK posts to + listens on. Default is
+  // `self` (postMessage to it goes to the spawner -- the compositor worker --
+  // and onmessage receives from the spawner). When the compositor hands us a
+  // MessagePort via the one-shot `__wasmbox_port` message, we swap to it.
+  //
+  // Why an explicit channel instead of just `self`: the compositor's own
+  // `self.onmessage` only handles main-thread bridge traffic (M2C_BOOT/...).
+  // A client `hello` posted on `self` before the port handoff would land
+  // there and be silently ignored. So the SDK BUFFERS application sends
+  // until activeChannel is a real MessagePort.
+  let activeChannel = null;       // set once the port handoff arrives
+  let activeClient  = null;       // set by WasmboxClient.start()
+  // Things start() (or commit/etc.) wanted to send before the port arrived.
+  // Flushed in FIFO order the moment the port is swapped in.
+  const pendingSends = [];
+
+  function flushPending() {
+    while (pendingSends.length) {
+      const [msg, transfer] = pendingSends.shift();
+      if (transfer && transfer.length) activeChannel.postMessage(msg, transfer);
+      else                              activeChannel.postMessage(msg);
+    }
+  }
+
+  // Post on the channel if it's ready, otherwise queue until it is.
+  function send(msg, transfer) {
+    if (activeChannel) {
+      if (transfer && transfer.length) activeChannel.postMessage(msg, transfer);
+      else                              activeChannel.postMessage(msg);
+    } else {
+      pendingSends.push([msg, transfer]);
+    }
+  }
+
+  function swapChannel(port) {
+    if (!port || activeChannel === port) return;
+    if (activeClient && activeClient._onMessage) {
+      port.addEventListener("message", activeClient._onMessage);
+      // MessagePort needs an explicit start() when consumed via
+      // addEventListener; the compositor side does the same.
+      try { port.start(); } catch (_) {}
+    }
+    activeChannel = port;
+    flushPending();
+  }
+
+  // Listen on `self` for the one-shot port handoff. Registered at module load
+  // so it catches the very first message the compositor sends after spawn,
+  // even before the worker constructs its WasmboxClient.
+  g.addEventListener("message", function bootPortHandler(ev) {
+    const m = ev.data;
+    if (!m || m.type !== "__wasmbox_port" || !m.port) return;
+    g.removeEventListener("message", bootPortHandler);
+    swapChannel(m.port);
+  });
+
   class WasmboxClient {
     constructor(opts) {
       const w = opts.w | 0;
@@ -39,11 +106,27 @@
       this._onMessage = (e) => this._handle(e.data);
     }
 
+    // The channel currently in use (MessagePort once the handoff lands, null
+    // before). Tests reach in here to assert the swap; real clients never
+    // need it.
+    get channel() { return activeChannel; }
+
     // Begin listening + post hello. Returns a Promise that resolves with the
-    // welcome payload (so the client can `await client.start()` and then paint).
+    // welcome payload (so the client can `await client.start()` and then
+    // paint). If the compositor has not yet handed us our MessagePort, the
+    // hello is queued and flushed the moment the port arrives -- so callers
+    // can construct + start() synchronously at module load without racing the
+    // port handoff.
     start() {
-      g.addEventListener("message", this._onMessage);
-      g.postMessage({
+      activeClient = this;
+      // If the port already arrived (rare: only if the SDK is loaded long
+      // after spawn), wire the listener now. Otherwise swapChannel will do
+      // it the moment the port lands.
+      if (activeChannel) {
+        activeChannel.addEventListener("message", this._onMessage);
+        try { activeChannel.start && activeChannel.start(); } catch (_) {}
+      }
+      send({
         type: "hello",
         title: this.title,
         w: this.w,
@@ -63,7 +146,7 @@
     commit(damage) {
       if (this.windowId === null) return;
       const d = damage || { x: 0, y: 0, w: this.w, h: this.h };
-      g.postMessage({
+      send({
         type: "commit",
         window_id: this.windowId,
         damage: d,
@@ -73,12 +156,12 @@
     setTitle(title) {
       this.title = title;
       if (this.windowId === null) return;
-      g.postMessage({ type: "set_title", window_id: this.windowId, title: title });
+      send({ type: "set_title", window_id: this.windowId, title: title });
     }
 
     requestClose() {
       if (this.windowId === null) return;
-      g.postMessage({ type: "request_close", window_id: this.windowId });
+      send({ type: "request_close", window_id: this.windowId });
     }
 
     // Write a single RGBA pixel into the SAB at (x, y). Bounds-checked; OOB is
@@ -125,11 +208,18 @@
           break;
         case "closed":
           for (const fn of this._closedCbs) fn(msg.reason || "user");
-          g.removeEventListener("message", this._onMessage);
+          if (activeChannel) {
+            try { activeChannel.removeEventListener("message", this._onMessage); } catch (_) {}
+          }
           break;
       }
     }
   }
+
+  // Test seam: force the SDK onto a specific MessagePort. Real clients never
+  // call this -- the port arrives via the `__wasmbox_port` handoff -- but the
+  // wire_test.js harness uses it to inject a synthetic port.
+  WasmboxClient.useMessagePort = function (port) { swapChannel(port); };
 
   g.WasmboxClient = WasmboxClient;
 })(self);

@@ -12,6 +12,15 @@
 // compositor does not implement `launch` yet, the message is simply ignored on
 // the host side — the dock keeps rendering.
 //
+// Channel (step C.1, MessageChannel-direct):
+//   The compositor sends each freshly-spawned client a dedicated MessagePort
+//   as its very first message: `{type:"__wasmbox_port", port: <MessagePort>}`.
+//   The SDK swaps from the implicit `self.parent` channel to that port before
+//   any application traffic, so every client gets a private wire to the
+//   compositor (Wayland-style). All application sends BUFFER until the port
+//   is in place, then flush in FIFO order -- so callers can `client.start()`
+//   synchronously at module load without racing the port handoff.
+//
 // See the wasmbox docs/protocol.md for the wire format.
 //
 // Usage (inside the worker):
@@ -27,6 +36,46 @@
 "use strict";
 
 (function (g) {
+  // Channel: set once the compositor hands us a MessagePort. Until then,
+  // application sends (hello/commit/...) buffer in pendingSends.
+  let activeChannel = null;
+  let activeClient  = null;
+  const pendingSends = [];
+
+  function flushPending() {
+    while (pendingSends.length) {
+      const [msg, transfer] = pendingSends.shift();
+      if (transfer && transfer.length) activeChannel.postMessage(msg, transfer);
+      else                              activeChannel.postMessage(msg);
+    }
+  }
+
+  function send(msg, transfer) {
+    if (activeChannel) {
+      if (transfer && transfer.length) activeChannel.postMessage(msg, transfer);
+      else                              activeChannel.postMessage(msg);
+    } else {
+      pendingSends.push([msg, transfer]);
+    }
+  }
+
+  function swapChannel(port) {
+    if (!port || activeChannel === port) return;
+    if (activeClient && activeClient._onMessage) {
+      port.addEventListener("message", activeClient._onMessage);
+      try { port.start(); } catch (_) {}
+    }
+    activeChannel = port;
+    flushPending();
+  }
+
+  g.addEventListener("message", function bootPortHandler(ev) {
+    const m = ev.data;
+    if (!m || m.type !== "__wasmbox_port" || !m.port) return;
+    g.removeEventListener("message", bootPortHandler);
+    swapChannel(m.port);
+  });
+
   class WasmboxClient {
     constructor(opts) {
       const w = opts.w | 0;
@@ -47,11 +96,17 @@
       this._onMessage = (e) => this._handle(e.data);
     }
 
+    get channel() { return activeChannel; }
+
     // Begin listening + post hello. Returns a Promise that resolves with the
     // welcome payload (so the client can `await client.start()` and then paint).
     start() {
-      g.addEventListener("message", this._onMessage);
-      g.postMessage({
+      activeClient = this;
+      if (activeChannel) {
+        activeChannel.addEventListener("message", this._onMessage);
+        try { activeChannel.start && activeChannel.start(); } catch (_) {}
+      }
+      send({
         type: "hello",
         title: this.title,
         role: this.role, // panel role (compositor may ignore → defaults to window)
@@ -72,7 +127,7 @@
     commit(damage) {
       if (this.windowId === null) return;
       const d = damage || { x: 0, y: 0, w: this.w, h: this.h };
-      g.postMessage({
+      send({
         type: "commit",
         window_id: this.windowId,
         damage: d,
@@ -82,19 +137,19 @@
     setTitle(title) {
       this.title = title;
       if (this.windowId === null) return;
-      g.postMessage({ type: "set_title", window_id: this.windowId, title: title });
+      send({ type: "set_title", window_id: this.windowId, title: title });
     }
 
     requestClose() {
       if (this.windowId === null) return;
-      g.postMessage({ type: "request_close", window_id: this.windowId });
+      send({ type: "request_close", window_id: this.windowId });
     }
 
     // launch asks the compositor to start another client. Protocol extension
     // (see INTEGRATION.md). Fire-and-forget: if the host has no handler the
     // message is dropped and the dock keeps working.
     launch(app) {
-      g.postMessage({ type: "launch", app: String(app) });
+      send({ type: "launch", app: String(app) });
     }
 
     // --- internals -------------------------------------------------------
@@ -113,11 +168,15 @@
           break;
         case "closed":
           for (const fn of this._closedCbs) fn(msg.reason || "user");
-          g.removeEventListener("message", this._onMessage);
+          if (activeChannel) {
+            try { activeChannel.removeEventListener("message", this._onMessage); } catch (_) {}
+          }
           break;
       }
     }
   }
+
+  WasmboxClient.useMessagePort = function (port) { swapChannel(port); };
 
   g.WasmboxClient = WasmboxClient;
 })(self);

@@ -181,11 +181,52 @@ if (typeof globalThis.cancelAnimationFrame !== "function") {
 }
 
 // --- helpers shared with the page (used to live in index.html) ------------
-// Spawn a child Web Worker by URL. Nested workers are supported by every
-// modern browser and inherit COOP/COEP, which keeps SharedArrayBuffer usable
-// inside the spawned client.
+// Spawn a child Web Worker by URL and hand it a dedicated MessageChannel.
+//
+// Step C.1 architecture: each external client gets its own MessagePort to the
+// compositor (Wayland-style direct connection). Until step C, the client had
+// to talk through `self.parent` -- i.e. the implicit channel between a nested
+// worker and its spawner. That works, but every client message landed in the
+// SAME `self.onmessage` on the compositor (we demuxed by sender via per-worker
+// bus elements), which is the kind of shared knot Wayland deliberately avoids.
+//
+// With an explicit MessageChannel:
+//   - port1 stays on the compositor side, retained per-window-worker so we can
+//     postMessage input/welcome/closed events to a SPECIFIC client.
+//   - port2 is transferred to the spawned worker immediately after `new Worker`
+//     in a one-shot `{type:"__wasmbox_port"}` message; the SDK swaps its
+//     channel from `self.parent` to that port.
+//
+// Returns a thin wrapper that LOOKS like a Worker to the rest of the
+// compositor (Ruby calls `wasmboxAttachWorker(w, busId)` +
+// `wasmboxPostMessage(w, msg)` on it) but routes message I/O through port1.
+// Nested workers still inherit COOP/COEP, so SharedArrayBuffer keeps working.
 globalThis.wasmboxSpawnWorker = function (url) {
-  return new Worker(url, { type: "classic" });
+  const worker = new Worker(url, { type: "classic" });
+  const channel = new MessageChannel();
+  // Hand the worker its end of the channel as the very first message it sees.
+  // The transfer list moves the port across the worker boundary; on the other
+  // side the SDK listens on `self.onmessage` for {type:"__wasmbox_port"} and
+  // swaps to it before any application traffic.
+  worker.postMessage({ type: B.COMP_TO_CLIENT_PORT, port: channel.port2 }, [channel.port2]);
+  // We deliberately do NOT call channel.port1.start() here: an unstarted port
+  // BUFFERS incoming messages until the consumer is ready. The compositor's
+  // Ruby `spawn_external` calls `wasmboxAttachWorker(wrapper, busId)` AFTER
+  // it returns, and only that helper knows the bus id to dispatch onto. If
+  // we started the port early, the client's `hello` (sent as soon as its SDK
+  // boots, racing the Ruby side) could land before any listener was attached
+  // and get silently dropped. wasmboxAttachWorker now does the start().
+  return {
+    _worker: worker,
+    _port:   channel.port1,
+    postMessage(msg, transfer) {
+      if (transfer && transfer.length) channel.port1.postMessage(msg, transfer);
+      else                              channel.port1.postMessage(msg);
+    },
+    addEventListener(name, cb) { channel.port1.addEventListener(name, cb); },
+    removeEventListener(name, cb) { channel.port1.removeEventListener(name, cb); },
+    terminate() { try { channel.port1.close(); } catch (_) {} worker.terminate(); },
+  };
 };
 
 // Build an ImageData of size w*h plus a non-shared backing copy that the blit
@@ -227,14 +268,22 @@ globalThis.wasmboxMakeObject = function () {
 globalThis.wasmboxPostMessage = function (worker, msg) { worker.postMessage(msg); };
 
 // Bridge a child worker's `message` event onto the compositor's per-worker bus
-// element. Same shape as the step-B helper, but the worker now relays through
-// the compositor worker's own document shim.
+// element. Same shape as the step-B helper, but in step C.1 `worker` is the
+// MessageChannel-port wrapper returned by wasmboxSpawnWorker -- so the
+// listener lands on port1, and we MUST call port.start() (via the wrapper's
+// _port handle) AFTER attaching so the SDK's `hello` is not dropped.
 globalThis.wasmboxAttachWorker = function (worker, busId) {
   worker.addEventListener("message", function (e) {
     const bus = fakeDocument.getElementById(busId);
     if (!bus) return;
     bus.dispatchEvent(new CustomEvent("wasmbox-msg", { detail: e.data }));
   });
+  // Drain any messages the client buffered before the listener existed.
+  // The wrapper exposes _port (the retained port1); plain Worker objects
+  // (used by tests or legacy code) have no _port -- start() is a no-op then.
+  if (worker._port && typeof worker._port.start === "function") {
+    worker._port.start();
+  }
 };
 
 // `wasmboxSpawnExternal(url)` -- still the public hook; called from inside

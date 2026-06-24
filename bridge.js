@@ -28,10 +28,20 @@
 //
 // The compositor worker spawns external client workers directly via
 // `new Worker(url)` -- nested workers work in every modern browser and inherit
-// cross-origin isolation. Main does NOT relay client traffic: each client
-// worker talks to the compositor worker via worker-to-worker postMessage,
-// exactly as it talked to the main thread in step B. That keeps the wire
-// protocol (docs/protocol.md) unchanged.
+// cross-origin isolation. Main does NOT relay client traffic.
+//
+// Step C.1 (MessageChannel-direct, Wayland-style): immediately after
+// `new Worker(url)`, the compositor creates a MessageChannel and posts
+//   `{ type: "__wasmbox_port", port: <port2> }`  (transferred)
+// to the freshly-spawned worker, retaining port1 for itself. The client SDK
+// (clients/sdk/sdk.js) listens for that one-shot message at module load and
+// swaps its outbound channel to port2. All subsequent client <-> compositor
+// traffic flows over the dedicated channel; the worker's own `self.onmessage`
+// stays quiet, so each client gets a private wire instead of sharing the
+// implicit nested-worker channel.
+//
+// The wire protocol (docs/protocol.md) is unchanged -- the only difference is
+// the EventTarget on which the messages flow.
 //
 // The constants are exported through both ESM (for clean imports) and
 // globalThis (so plain `<script>` and `importScripts` can pick them up).
@@ -55,6 +65,11 @@ const WASMBOX_BRIDGE = Object.freeze({
   // dom_event.target values
   TARGET_WINDOW: "window",
   TARGET_CANVAS: "canvas",
+
+  // compositor -> external-client one-shot port handoff (step C.1). Not part
+  // of the public docs/protocol.md surface: it is purely the transport-setup
+  // message that hands a freshly-spawned client its private MessagePort.
+  COMP_TO_CLIENT_PORT: "__wasmbox_port",
 });
 
 // Expose for plain-script consumers (importScripts inside the worker).
