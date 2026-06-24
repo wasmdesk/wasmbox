@@ -1,14 +1,20 @@
 // wasmdock external client (worker entry).
 //
-// The compositor spawns this script as a dedicated Worker. We load the SDK,
-// load Go's wasm_exec.js shim, then instantiate dock.wasm — which paints the
-// dock into the SDK's SAB and calls client.commit() per frame, and posts a
-// {type:"launch", app} message when an icon is clicked.
+// The compositor spawns this script as a dedicated Worker. We detect the
+// spawn path (static vs OCI = blob:) and load the SDK + wasm_exec.js + the
+// dock wasm accordingly. On the OCI path the assets are blob URLs delivered
+// by the compositor; the SDK is loaded from the host origin (the blob:
+// worker preserves self.location.origin for the page that minted the blob).
 
 "use strict";
 
-importScripts("./sdk.js");
-importScripts("../../wasm_exec.js");
+const isOCI = self.location.protocol === "blob:";
+if (isOCI) {
+  importScripts(self.location.origin + "/clients/sdk/sdk.js");
+} else {
+  importScripts("./sdk.js");
+  importScripts("../../wasm_exec.js");
+}
 
 // The dock is a bottom-anchored panel spanning a wide, short surface. It asks
 // for the "panel" role (anchored, always-on-top, undecorated); the compositor
@@ -27,9 +33,17 @@ const client = new WasmboxClient({
 self.wasmboxClient = client;
 
 client.start().then(async () => {
+  const assets = isOCI
+    ? await WasmboxClient.bootFromOCIAssets({ fallbackMs: 2000 })
+    : null;
+  if (isOCI) {
+    if (!assets) throw new Error("dock: spawned from blob: URL but no OCI assets envelope");
+    importScripts(assets.wasm_exec_url);
+  }
   const go = new Go();
+  const wasmURL = assets ? assets.wasm_url : "./dock.wasm";
   const wasm = await WebAssembly.instantiateStreaming(
-    fetch("./dock.wasm"), go.importObject);
+    fetch(wasmURL), go.importObject);
   // go.run() does not return until main() exits; the dock parks on `select {}`
   // to keep its handlers live, so we don't await it.
   go.run(wasm.instance);

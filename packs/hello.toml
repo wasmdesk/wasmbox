@@ -1,0 +1,19 @@
+# ociapps-pack manifest for the bundled `hello` client.
+#
+# Packs the three files the OCI spawn path needs into one image. The LHS is
+# the VFS-relative name the compositor's OCIAppsLoader exposes (under the
+# `ociapps.path/<name>` annotation); the RHS is the path under the -in
+# directory (clients/hello) the packer reads bytes from.
+#
+# The compositor's wasmboxSpawnFromOCI requires `worker.js` + `wasm_exec.js`
+# + at least one .wasm layer. Pack the hello build output verbatim; the
+# packer's media-type inference (.wasm/.js/* -> wasm/js/octet) gets the layer
+# descriptors right.
+
+mediatype = "application/vnd.oci.image.manifest.v1+json"
+
+[files]
+"worker.js"    = "worker.js"
+"wasm_exec.js" = "wasm_exec.js"
+"sdk.js"       = "sdk.js"
+"hello.wasm"   = "hello.wasm"

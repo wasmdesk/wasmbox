@@ -10,5 +10,16 @@
 /clients/files/files.wasm
 /bin/
 
+# OCI pack prep artifacts (materialised by `task ociapps:prep:<app>`).
+# clients/dock/sdk.js + clients/dock/wasm_exec.js are committed because the
+# dock builds in isolation; the others are transient build-time copies.
+/clients/hello/sdk.js
+/clients/hello/wasm_exec.js
+/clients/terminal/sdk.js
+/clients/terminal/wasm_exec.js
+/clients/files/sdk.js
+/clients/files/wasm_exec.js
+/clients/quake/wasm_exec.js
+
 # Agent/CI test harness deps
 /test/node_modules/

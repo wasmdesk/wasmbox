@@ -18,6 +18,16 @@ vars:
   PORT: "8080"
   ENGINE_DIR: '{{default "../../go-quake1/engine" .ENGINE_DIR}}'
   DOCK_DIR: '{{default "../wasmdock" .DOCK_DIR}}'
+  # OCIAPPS_DIR points at the sibling github.com/wasmdesk/ociapps checkout that
+  # owns the ociapps-pack + ociapps-push CLIs the demo-wasmbox-ociapps flow
+  # uses. We `go build` the two binaries out of that module rather than adding
+  # ociapps as a direct dep of wasmbox -- wasmbox's runtime never imports the
+  # Go package (the OCI loader on the browser side is the JS twin in
+  # ociapps-loader.js), so the dep is purely a build-time tool.
+  OCIAPPS_DIR: '{{default "../ociapps" .OCIAPPS_DIR}}'
+  # OCI registry the demo flow pushes to + the page pulls from. Matches the
+  # compositor worker's DEFAULT_OCI_REGISTRIES = [{url: "http://127.0.0.1:5000"}].
+  OCI_REGISTRY: '{{default "localhost:5000" .OCI_REGISTRY}}'
 
 tasks:
   default:
@@ -199,15 +209,244 @@ tasks:
 
   test:
     desc: Run native unit tests (Ruby + Go) — no browser required
+    deps: [build:ociapps-cli]
     env:
       GOWORK: "off"
     cmds:
       - go test ./clients/hello/... ./clients/dock/... ./clients/terminal/... ./clients/files/...
       - go test ./
+      - go test ./packs/...
       - go run ./cmd/rbtest
 
   clean:
     desc: Remove the build artifacts
     cmds:
       - rm -f wasmbox.wasm wasm_exec.js clients/hello/hello.wasm clients/dock/dock.wasm clients/terminal/terminal.wasm clients/files/files.wasm
-      - rm -rf bin
+      - rm -f clients/hello/sdk.js clients/hello/wasm_exec.js
+      - rm -f clients/terminal/sdk.js clients/terminal/wasm_exec.js
+      - rm -f clients/files/sdk.js clients/files/wasm_exec.js
+      - rm -f clients/quake/wasm_exec.js
+      - rm -rf bin /tmp/ociapps-hello /tmp/ociapps-dock /tmp/ociapps-terminal /tmp/ociapps-files /tmp/ociapps-quake
+
+  # ----- OCI image packaging + push (B3) -----------------------------------
+  #
+  # Per-client OCI image packs. Each `ociapps:pack:<app>` builds an OCI image
+  # layout under /tmp/ociapps-<app>/ with worker.js + wasm_exec.js + sdk.js
+  # (where applicable) + the app's .wasm. The annotation map carries
+  # `ociapps.path/<file>` -> blob digest so the JS-side OCIAppsLoader can
+  # rebuild a Map<name, bytes> at load time.
+  #
+  # The pusher uploads each blob + the manifest to a local OCI Distribution v2
+  # registry on :5000 (started by `ociapps:registry:up`, which mirrors the
+  # CORS+CORP env knobs `task demo-wasmbox-oci` uses so the browser fetch can
+  # cross origins).
+  #
+  # `demo-wasmbox-ociapps` is the one-shot: start the registry, build every
+  # client, pack + push each one, build the compositor, then serve on :{{.PORT}}.
+  # Open http://localhost:{{.PORT}}/?ociapps=1 to drive the OCI spawn path
+  # (boot-config.js reads the query string + auto-spawns each ref).
+
+  build:ociapps-cli:
+    desc: Build the ociapps-pack + ociapps-push CLIs out of the sibling wasmdesk/ociapps repo into bin/. Override OCIAPPS_DIR if it lives elsewhere.
+    env:
+      GOWORK: "off"
+    cmds:
+      - mkdir -p bin
+      - |
+        if [ ! -d "{{.OCIAPPS_DIR}}" ]; then
+          echo "ociapps dir not found: {{.OCIAPPS_DIR}}" >&2
+          echo "set OCIAPPS_DIR=/path/to/wasmdesk/ociapps" >&2
+          exit 1
+        fi
+      - go -C "{{.OCIAPPS_DIR}}" build -o "$(pwd)/bin/ociapps-pack" ./cmd/ociapps-pack
+      - go -C "{{.OCIAPPS_DIR}}" build -o "$(pwd)/bin/ociapps-push" ./cmd/ociapps-push
+    generates:
+      - bin/ociapps-pack
+      - bin/ociapps-push
+
+  ociapps:prep:hello:
+    desc: Materialise the wasm_exec.js + sdk.js + .wasm clients/hello needs for an OCI pack (the static spawn path resolves them via relative imports, so neither is committed in clients/hello/).
+    deps: [build:hello]
+    cmds:
+      - cp clients/sdk/sdk.js clients/hello/sdk.js
+      - |
+        root="$(go env GOROOT)"
+        if [ -f "$root/lib/wasm/wasm_exec.js" ]; then
+          cp "$root/lib/wasm/wasm_exec.js" clients/hello/wasm_exec.js
+        else
+          cp "$root/misc/wasm/wasm_exec.js" clients/hello/wasm_exec.js
+        fi
+    generates:
+      - clients/hello/sdk.js
+      - clients/hello/wasm_exec.js
+
+  ociapps:prep:dock:
+    desc: clients/dock already ships sdk.js + wasm_exec.js (so the dock builds in isolation). The pack picks them up verbatim; this task just guarantees dock.wasm exists.
+    deps: [build:dock]
+    cmds:
+      - 'echo "ociapps:prep:dock: nothing to do -- sdk.js + wasm_exec.js are committed in clients/dock/"'
+
+  ociapps:prep:terminal:
+    desc: Materialise the wasm_exec.js + sdk.js + .wasm clients/terminal needs for an OCI pack.
+    deps: [build:terminal]
+    cmds:
+      - cp clients/sdk/sdk.js clients/terminal/sdk.js
+      - |
+        root="$(go env GOROOT)"
+        if [ -f "$root/lib/wasm/wasm_exec.js" ]; then
+          cp "$root/lib/wasm/wasm_exec.js" clients/terminal/wasm_exec.js
+        else
+          cp "$root/misc/wasm/wasm_exec.js" clients/terminal/wasm_exec.js
+        fi
+    generates:
+      - clients/terminal/sdk.js
+      - clients/terminal/wasm_exec.js
+
+  ociapps:prep:files:
+    desc: Materialise the wasm_exec.js + sdk.js + .wasm clients/files needs for an OCI pack.
+    deps: [build:files]
+    cmds:
+      - cp clients/sdk/sdk.js clients/files/sdk.js
+      - |
+        root="$(go env GOROOT)"
+        if [ -f "$root/lib/wasm/wasm_exec.js" ]; then
+          cp "$root/lib/wasm/wasm_exec.js" clients/files/wasm_exec.js
+        else
+          cp "$root/misc/wasm/wasm_exec.js" clients/files/wasm_exec.js
+        fi
+    generates:
+      - clients/files/sdk.js
+      - clients/files/wasm_exec.js
+
+  ociapps:prep:quake:
+    desc: Materialise wasm_exec.js for clients/quake. (Quake never loads the JS SDK -- the Go side drives the protocol directly.)
+    deps: [build:quake]
+    cmds:
+      - |
+        root="$(go env GOROOT)"
+        if [ -f "$root/lib/wasm/wasm_exec.js" ]; then
+          cp "$root/lib/wasm/wasm_exec.js" clients/quake/wasm_exec.js
+        else
+          cp "$root/misc/wasm/wasm_exec.js" clients/quake/wasm_exec.js
+        fi
+    generates:
+      - clients/quake/wasm_exec.js
+
+  ociapps:pack:hello:
+    desc: Pack clients/hello into /tmp/ociapps-hello with ref hello:latest.
+    deps: [build:ociapps-cli, ociapps:prep:hello]
+    cmds:
+      - ./bin/ociapps-pack -in clients/hello -manifest packs/hello.toml -out /tmp/ociapps-hello -ref hello:latest
+
+  ociapps:pack:dock:
+    desc: Pack clients/dock into /tmp/ociapps-dock with ref dock:latest.
+    deps: [build:ociapps-cli, ociapps:prep:dock]
+    cmds:
+      - ./bin/ociapps-pack -in clients/dock -manifest packs/dock.toml -out /tmp/ociapps-dock -ref dock:latest
+
+  ociapps:pack:terminal:
+    desc: Pack clients/terminal into /tmp/ociapps-terminal with ref terminal:latest.
+    deps: [build:ociapps-cli, ociapps:prep:terminal]
+    cmds:
+      - ./bin/ociapps-pack -in clients/terminal -manifest packs/terminal.toml -out /tmp/ociapps-terminal -ref terminal:latest
+
+  ociapps:pack:files:
+    desc: Pack clients/files into /tmp/ociapps-files with ref files:latest.
+    deps: [build:ociapps-cli, ociapps:prep:files]
+    cmds:
+      - ./bin/ociapps-pack -in clients/files -manifest packs/files.toml -out /tmp/ociapps-files -ref files:latest
+
+  ociapps:pack:quake:
+    desc: Pack clients/quake into /tmp/ociapps-quake with ref quake:latest. Requires ENGINE_DIR + a built clients/quake/quake.wasm.
+    deps: [build:ociapps-cli, ociapps:prep:quake]
+    cmds:
+      - ./bin/ociapps-pack -in clients/quake -manifest packs/quake.toml -out /tmp/ociapps-quake -ref quake:latest
+
+  ociapps:pack:all:
+    desc: Pack every OCI client image (hello + dock + terminal + files; quake is opt-in via `task ociapps:pack:quake`).
+    deps: [ociapps:pack:hello, ociapps:pack:dock, ociapps:pack:terminal, ociapps:pack:files]
+
+  ociapps:push:hello:
+    desc: Push /tmp/ociapps-hello to {{.OCI_REGISTRY}}/hello:latest.
+    deps: [build:ociapps-cli]
+    cmds:
+      - ./bin/ociapps-push -in /tmp/ociapps-hello -ref {{.OCI_REGISTRY}}/hello:latest
+
+  ociapps:push:dock:
+    desc: Push /tmp/ociapps-dock to {{.OCI_REGISTRY}}/dock:latest.
+    deps: [build:ociapps-cli]
+    cmds:
+      - ./bin/ociapps-push -in /tmp/ociapps-dock -ref {{.OCI_REGISTRY}}/dock:latest
+
+  ociapps:push:terminal:
+    desc: Push /tmp/ociapps-terminal to {{.OCI_REGISTRY}}/terminal:latest.
+    deps: [build:ociapps-cli]
+    cmds:
+      - ./bin/ociapps-push -in /tmp/ociapps-terminal -ref {{.OCI_REGISTRY}}/terminal:latest
+
+  ociapps:push:files:
+    desc: Push /tmp/ociapps-files to {{.OCI_REGISTRY}}/files:latest.
+    deps: [build:ociapps-cli]
+    cmds:
+      - ./bin/ociapps-push -in /tmp/ociapps-files -ref {{.OCI_REGISTRY}}/files:latest
+
+  ociapps:push:quake:
+    desc: Push /tmp/ociapps-quake to {{.OCI_REGISTRY}}/quake:latest.
+    deps: [build:ociapps-cli]
+    cmds:
+      - ./bin/ociapps-push -in /tmp/ociapps-quake -ref {{.OCI_REGISTRY}}/quake:latest
+
+  ociapps:push:all:
+    desc: Push every packed OCI image to {{.OCI_REGISTRY}} (hello + dock + terminal + files).
+    deps: [ociapps:push:hello, ociapps:push:dock, ociapps:push:terminal, ociapps:push:files]
+
+  ociapps:registry:up:
+    desc: Start a local OCI Distribution v2 registry on :5000 in Docker, with CORS + CORP headers wide enough that the browser can fetch /v2/* from a different origin (the wasmbox compositor's page). No-op when a CORS-enabled registry is already listening on :5000 (e.g. the one the sibling `task demo-wasmbox-oci` started).
+    cmds:
+      - |
+        set -e
+        # If anything is already serving /v2/ with the CORS header the demo
+        # needs, reuse it -- two registry:2 containers cannot bind :5000 at
+        # the same time.
+        if curl -sf -H 'Origin: http://example.com' http://127.0.0.1:5000/v2/ -D - -o /dev/null 2>/dev/null | grep -qi '^access-control-allow-origin:'; then
+          echo "ociapps:registry:up: reusing existing CORS-enabled registry on :5000"
+          exit 0
+        fi
+        # Stop any leftover non-CORS registry on :5000 to make room.
+        if docker ps --format '{{`{{.Names}}`}}' | grep -q '^ociapps-registry$'; then
+          docker stop ociapps-registry || true
+        fi
+        docker run -d -p 5000:5000 --rm --name ociapps-registry \
+          -e 'REGISTRY_HTTP_HEADERS_Access-Control-Allow-Origin=[*]' \
+          -e 'REGISTRY_HTTP_HEADERS_Access-Control-Allow-Methods=[HEAD,GET,OPTIONS]' \
+          -e 'REGISTRY_HTTP_HEADERS_Cross-Origin-Resource-Policy=[cross-origin]' \
+          registry:2
+        # Wait for the registry to start accepting connections (registry:2 is
+        # usually ready inside 1 s; loop to be safe).
+        for i in 1 2 3 4 5 6 7 8 9 10; do
+          if curl -sf http://127.0.0.1:5000/v2/ >/dev/null; then break; fi
+          sleep 0.5
+        done
+
+  ociapps:registry:down:
+    desc: Stop the local OCI registry container started by ociapps:registry:up.
+    cmds:
+      - |
+        if docker ps --format '{{`{{.Names}}`}}' | grep -q '^ociapps-registry$'; then
+          docker stop ociapps-registry
+        else
+          echo "ociapps:registry:down: not running"
+        fi
+
+  demo-wasmbox-ociapps:
+    desc: One-shot OCI demo. Brings up a local registry, packs + pushes hello/dock/terminal/files as OCI images, builds the compositor + clients, then serves http://localhost:{{.PORT}}/. Open http://localhost:{{.PORT}}/?ociapps=1 (boot-config.js handles the auto-spawn) and the dock + clients land via the OCI streaming path instead of the static asset tree.
+    deps: [ociapps:registry:up]
+    cmds:
+      - task: ociapps:pack:all
+      - task: ociapps:push:all
+      - task: build
+      - 'echo ""'
+      - 'echo "demo-wasmbox-ociapps: registry at http://localhost:5000/v2/_catalog"'
+      - 'echo "demo-wasmbox-ociapps: open http://localhost:{{.PORT}}/?ociapps=1"'
+      - 'echo ""'
+      - ./bin/wasmbox-serve -addr :{{.PORT}}

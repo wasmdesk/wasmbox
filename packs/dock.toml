@@ -1,0 +1,16 @@
+# ociapps-pack manifest for the wasmdock client.
+#
+# The dock keeps its own sdk.js sibling in clients/dock/ (so it builds without
+# reaching across the asset tree). We still pack sdk.js into the OCI image as
+# an extra annotated file so a richer OCI consumer can pull it on demand
+# (the bundled spawn path imports the SDK from an absolute URL instead, so
+# the runtime fetches it once from the host page rather than from the
+# blob-URL'd worker -- see clients/dock/worker.js for the OCI-aware import).
+
+mediatype = "application/vnd.oci.image.manifest.v1+json"
+
+[files]
+"worker.js"    = "worker.js"
+"wasm_exec.js" = "wasm_exec.js"
+"sdk.js"       = "sdk.js"
+"dock.wasm"    = "dock.wasm"

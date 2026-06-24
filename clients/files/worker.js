@@ -6,12 +6,18 @@
 //
 // Spawned by the compositor when the dock posts {type:"launch", app:"files"}.
 // Loads the SDK + Go's wasm_exec.js, instantiates files.wasm, which paints a
-// "Files" placeholder surface and parks waiting for input.
+// "Files" placeholder surface and parks waiting for input. Supports both the
+// static-path spawn and the OCI-stream spawn (blob: worker URL).
 
 "use strict";
 
-importScripts("../sdk/sdk.js");
-importScripts("../../wasm_exec.js");
+const isOCI = self.location.protocol === "blob:";
+if (isOCI) {
+  importScripts(self.location.origin + "/clients/sdk/sdk.js");
+} else {
+  importScripts("../sdk/sdk.js");
+  importScripts("../../wasm_exec.js");
+}
 
 const client = new WasmboxClient({ title: "Files", w: 360, h: 220 });
 
@@ -21,9 +27,17 @@ const client = new WasmboxClient({ title: "Files", w: 360, h: 220 });
 self.wasmboxClient = client;
 
 client.start().then(async () => {
+  const assets = isOCI
+    ? await WasmboxClient.bootFromOCIAssets({ fallbackMs: 2000 })
+    : null;
+  if (isOCI) {
+    if (!assets) throw new Error("files: spawned from blob: URL but no OCI assets envelope");
+    importScripts(assets.wasm_exec_url);
+  }
   const go = new Go();
+  const wasmURL = assets ? assets.wasm_url : "./files.wasm";
   const wasm = await WebAssembly.instantiateStreaming(
-    fetch("./files.wasm"), go.importObject);
+    fetch(wasmURL), go.importObject);
   // go.run() does not return until main() exits; the files client parks on
   // `select {}` to keep its handlers live, so we don't await it.
   go.run(wasm.instance);

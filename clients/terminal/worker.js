@@ -6,12 +6,19 @@
 //
 // Spawned by the compositor when the dock posts {type:"launch", app:"terminal"}.
 // Loads the SDK + Go's wasm_exec.js, instantiates terminal.wasm, which paints
-// a "Terminal" placeholder surface and parks waiting for input.
+// a "Terminal" placeholder surface and parks waiting for input. Supports both
+// the static-path spawn (current dock click) and the OCI-stream spawn (the
+// blob:-worker path used by demo-wasmbox-ociapps).
 
 "use strict";
 
-importScripts("../sdk/sdk.js");
-importScripts("../../wasm_exec.js");
+const isOCI = self.location.protocol === "blob:";
+if (isOCI) {
+  importScripts(self.location.origin + "/clients/sdk/sdk.js");
+} else {
+  importScripts("../sdk/sdk.js");
+  importScripts("../../wasm_exec.js");
+}
 
 const client = new WasmboxClient({ title: "Terminal", w: 320, h: 200 });
 
@@ -21,9 +28,17 @@ const client = new WasmboxClient({ title: "Terminal", w: 320, h: 200 });
 self.wasmboxClient = client;
 
 client.start().then(async () => {
+  const assets = isOCI
+    ? await WasmboxClient.bootFromOCIAssets({ fallbackMs: 2000 })
+    : null;
+  if (isOCI) {
+    if (!assets) throw new Error("terminal: spawned from blob: URL but no OCI assets envelope");
+    importScripts(assets.wasm_exec_url);
+  }
   const go = new Go();
+  const wasmURL = assets ? assets.wasm_url : "./terminal.wasm";
   const wasm = await WebAssembly.instantiateStreaming(
-    fetch("./terminal.wasm"), go.importObject);
+    fetch(wasmURL), go.importObject);
   // go.run() does not return until main() exits; the terminal client parks
   // on `select {}` to keep its handlers live, so we don't await it.
   go.run(wasm.instance);

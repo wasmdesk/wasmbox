@@ -1,0 +1,14 @@
+# ociapps-pack manifest for the terminal placeholder client.
+#
+# Pack the three files the OCI spawn path needs. The SDK is loaded from an
+# absolute URL by clients/terminal/worker.js at run time (the blob-URL'd
+# worker cannot resolve the `../sdk/sdk.js` relative path the static spawn
+# path uses).
+
+mediatype = "application/vnd.oci.image.manifest.v1+json"
+
+[files]
+"worker.js"     = "worker.js"
+"wasm_exec.js"  = "wasm_exec.js"
+"sdk.js"        = "sdk.js"
+"terminal.wasm" = "terminal.wasm"

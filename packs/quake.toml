@@ -1,0 +1,12 @@
+# ociapps-pack manifest for the go-quake1 wasmbox client.
+#
+# Quake is the heavyweight client in the family (~11 MB stripped); it ships
+# its own protocol implementation in Go and does not load the JS SDK. So the
+# OCI image only carries worker.js + wasm_exec.js + quake.wasm.
+
+mediatype = "application/vnd.oci.image.manifest.v1+json"
+
+[files]
+"worker.js"    = "worker.js"
+"wasm_exec.js" = "wasm_exec.js"
+"quake.wasm"   = "quake.wasm"
