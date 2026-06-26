@@ -3,16 +3,16 @@
 // found in the LICENSE file at the root of this repository.
 
 // Command files is the wasmbox external client spawned when the dock's
-// "files" icon is clicked. It paints a recognizable "Files" placeholder
-// surface (rows of icon + name strips) into the SAB the SDK allocated for it
-// and parks waiting for input.
+// "files" icon is clicked. It hosts a real (if tiny) file browser: an
+// in-memory virtual filesystem with a few demo files + nested folders,
+// rendered as a list with a path bar at the top, navigated by Up/Down
+// (move cursor), Enter (descend into a folder), and Backspace/Escape
+// (go up).
 //
-// It runs inside a dedicated Web Worker (see worker.js). The Worker has
+// Runs inside a dedicated Web Worker (see worker.js). The Worker has
 // already imported sdk.js (which exposes globalThis.WasmboxClient) and
-// constructed `wasmboxClient`, then awaited `start()` — so by the time main()
-// runs we are connected. A real file browser is out of scope; this client
-// exists so the launch chain (dock -> compositor -> files client) produces a
-// window titled "Files" rather than a generic placeholder.
+// constructed `wasmboxClient`, then awaited `start()` — so by the time
+// main() runs we are connected.
 //
 //go:build js && wasm
 
@@ -40,6 +40,9 @@ func main() {
 		return
 	}
 
+	// Local RGBA buffer + the pure-Go scene state. Each frame we re-paint
+	// into `local`, then copy into the SAB-backed Uint8ClampedArray in one
+	// js.CopyBytesToJS call — same pattern as the terminal/hello clients.
 	local := make([]byte, 4*w*h)
 	state := scene.New(w, h)
 
@@ -54,10 +57,30 @@ func main() {
 		client.Call("commit", damage)
 	}
 
+	// Initial paint so the compositor has something to blit immediately.
 	render()
 
-	cb := js.FuncOf(func(_ js.Value, _ []js.Value) any { return nil })
+	// Input handler: routes keydown events into the browser. The compositor
+	// sends one event per keystroke with kind=="keydown" + key naming the
+	// DOM-style identifier ("ArrowDown", "ArrowUp", "Enter", "Backspace",
+	// "Escape"). We re-render only when HandleKey reports a state change.
+	cb := js.FuncOf(func(_ js.Value, args []js.Value) any {
+		if len(args) == 0 {
+			return nil
+		}
+		ev := args[0]
+		kind := ev.Get("kind").String()
+		if kind != "keydown" {
+			return nil
+		}
+		key := ev.Get("key").String()
+		if state.HandleKey(key) {
+			render()
+		}
+		return nil
+	})
 	client.Call("onInput", cb)
 
+	// Park forever so the Go runtime keeps the FuncOf callback alive.
 	select {}
 }
