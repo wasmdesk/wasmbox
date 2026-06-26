@@ -77,6 +77,11 @@ jobs:
             cp clients/sdk/sdk.js "clients/$app/sdk.js"
             cp "$wexec" "clients/$app/wasm_exec.js"
           done
+          # dock builds in-repo too, but ships its OWN sdk.js + worker.js
+          # (committed, smaller) — only build the wasm + copy wasm_exec.js; do
+          # NOT overwrite its sdk.js.
+          GOOS=js GOARCH=wasm go build -o clients/dock/dock.wasm ./clients/dock
+          cp "$wexec" clients/dock/wasm_exec.js
 
       - name: Assemble the Pages site (desktop + shared SDK + static /v2 mirror)
         run: |
@@ -85,16 +90,18 @@ jobs:
           rm -rf "$SITE" && mkdir -p "$SITE/clients/sdk"
           cp index.html coi-serviceworker.js bridge.js boot-config.js compositor.worker.js ociapps-loader.js wasm_exec.js wasmbox.wasm "$SITE/"
           cp clients/sdk/sdk.js "$SITE/clients/sdk/sdk.js"
-          # bootWasm spawns clients/hello/worker.js unconditionally at boot
-          # (the reference client), so ship its static runtime tree too — the
-          # /v2 mirror only serves the ?ociapps OCI-streaming path. (dock/quake
-          # are HEAD-gated by autoSpawnIfPresent, so their absence is silent.)
-          mkdir -p "$SITE/clients/hello"
+          # bootWasm spawns clients/hello/worker.js unconditionally + HEAD-gates
+          # clients/dock/worker.js (autoSpawnIfPresent) at boot, so ship both
+          # static runtime trees — the /v2 mirror only serves the ?ociapps
+          # OCI-streaming path. (quake stays out: its wasm exceeds the Pages
+          # per-file limit and needs the OCI-streaming path.)
+          mkdir -p "$SITE/clients/hello" "$SITE/clients/dock"
           cp clients/hello/worker.js clients/hello/hello.wasm clients/hello/sdk.js clients/hello/wasm_exec.js "$SITE/clients/hello/"
+          cp clients/dock/worker.js clients/dock/dock.wasm clients/dock/sdk.js clients/dock/wasm_exec.js "$SITE/clients/dock/"
           # .nojekyll so Pages serves the blobs/sha256:<hex> files (colon in the
           # name) verbatim instead of running them through Jekyll.
           touch "$SITE/.nojekyll"
-          for app in hello terminal files; do
+          for app in hello dock terminal files; do
             ./bin/ociapps-pack -in "clients/$app" -manifest "packs/$app.toml" -out "/tmp/oci-$app" -ref "$app:latest"
             ./bin/ociapps-static -in "/tmp/oci-$app" -repo "$app" -out "$SITE"
           done
@@ -109,7 +116,7 @@ jobs:
           GHCR_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           set -e
-          for app in hello terminal files; do
+          for app in hello dock terminal files; do
             ./bin/ociapps-push -in "/tmp/oci-$app" \
               -ref "ghcr.io/wasmdesk/$app:latest" -scheme https \
               -username "${{ github.actor }}"
