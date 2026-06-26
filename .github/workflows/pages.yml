@@ -23,6 +23,7 @@ permissions:
   contents: read
   pages: write
   id-token: write
+  packages: write   # publish the canonical app images to ghcr.io/wasmdesk/<app>
 
 # One in-flight deploy at a time; let a newer push supersede an older run.
 concurrency:
@@ -58,6 +59,7 @@ jobs:
           mkdir -p bin
           go -C _ociapps build -o "$PWD/bin/ociapps-pack"   ./cmd/ociapps-pack
           go -C _ociapps build -o "$PWD/bin/ociapps-static" ./cmd/ociapps-static
+          go -C _ociapps build -o "$PWD/bin/ociapps-push"   ./cmd/ociapps-push
 
       - name: Build the compositor wasm (embeds compositor.rb) + wasm_exec.js
         run: |
@@ -83,6 +85,12 @@ jobs:
           rm -rf "$SITE" && mkdir -p "$SITE/clients/sdk"
           cp index.html coi-serviceworker.js bridge.js boot-config.js compositor.worker.js ociapps-loader.js wasm_exec.js wasmbox.wasm "$SITE/"
           cp clients/sdk/sdk.js "$SITE/clients/sdk/sdk.js"
+          # bootWasm spawns clients/hello/worker.js unconditionally at boot
+          # (the reference client), so ship its static runtime tree too — the
+          # /v2 mirror only serves the ?ociapps OCI-streaming path. (dock/quake
+          # are HEAD-gated by autoSpawnIfPresent, so their absence is silent.)
+          mkdir -p "$SITE/clients/hello"
+          cp clients/hello/worker.js clients/hello/hello.wasm clients/hello/sdk.js clients/hello/wasm_exec.js "$SITE/clients/hello/"
           # .nojekyll so Pages serves the blobs/sha256:<hex> files (colon in the
           # name) verbatim instead of running them through Jekyll.
           touch "$SITE/.nojekyll"
@@ -91,6 +99,21 @@ jobs:
             ./bin/ociapps-static -in "/tmp/oci-$app" -repo "$app" -out "$SITE"
           done
           echo "assembled $SITE: $(find "$SITE/v2" -type f | wc -l) /v2 files"
+
+      # Publish the canonical app images to ghcr (the source of truth). The
+      # same-origin /v2 mirror above is the runtime source; ghcr is the
+      # registry. Only on push to main (GITHUB_TOKEN has packages:write there).
+      - name: Publish app images to ghcr.io/wasmdesk
+        if: github.event_name == 'push'
+        env:
+          GHCR_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -e
+          for app in hello terminal files; do
+            ./bin/ociapps-push -in "/tmp/oci-$app" \
+              -ref "ghcr.io/wasmdesk/$app:latest" -scheme https \
+              -username "${{ github.actor }}"
+          done
 
       - name: Upload Pages artifact
         uses: actions/upload-pages-artifact@v3
