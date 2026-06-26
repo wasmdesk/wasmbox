@@ -620,15 +620,23 @@ async function bootWasm() {
     // Auto-spawn the same demo clients as the old index.html did, so a page
     // load still ends with a populated desktop.
     globalThis.wasmboxSpawnExternal("clients/hello/worker.js");
-    autoSpawnIfPresent("clients/quake/worker.js");
+    // Quake is a heavy, build-time-only client (built by `task build:quake`
+    // from the go-quake1 sibling, not the default `task build`). Its worker.js
+    // is committed, so gate on the .wasm it loads — otherwise the worker boots
+    // and throws an uncaught WebAssembly compile error when quake.wasm 404s.
+    autoSpawnIfPresent("clients/quake/worker.js", "clients/quake/quake.wasm");
     autoSpawnIfPresent("clients/dock/worker.js");
   } catch (e) {
     self.postMessage({ type: B.C2M_ERROR, message: String(e && e.stack ? e.stack : e) });
   }
 }
 
-function autoSpawnIfPresent(workerUrl) {
-  fetch(workerUrl, { method: "HEAD" })
+// autoSpawnIfPresent spawns workerUrl only if probeUrl is fetchable. probeUrl
+// defaults to workerUrl, but pass the app's .wasm when worker.js is committed
+// yet its wasm is built on demand (e.g. quake) — worker.js being present does
+// not mean the client can actually boot.
+function autoSpawnIfPresent(workerUrl, probeUrl) {
+  fetch(probeUrl || workerUrl, { method: "HEAD" })
     .then((r) => { if (r.ok) globalThis.wasmboxSpawnExternal(workerUrl); })
     .catch(() => {});
 }
