@@ -24,6 +24,11 @@ import (
 func main() {
 	addr := flag.String("addr", ":8080", "listen address (host:port)")
 	dir := flag.String("dir", ".", "directory to serve")
+	// -no-coi reproduces a static host that cannot set headers (GitHub Pages):
+	// it withholds COOP/COEP so the page must earn cross-origin isolation via
+	// coi-serviceworker.js instead. Used by `task serve:pages` + the Pages
+	// probe to validate the real deploy path locally.
+	noCOI := flag.Bool("no-coi", false, "omit COOP/COEP headers (simulate a static host like GitHub Pages)")
 	flag.Parse()
 
 	// .wasm should always be application/wasm; some systems don't ship that
@@ -36,8 +41,12 @@ func main() {
 	handler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		h := w.Header()
 		// Required for crossOriginIsolated → SharedArrayBuffer to be usable.
-		h.Set("Cross-Origin-Opener-Policy", "same-origin")
-		h.Set("Cross-Origin-Embedder-Policy", "require-corp")
+		// Withheld under -no-coi so coi-serviceworker.js must supply them, the
+		// same as on GitHub Pages.
+		if !*noCOI {
+			h.Set("Cross-Origin-Opener-Policy", "same-origin")
+			h.Set("Cross-Origin-Embedder-Policy", "require-corp")
+		}
 		// Dev-server defaults: hot reload + correct wasm MIME.
 		h.Set("Cache-Control", "no-cache, no-store, must-revalidate")
 		if strings.HasSuffix(r.URL.Path, ".wasm") {

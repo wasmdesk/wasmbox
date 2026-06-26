@@ -57,13 +57,22 @@ const B = globalThis.WASMBOX_BRIDGE;
 // is identical -- spawnFromOCI just builds the Worker differently.
 //
 // Registries:
-//   The default is a single registry at http://127.0.0.1:5000 (matching the
-//   Taskfile oci-registry-up demo). Override either by setting
-//     globalThis.WASMBOX_OCI_REGISTRIES = [{url:"https://r1"},{url:"https://r2"}]
-//   from index.html / the compositor bootstrap BEFORE the worker boots, or
-//   by passing the M2C_BOOT message a `registries` field. We refresh the
+//   The default is a SAME-ORIGIN static OCI registry served beside the
+//   desktop: the loader GETs <base>/v2/<repo>/manifests|blobs, where <base>
+//   is the directory this worker was loaded from. Same-origin means no CORS,
+//   no token and no proxy — which is the whole reason the artifacts are
+//   mirrored next to the page (GitHub Pages) instead of pulled from ghcr,
+//   which sends no CORS headers and so cannot be read cross-origin in a
+//   browser. The base resolves correctly both at http://localhost:8080/ and
+//   at https://<org>.github.io/<repo>/ with no configuration.
+//
+//   For the local live-registry dev flow (the Taskfile registry on :5000),
+//   override by setting, BEFORE the worker boots,
+//     globalThis.WASMBOX_OCI_REGISTRIES = [{url:"http://127.0.0.1:5000"}]
+//   or by passing the M2C_BOOT message a `registries` field. We refresh the
 //   loader lazily on first spawnFromOCI so a late assignment is honoured.
-const DEFAULT_OCI_REGISTRIES = [{ url: "http://127.0.0.1:5000" }];
+const SAME_ORIGIN_OCI_BASE = new URL(".", self.location.href).href.replace(/\/+$/, "");
+const DEFAULT_OCI_REGISTRIES = [{ url: SAME_ORIGIN_OCI_BASE }];
 
 let _ociLoader = null;
 function ociLoader() {
