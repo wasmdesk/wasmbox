@@ -55,14 +55,15 @@ func main() {
 
 	// launch asks the compositor to start another client. This is a protocol
 	// extension (see INTEGRATION.md); the dock degrades gracefully if the host
-	// does not honor it yet — postMessage is fire-and-forget and we also log.
+	// does not honor it yet — fire-and-forget. The launch message MUST travel
+	// over the SDK's MessagePort (the per-client wire the compositor listens on
+	// for `wasmbox-msg`), not over `self.postMessage` (the implicit nested-worker
+	// channel to compositor.worker.js, which only handles main<->compositor boot
+	// traffic and silently drops application messages like `launch`). Routing
+	// through `client.launch(app)` keeps us on the port wire end-to-end.
 	launch := func(app string) {
 		println("wasmdock: launch", app)
-		msg := js.Global().Call("Object")
-		msg.Set("type", "launch")
-		msg.Set("app", app)
-		// Post directly to the compositor (the SDK has no launch() helper).
-		js.Global().Call("postMessage", msg)
+		client.Call("launch", app)
 	}
 
 	// Initial paint so the compositor has something to blit immediately.
