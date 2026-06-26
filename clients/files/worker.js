@@ -19,7 +19,10 @@ if (isOCI) {
   importScripts("../../wasm_exec.js");
 }
 
-const client = new WasmboxClient({ title: "Files", w: 480, h: 360 });
+// 720x440 matches the Finder-inspired layout in internal/scene/render.go:
+// sidebar (140) + 4-column right pane (toolbar 40, header 24, rows 28).
+// Keep these in sync if the layout constants in render.go change.
+const client = new WasmboxClient({ title: "Files", w: 720, h: 440 });
 
 // Expose the client to the Go program through globalThis so it can grab the
 // SAB view + commit() + onInput() through syscall/js. Done BEFORE starting

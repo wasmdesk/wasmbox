@@ -20,14 +20,23 @@ import (
 	"strings"
 )
 
+// DemoModTime is the fixed "modified" timestamp the demo VFS stamps on every
+// entry. The wasm sandbox has no useful clock, so we ship a stable string the
+// renderer can show in the Date Modified column. Mirroring real Finder: short
+// month, day, year (no time-of-day so the columns stay narrow).
+const DemoModTime = "Jun 25 2026"
+
 // Entry describes one node in the VFS tree: a name (basename), whether it is
 // a directory, an optional Size (for files), and Children (for directories).
-// Pure data — no I/O — so the tree can be constructed in tests and walked
+// ModTime is a pre-formatted human string ("Jun 25 2026") because the wasm
+// clock is opaque -- we stamp every demo entry with DemoModTime.
+// Pure data -- no I/O -- so the tree can be constructed in tests and walked
 // safely from the renderer.
 type Entry struct {
 	Name     string
 	IsDir    bool
 	Size     int64
+	ModTime  string
 	Children []Entry
 }
 
@@ -67,22 +76,26 @@ type InMemoryVFS struct {
 //	|   `-- dog.jpg       (45678)
 //	|-- Downloads/
 //	`-- about.txt          (234)
+//
+// Every entry carries DemoModTime so the Date Modified column has stable
+// content for the Finder-style list.
 func NewDemoVFS() *InMemoryVFS {
 	return &InMemoryVFS{
 		root: Entry{
-			Name:  "",
-			IsDir: true,
+			Name:    "",
+			IsDir:   true,
+			ModTime: DemoModTime,
 			Children: []Entry{
-				{Name: "Documents", IsDir: true, Children: []Entry{
-					{Name: "readme.txt", Size: 1234},
-					{Name: "notes.md", Size: 567},
+				{Name: "Documents", IsDir: true, ModTime: DemoModTime, Children: []Entry{
+					{Name: "readme.txt", Size: 1234, ModTime: DemoModTime},
+					{Name: "notes.md", Size: 567, ModTime: DemoModTime},
 				}},
-				{Name: "Pictures", IsDir: true, Children: []Entry{
-					{Name: "cat.png", Size: 89012},
-					{Name: "dog.jpg", Size: 45678},
+				{Name: "Pictures", IsDir: true, ModTime: DemoModTime, Children: []Entry{
+					{Name: "cat.png", Size: 89012, ModTime: DemoModTime},
+					{Name: "dog.jpg", Size: 45678, ModTime: DemoModTime},
 				}},
-				{Name: "Downloads", IsDir: true, Children: []Entry{}},
-				{Name: "about.txt", Size: 234},
+				{Name: "Downloads", IsDir: true, ModTime: DemoModTime, Children: []Entry{}},
+				{Name: "about.txt", Size: 234, ModTime: DemoModTime},
 			},
 		},
 	}
@@ -147,6 +160,18 @@ func Parent(p string) string {
 	return c[:i]
 }
 
+// Basename returns the trailing path component of p ("/" -> "/"). Used by
+// the toolbar's breadcrumb so a path like "/Documents" displays as the more
+// Finder-like "Documents".
+func Basename(p string) string {
+	c := Clean(p)
+	if c == "/" {
+		return "/"
+	}
+	i := strings.LastIndex(c, "/")
+	return c[i+1:]
+}
+
 // resolve walks the in-memory tree to the node identified by p. Returns the
 // entry by value (so callers cannot mutate the tree) and a found flag.
 func (v *InMemoryVFS) resolve(p string) (Entry, bool) {
@@ -208,7 +233,7 @@ func (v *InMemoryVFS) Stat(p string) (Entry, error) {
 }
 
 // IsDir reports whether p resolves to a directory. Non-existent paths return
-// false (we deliberately do not surface an error here — the renderer wants a
+// false (we deliberately do not surface an error here -- the renderer wants a
 // boolean, not an error chain).
 func (v *InMemoryVFS) IsDir(p string) bool {
 	e, ok := v.resolve(p)
