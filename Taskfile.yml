@@ -260,9 +260,11 @@ tasks:
         fi
       - go -C "{{.OCIAPPS_DIR}}" build -o "$(pwd)/bin/ociapps-pack" ./cmd/ociapps-pack
       - go -C "{{.OCIAPPS_DIR}}" build -o "$(pwd)/bin/ociapps-push" ./cmd/ociapps-push
+      - go -C "{{.OCIAPPS_DIR}}" build -o "$(pwd)/bin/ociapps-static" ./cmd/ociapps-static
     generates:
       - bin/ociapps-pack
       - bin/ociapps-push
+      - bin/ociapps-static
 
   ociapps:prep:hello:
     desc: Materialise the wasm_exec.js + sdk.js + .wasm clients/hello needs for an OCI pack (the static spawn path resolves them via relative imports, so neither is committed in clients/hello/).
@@ -450,3 +452,46 @@ tasks:
       - 'echo "demo-wasmbox-ociapps: open http://localhost:{{.PORT}}/?ociapps=1"'
       - 'echo ""'
       - ./bin/wasmbox-serve -addr :{{.PORT}}
+
+  # ----- GitHub Pages delivery (same-origin /v2 mirror) --------------------
+  #
+  # The production model: the desktop AND the per-app OCI artifacts are served
+  # from the SAME static origin (GitHub Pages). The browser pulls /v2/<app>/...
+  # same-origin -- no CORS, no token, no proxy -- so ghcr (which sends no CORS
+  # headers) can stay the canonical upstream while the runtime source is the
+  # mirror beside the page. `site` assembles exactly what gets deployed;
+  # `serve:pages` serves it with NO COOP/COEP headers (like Pages), so the page
+  # must earn cross-origin isolation through coi-serviceworker.js -- the real
+  # deploy path, reproduced locally.
+
+  site:
+    desc: Assemble the GitHub-Pages site tree under {{.SITE_DIR}} -- the desktop + a same-origin static /v2 OCI mirror of every app (ghcr's on-disk twin).
+    deps: [build, ociapps:pack:all]
+    vars:
+      SITE_DIR: '{{default "/tmp/wasmbox-site" .SITE_DIR}}'
+    cmds:
+      - rm -rf "{{.SITE_DIR}}" && mkdir -p "{{.SITE_DIR}}"
+      # Desktop shell + the worker/loader/bridge + the baked compositor wasm.
+      - cp index.html coi-serviceworker.js bridge.js boot-config.js compositor.worker.js ociapps-loader.js wasm_exec.js wasmbox.wasm "{{.SITE_DIR}}/"
+      # The shared client SDK is desktop infra: every client worker.js
+      # importScripts it from <origin>/clients/sdk/sdk.js (not per-app OCI).
+      - mkdir -p "{{.SITE_DIR}}/clients/sdk"
+      - cp clients/sdk/sdk.js "{{.SITE_DIR}}/clients/sdk/sdk.js"
+      # .nojekyll: Pages must serve the blobs/sha256:<hex> files (with a colon)
+      # verbatim -- Jekyll would otherwise mangle/ignore them.
+      - touch "{{.SITE_DIR}}/.nojekyll"
+      # Same-origin static /v2 mirror, one repo per app (ghcr upstream's twin).
+      - ./bin/ociapps-static -in /tmp/ociapps-hello    -repo hello    -out "{{.SITE_DIR}}"
+      - ./bin/ociapps-static -in /tmp/ociapps-dock     -repo dock     -out "{{.SITE_DIR}}"
+      - ./bin/ociapps-static -in /tmp/ociapps-terminal -repo terminal -out "{{.SITE_DIR}}"
+      - ./bin/ociapps-static -in /tmp/ociapps-files    -repo files    -out "{{.SITE_DIR}}"
+      - 'echo "site: assembled {{.SITE_DIR}} ($(find "{{.SITE_DIR}}/v2" -type f | wc -l | tr -d " ") /v2 files)"'
+
+  serve:pages:
+    desc: Serve the assembled Pages site with NO COOP/COEP headers (simulating GitHub Pages). Cross-origin isolation comes from coi-serviceworker.js. Open http://localhost:{{.PORT}}/?ociapps=1.
+    deps: [site, build:serve]
+    vars:
+      SITE_DIR: '{{default "/tmp/wasmbox-site" .SITE_DIR}}'
+    cmds:
+      - 'echo "serve:pages: http://localhost:{{.PORT}}/?ociapps=1 (header-less; SW supplies COOP/COEP)"'
+      - ./bin/wasmbox-serve -addr :{{.PORT}} -dir "{{.SITE_DIR}}" -no-coi
