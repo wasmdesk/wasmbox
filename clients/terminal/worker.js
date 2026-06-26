@@ -20,7 +20,7 @@ if (isOCI) {
   importScripts("../../wasm_exec.js");
 }
 
-const client = new WasmboxClient({ title: "Terminal", w: 320, h: 200 });
+const client = new WasmboxClient({ title: "Terminal", w: 640, h: 400 });
 
 // Expose the client to the Go program through globalThis so it can grab the
 // SAB view + commit() + onInput() through syscall/js. Done BEFORE starting

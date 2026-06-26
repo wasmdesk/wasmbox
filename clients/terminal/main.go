@@ -3,15 +3,15 @@
 // found in the LICENSE file at the root of this repository.
 
 // Command terminal is the wasmbox external client spawned when the dock's
-// "terminal" icon is clicked. It paints a recognizable "Terminal" placeholder
-// surface into the SAB the SDK allocated for it and parks waiting for input.
+// "terminal" icon is clicked. It hosts a real (if tiny) interactive shell:
+// printable ASCII extends the edit line, Backspace shrinks it, Enter
+// executes a small builtin (echo / help / clear / date / pwd / ls) and the
+// output is painted above a fresh prompt.
 //
 // It runs inside a dedicated Web Worker (see worker.js). The Worker has
 // already imported sdk.js (which exposes globalThis.WasmboxClient) and
-// constructed `wasmboxClient`, then awaited `start()` — so by the time main()
-// runs we are connected. A real TTY is out of scope; this client exists so
-// the launch chain (dock -> compositor -> terminal client) produces a window
-// titled "Terminal" rather than a generic placeholder.
+// constructed `wasmboxClient`, then awaited `start()` -- so by the time
+// main() runs we are connected.
 //
 //go:build js && wasm
 
@@ -39,6 +39,10 @@ func main() {
 		return
 	}
 
+	// Local RGBA buffer + the pure-Go scene state. Each frame we re-paint
+	// into `local`, then copy into the SAB-backed Uint8ClampedArray in one
+	// js.CopyBytesToJS call -- this is the same pattern the hello client
+	// uses, and it keeps the renderer free of any js dependency.
 	local := make([]byte, 4*w*h)
 	state := scene.New(w, h)
 
@@ -53,13 +57,31 @@ func main() {
 		client.Call("commit", damage)
 	}
 
+	// Initial paint so the compositor has something to blit immediately.
 	render()
 
-	// Keep an input callback alive so the compositor's mousedown/keydown reaches
-	// the worker (silently ignored for now). Without a live FuncOf the Go
-	// runtime could collect the Worker's bridge state on quiet frames.
-	cb := js.FuncOf(func(_ js.Value, _ []js.Value) any { return nil })
+	// Input handler: routes keydown events into the shell. The compositor
+	// sends one event per keystroke with kind=="keydown" + key=="<char>" for
+	// printable keys, "Enter" / "Backspace" for the control keys we care
+	// about. The handler re-renders only when HandleKey reports a change.
+	cb := js.FuncOf(func(_ js.Value, args []js.Value) any {
+		if len(args) == 0 {
+			return nil
+		}
+		ev := args[0]
+		kind := ev.Get("kind").String()
+		if kind != "keydown" {
+			return nil
+		}
+		key := ev.Get("key").String()
+		if state.HandleKey(key) {
+			render()
+		}
+		return nil
+	})
 	client.Call("onInput", cb)
 
+	// Park forever so the Go runtime keeps the FuncOf callback alive. Without
+	// a live root the wasm Go runtime would free the callback on the next GC.
 	select {}
 }
