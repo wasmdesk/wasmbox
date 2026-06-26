@@ -4,33 +4,42 @@
 
 // Package scene's state.go is the file browser's UI state: a current path, a
 // cached listing of its entries, the cursor index inside that listing, and a
-// fixed Favorites sidebar that mirrors macOS Finder's left pane.
-// Pure Go (no syscall/js, no cgo) so it builds + tests natively on every
-// architecture the repo targets.
+// sectioned sidebar that mirrors GNOME Nautilus's left pane (Bookmarks +
+// Other Locations). Pure Go (no syscall/js, no cgo) so it builds + tests
+// natively on every architecture the repo targets.
 
 package scene
 
-// SidebarEntry is one row in the Favorites sidebar: a display name and the
-// VFS path the row jumps to when clicked. We keep the path and the name
-// separate so the sidebar can show friendlier labels than the bare path (the
-// root "/" entry is presented as "Macintosh HD", for example).
+// SidebarEntry is one row in the navigation sidebar. Section groups entries
+// in the rendered list ("Bookmarks", "Other Locations"); Kind picks the
+// glyph the renderer paints next to the label ("home" star, "folder",
+// "computer" monitor, "trash" bin); Path is the VFS path the row navigates
+// to when clicked.
 type SidebarEntry struct {
-	Name string
-	Path string
+	Section string
+	Kind    string
+	Name    string
+	Path    string
 }
 
-// DefaultSidebar is the canonical Favorites list shown in the left pane.
-// "Desktop" and "Recents" are placeholders -- they point at the root because
-// the demo VFS does not model a real desktop/recents view; clicking them
-// still feels reactive (the selected-favorite highlight moves), and they
-// document the intended Finder shape.
+// DefaultSidebar is the canonical Nautilus-style navigation list shown in
+// the left pane. Two sections:
+//
+//   - Bookmarks: Home, Documents, Pictures, Downloads
+//   - Other Locations: Computer, Trash
+//
+// Home points at the root "/" so the breadcrumb's "Home" segment lights up
+// the right sidebar row. Computer and Trash are placeholders -- they point
+// at the root because the demo VFS has no real disk inventory or trashcan;
+// clicking them still feels reactive (the selected-row highlight moves).
 func DefaultSidebar() []SidebarEntry {
 	return []SidebarEntry{
-		{Name: "Documents", Path: "/Documents"},
-		{Name: "Pictures", Path: "/Pictures"},
-		{Name: "Downloads", Path: "/Downloads"},
-		{Name: "Desktop", Path: "/"},
-		{Name: "Recents", Path: "/"},
+		{Section: "BOOKMARKS", Kind: "home", Name: "Home", Path: "/"},
+		{Section: "BOOKMARKS", Kind: "folder", Name: "Documents", Path: "/Documents"},
+		{Section: "BOOKMARKS", Kind: "folder", Name: "Pictures", Path: "/Pictures"},
+		{Section: "BOOKMARKS", Kind: "folder", Name: "Downloads", Path: "/Downloads"},
+		{Section: "OTHER LOCATIONS", Kind: "computer", Name: "Computer", Path: "/"},
+		{Section: "OTHER LOCATIONS", Kind: "trash", Name: "Trash", Path: "/"},
 	}
 }
 
@@ -42,10 +51,10 @@ type State struct {
 	VFS     VFS
 	Browser *BrowserState
 	Sidebar []SidebarEntry
-	// SidebarSelected indexes into Sidebar; -1 means "no Favorite is the
-	// active root" (the user navigated via Enter/Backspace into a path that
-	// no Favorite owns). The renderer highlights the selected Favorite with
-	// the accent colour.
+	// SidebarSelected indexes into Sidebar; -1 means "no row is the active
+	// location" (the user navigated via Enter/Backspace into a path that no
+	// sidebar row owns). The renderer highlights the selected row with the
+	// accent colour.
 	SidebarSelected int
 }
 
@@ -60,8 +69,8 @@ type BrowserState struct {
 }
 
 // New constructs a State for a width x height pixel surface backed by the
-// demo VFS, rooted at "/" with the first entry selected and no Favorite
-// active (since "/" is not in DefaultSidebar by path).
+// demo VFS, rooted at "/" with the first entry selected. The Home row in
+// DefaultSidebar owns "/" so SidebarSelected starts pointing at it.
 func New(width, height int) *State {
 	vfs := NewDemoVFS()
 	bs := &BrowserState{CurrentPath: "/"}
@@ -71,6 +80,7 @@ func New(width, height int) *State {
 		Sidebar:         DefaultSidebar(),
 		SidebarSelected: -1,
 	}
+	s.syncSidebar()
 	return s
 }
 
@@ -101,8 +111,7 @@ func (b *BrowserState) MoveCursor(dy int) {
 // ActivateCurrent enters the currently-selected entry: a directory becomes
 // the new CurrentPath (and Refresh re-lists it); a file is a no-op (v0 has
 // no preview/open). Returns true when CurrentPath changed, so the wasm side
-// can decide whether to re-render -- though in practice the row inversion
-// also moves, so a real client always re-renders.
+// can decide whether to re-render.
 func (b *BrowserState) ActivateCurrent(vfs VFS) bool {
 	if b.Cursor < 0 || b.Cursor >= len(b.Entries) {
 		return false
@@ -118,8 +127,7 @@ func (b *BrowserState) ActivateCurrent(vfs VFS) bool {
 }
 
 // GoUp navigates to the parent of CurrentPath. If we are already at the root
-// it is a no-op (Parent("/") == "/"). Returns true when CurrentPath changed,
-// for the same reason ActivateCurrent does.
+// it is a no-op (Parent("/") == "/"). Returns true when CurrentPath changed.
 func (b *BrowserState) GoUp(vfs VFS) bool {
 	parent := Parent(b.CurrentPath)
 	if parent == b.CurrentPath {
@@ -140,9 +148,7 @@ func (b *BrowserState) GoUp(vfs VFS) bool {
 //	"Escape"     -> GoUp
 //
 // Returns true when the visible state changed, so the caller decides whether
-// to re-render. Anything else (modifiers, printable keys) is ignored. When
-// the cursor moves into a Favorite path we also update SidebarSelected so the
-// left-pane highlight stays in sync.
+// to re-render. Anything else (modifiers, printable keys) is ignored.
 func (s *State) HandleKey(key string) bool {
 	switch key {
 	case "ArrowDown":
@@ -171,30 +177,35 @@ func (s *State) HandleKey(key string) bool {
 }
 
 // HandleMouse routes a surface-local mousedown into the browser. (x, y) are
-// the click coordinates relative to the surface origin (the SDK gives us
-// canvas-window-local x/y via translate_input). Returns true when visible
-// state changed so the caller re-renders.
+// the click coordinates relative to the surface origin. Returns true when
+// visible state changed so the caller re-renders.
 //
 // Hit-zones, top to bottom:
-//   - Toolbar back-arrow button -> GoUp
-//   - Sidebar row              -> jump to that Favorite's Path
-//   - List row                 -> select (single click) / activate (treated
-//     as activate on click so the demo is reactive -- a real Finder uses
-//     double-click, but on a 720x440 placeholder one click is friendlier).
+//   - Header-bar hamburger button -> stub (logged, no-op)
+//   - Header-bar back-arrow       -> GoUp
+//   - Header-bar forward arrow    -> stub (no forward history in v0)
+//   - Sidebar row                 -> jump to that row's Path
+//   - List row                    -> select / activate (one-click descend)
 func (s *State) HandleMouse(x, y int) bool {
-	// Toolbar back-arrow button.
-	if y >= 0 && y < ToolbarHeight {
-		if x >= BackBtnX && x < BackBtnX+BackBtnW {
+	// Header bar.
+	if y >= 0 && y < HeaderBarHeight {
+		if inRect(x, y, HamburgerBtnX, HamburgerBtnY, HamburgerBtnW, HamburgerBtnH) {
+			return s.handleHamburger()
+		}
+		if inRect(x, y, BackBtnX, BackBtnY, BackBtnW, BackBtnH) {
 			return s.handleBack()
+		}
+		if inRect(x, y, ForwardBtnX, ForwardBtnY, ForwardBtnW, ForwardBtnH) {
+			return s.handleForward()
 		}
 		return false
 	}
-	// Sidebar (everything below the toolbar, x in [0, SidebarWidth)).
+	// Sidebar (everything below the header bar, x in [0, SidebarWidth)).
 	if x >= 0 && x < SidebarWidth {
 		return s.handleSidebarClick(y)
 	}
 	// List rows. Skip the column-header band.
-	listY0 := ToolbarHeight + ColumnHeaderHeight
+	listY0 := HeaderBarHeight + ColumnHeaderHeight
 	if y < listY0 {
 		return false
 	}
@@ -203,7 +214,7 @@ func (s *State) HandleMouse(x, y int) bool {
 		return false
 	}
 	s.Browser.Cursor = idx
-	// One-click activate: descend into folders so the demo is reactive.
+	// One-click activate on folders so the demo is reactive.
 	e := s.Browser.Entries[idx]
 	if e.IsDir {
 		s.Browser.ActivateCurrent(s.VFS)
@@ -212,8 +223,14 @@ func (s *State) HandleMouse(x, y int) bool {
 	return true
 }
 
-// handleBack is the click handler for the toolbar back-arrow button. Wraps
-// GoUp + syncSidebar so callers do not have to think about Favorites state.
+// inRect reports whether (x, y) falls inside the rectangle at (rx, ry) with
+// size (rw, rh). Pulled out so the header-bar hit-tests stay readable.
+func inRect(x, y, rx, ry, rw, rh int) bool {
+	return x >= rx && x < rx+rw && y >= ry && y < ry+rh
+}
+
+// handleBack is the click handler for the back-arrow button. Wraps GoUp +
+// syncSidebar so callers do not have to think about sidebar state.
 func (s *State) handleBack() bool {
 	if s.Browser.GoUp(s.VFS) {
 		s.syncSidebar()
@@ -222,11 +239,29 @@ func (s *State) handleBack() bool {
 	return false
 }
 
-// handleSidebarClick maps a sidebar y-coordinate to a Favorite row and
-// navigates to that row's Path. Returns true when CurrentPath changed.
+// handleForward is the click handler for the forward-arrow button. v0 has
+// no forward history (a single-stack navigation model), so this is a no-op
+// stub that returns false. We still pay a hit-test so a future revision can
+// wire up real forward navigation without changing the dispatch shape.
+func (s *State) handleForward() bool {
+	return false
+}
+
+// handleHamburger is the click handler for the menu button. v0 has no menu
+// to drop down, so this just records a log line via println (visible in the
+// browser console) and reports false. Keeps the hit-zone exercised so
+// future revisions can attach a real menu without re-plumbing dispatch.
+func (s *State) handleHamburger() bool {
+	println("files: hamburger menu clicked (no-op stub)")
+	return false
+}
+
+// handleSidebarClick maps a sidebar y-coordinate to a sidebar entry and
+// navigates to that entry's Path. The mapping walks the sidebar in render
+// order, accounting for the variable-height section headers, so a click
+// always lands on the entry the user visually targeted.
 func (s *State) handleSidebarClick(y int) bool {
-	rowH := SidebarRowHeight
-	idx := (y - ToolbarHeight - SidebarHeaderHeight) / rowH
+	idx := s.sidebarHitIndex(y)
 	if idx < 0 || idx >= len(s.Sidebar) {
 		return false
 	}
@@ -241,9 +276,32 @@ func (s *State) handleSidebarClick(y int) bool {
 	return true
 }
 
+// sidebarHitIndex maps a y-coordinate inside the sidebar to the index of
+// the entry whose row band contains y, or -1 if y lands on a section
+// header band or outside any entry. Mirrors paintSidebar's layout walk.
+func (s *State) sidebarHitIndex(y int) int {
+	cur := HeaderBarHeight + SidebarTopPadding
+	prevSection := ""
+	for i, e := range s.Sidebar {
+		if e.Section != prevSection {
+			if y >= cur && y < cur+SidebarSectionHeaderHeight {
+				return -1 // section label band
+			}
+			cur += SidebarSectionHeaderHeight
+			prevSection = e.Section
+		}
+		if y >= cur && y < cur+SidebarRowHeight {
+			return i
+		}
+		cur += SidebarRowHeight
+	}
+	return -1
+}
+
 // syncSidebar updates SidebarSelected to match Browser.CurrentPath. Called
-// after every keyboard-driven navigation so the left-pane highlight tracks
-// the current location.
+// after every keyboard-driven navigation + at construction time so the
+// left-pane highlight tracks the current location. The first matching
+// sidebar row wins (Home owns "/" before Computer / Trash do).
 func (s *State) syncSidebar() {
 	s.SidebarSelected = -1
 	for i, e := range s.Sidebar {

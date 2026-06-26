@@ -2,20 +2,20 @@
 // Use of this source code is governed by a BSD-3-Clause license that can be
 // found in the LICENSE file at the root of this repository.
 //
-// Headless Playwright probe for the Finder-inspired file browser client
-// (clients/files).
+// Headless Playwright probe for the GNOME Nautilus-inspired file browser
+// client (clients/files).
 //
 // Spawns a system Chrome (channel: "chrome", headless: true), loads the index
 // page, opens a Files window via wasmboxSpawnExternal, locates the window on
-// the canvas by sampling the sidebar background colour, then drives:
+// the canvas by sampling the Adwaita sidebar background colour, then drives:
 //
 //   - ArrowDown moves the selection from row 0 to row 1 -- we assert that the
 //     accent-blue row strip migrates one row down.
 //   - Click on a folder row -- the row should be painted with the accent fill
 //     before navigation happens; we sample inside the row to confirm.
-//   - Per-region pixel samples for sidebar / window BG / accent strip.
+//   - Per-region pixel samples for sidebar / window BG / header bar / accent.
 //
-// Saves a screenshot to /tmp/files-finder.png.
+// Saves a screenshot to /tmp/files-nautilus.png.
 
 import { createServer } from "node:http";
 import { readFile } from "node:fs/promises";
@@ -26,20 +26,20 @@ import { PNG } from "pngjs";
 
 const ROOT = fileURLToPath(new URL("..", import.meta.url));
 const BOOT_TIMEOUT_MS = 15000;
-const SCREENSHOT_PATH = "/tmp/files-finder.png";
+const SCREENSHOT_PATH = "/tmp/files-nautilus.png";
 
-// Palette duplicated from clients/files/internal/scene/render.go so the probe
-// is self-contained. Keep in sync if the colour table changes there.
-const COLOR_WINDOW_BG  = [246, 246, 247];
-const COLOR_SIDEBAR_BG = [232, 232, 236];
-const COLOR_TOOLBAR_BG = [238, 238, 240];
-const COLOR_ACCENT     = [0, 99, 233];
+// Adwaita (light) palette duplicated from clients/files/internal/scene/render.go
+// so the probe is self-contained. Keep in sync if the colour table changes there.
+const COLOR_WINDOW_BG     = [250, 250, 250];
+const COLOR_SIDEBAR_BG    = [241, 241, 241];
+const COLOR_HEADERBAR_BG  = [248, 248, 248];
+const COLOR_ACCENT        = [53, 132, 228];
 
 // Layout constants must match render.go.
-const TOOLBAR_HEIGHT        = 40;
-const COLUMN_HEADER_HEIGHT  = 24;
-const ROW_HEIGHT            = 28;
-const SIDEBAR_WIDTH         = 140;
+const HEADER_BAR_HEIGHT     = 44;
+const COLUMN_HEADER_HEIGHT  = 28;
+const ROW_HEIGHT            = 32;
+const SIDEBAR_WIDTH         = 160;
 const SURFACE_W             = 720;
 const SURFACE_H             = 440;
 
@@ -89,7 +89,7 @@ function pixelAt(png, x, y) {
 function eqColor(px, c) { return px[0] === c[0] && px[1] === c[1] && px[2] === c[2]; }
 
 // findSidebarBounds locates the file browser surface by its unique sidebar
-// background colour (no other compositor pane uses (232,232,236)).
+// background colour (no other compositor pane uses Adwaita's @sidebar_bg).
 // Returns the bounding box of the contiguous sidebar pixel block.
 function findSidebarBounds(png, color) {
   const { width, height, data } = png;
@@ -110,13 +110,13 @@ function findSidebarBounds(png, color) {
 }
 
 // Surface gives the file browser surface bounds. The sidebar starts at x=0
-// of the surface (row 0 is the toolbar, no sidebar) so we offset minY by
-// TOOLBAR_HEIGHT to land on the surface origin.
+// of the surface (row 0 is the header bar, no sidebar) so we offset minY by
+// HEADER_BAR_HEIGHT to land on the surface origin.
 function fileSurface(png) {
   const sb = findSidebarBounds(png, COLOR_SIDEBAR_BG);
   if (!sb) return null;
-  // sb.x is the surface origin x; sb.y is TOOLBAR_HEIGHT below surface origin.
-  return { x: sb.x, y: sb.y - TOOLBAR_HEIGHT, w: SURFACE_W, h: SURFACE_H };
+  // sb.x is the surface origin x; sb.y is HEADER_BAR_HEIGHT below surface origin.
+  return { x: sb.x, y: sb.y - HEADER_BAR_HEIGHT, w: SURFACE_W, h: SURFACE_H };
 }
 
 // findHighlightedRow returns the y-coordinate of the accent-strip top edge
@@ -124,7 +124,7 @@ function fileSurface(png) {
 // past the sidebar.
 function findHighlightedRow(png, surface) {
   const x = surface.x + SIDEBAR_WIDTH + 4;
-  const y0 = surface.y + TOOLBAR_HEIGHT + COLUMN_HEADER_HEIGHT;
+  const y0 = surface.y + HEADER_BAR_HEIGHT + COLUMN_HEADER_HEIGHT;
   const y1 = y0 + 8 * ROW_HEIGHT;
   for (let y = y0; y < y1; y++) {
     if (eqColor(pixelAt(png, x, y), COLOR_ACCENT)) {
@@ -172,14 +172,16 @@ try {
     console.log(`ok  Files surface located at (${surface.x},${surface.y}) ${surface.w}x${surface.h}`);
 
     // Per-region pixel samples (the "looks right" proof).
-    // Sidebar (x=10, mid-height of right pane).
-    const sbX = surface.x + 10;
-    const sbY = surface.y + TOOLBAR_HEIGHT + 100;
+    // Sidebar BG -- sample the right-edge gutter of the sidebar where no
+    // label glyph paints (the 1px divider sits at SidebarWidth-1, so -4 is
+    // safely inside).
+    const sbX = surface.x + SIDEBAR_WIDTH - 4;
+    const sbY = surface.y + HEADER_BAR_HEIGHT + 100;
     const sbPx = pixelAt(png1, sbX, sbY);
     if (!eqColor(sbPx, COLOR_SIDEBAR_BG)) {
       fail(`sidebar pixel at (${sbX},${sbY}) = ${sbPx}, want ${COLOR_SIDEBAR_BG}`);
     } else {
-      console.log(`ok  sidebar pixel @ (${sbX},${sbY}) = (${sbPx.join(",")}) -- COLOR_SIDEBAR_BG`);
+      console.log(`ok  sidebar pixel @ (${sbX},${sbY}) = (${sbPx.join(",")}) -- COLOR_SIDEBAR_BG (Adwaita @sidebar_bg)`);
     }
     // Window background (right pane, far right + below all rows).
     const wbX = surface.x + SURFACE_W - 4;
@@ -188,16 +190,17 @@ try {
     if (!eqColor(wbPx, COLOR_WINDOW_BG)) {
       fail(`window-bg pixel at (${wbX},${wbY}) = ${wbPx}, want ${COLOR_WINDOW_BG}`);
     } else {
-      console.log(`ok  window-bg pixel @ (${wbX},${wbY}) = (${wbPx.join(",")}) -- COLOR_WINDOW_BG`);
+      console.log(`ok  window-bg pixel @ (${wbX},${wbY}) = (${wbPx.join(",")}) -- COLOR_WINDOW_BG (Adwaita @view_bg)`);
     }
-    // Toolbar background (above the sidebar, far right of toolbar band).
-    const tbX = surface.x + SURFACE_W - 50;
-    const tbY = surface.y + TOOLBAR_HEIGHT / 2;
-    const tbPx = pixelAt(png1, tbX, tbY);
-    if (!eqColor(tbPx, COLOR_TOOLBAR_BG)) {
-      fail(`toolbar pixel at (${tbX},${tbY}) = ${tbPx}, want ${COLOR_TOOLBAR_BG}`);
+    // Header bar background (right of the path bar buttons + above the column
+    // headers). Sample at far-right of the header band.
+    const hbX = surface.x + SURFACE_W - 6;
+    const hbY = surface.y + HEADER_BAR_HEIGHT / 2;
+    const hbPx = pixelAt(png1, hbX, hbY);
+    if (!eqColor(hbPx, COLOR_HEADERBAR_BG)) {
+      fail(`header-bar pixel at (${hbX},${hbY}) = ${hbPx}, want ${COLOR_HEADERBAR_BG}`);
     } else {
-      console.log(`ok  toolbar pixel @ (${tbX},${tbY}) = (${tbPx.join(",")}) -- COLOR_TOOLBAR_BG`);
+      console.log(`ok  header-bar pixel @ (${hbX},${hbY}) = (${hbPx.join(",")}) -- COLOR_HEADERBAR_BG`);
     }
 
     // Confirm the accent strip is at the FIRST entry row (Cursor=0).
@@ -205,7 +208,7 @@ try {
     if (row0Y === null) {
       fail("initial accent strip not visible");
     } else {
-      const expected = surface.y + TOOLBAR_HEIGHT + COLUMN_HEADER_HEIGHT;
+      const expected = surface.y + HEADER_BAR_HEIGHT + COLUMN_HEADER_HEIGHT;
       if (Math.abs(row0Y - expected) > 2) {
         fail(`initial accent strip at y=${row0Y}, expected ~${expected}`);
       } else {
@@ -216,7 +219,7 @@ try {
     // Focus the window with a click in the right pane in a guaranteed-safe spot:
     // the column-header band (the click handler ignores it but the window grabs focus).
     const cx = surface.x + SIDEBAR_WIDTH + 200;
-    const cy = surface.y + TOOLBAR_HEIGHT + COLUMN_HEADER_HEIGHT / 2;
+    const cy = surface.y + HEADER_BAR_HEIGHT + COLUMN_HEADER_HEIGHT / 2;
     await page.mouse.click(cx, cy);
     await page.waitForTimeout(150);
 
@@ -231,7 +234,7 @@ try {
     if (row1Y === null) {
       fail("accent strip vanished after ArrowDown");
     } else {
-      const expected = surface.y + TOOLBAR_HEIGHT + COLUMN_HEADER_HEIGHT + ROW_HEIGHT;
+      const expected = surface.y + HEADER_BAR_HEIGHT + COLUMN_HEADER_HEIGHT + ROW_HEIGHT;
       if (Math.abs(row1Y - expected) > 2) {
         fail(`row 1 accent at y=${row1Y}, expected ~${expected}`);
       } else {

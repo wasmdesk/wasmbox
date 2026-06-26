@@ -18,6 +18,13 @@ func eqRGB(p [4]uint8, c [3]uint8) bool {
 	return p[0] == c[0] && p[1] == c[1] && p[2] == c[2]
 }
 
+// firstBookmarkRowY returns the y-coordinate of the top of the Home row
+// (the first entry under the "BOOKMARKS" section header). Mirrors the
+// layout walk paintSidebar performs.
+func firstBookmarkRowY() int {
+	return HeaderBarHeight + SidebarTopPadding + SidebarSectionHeaderHeight
+}
+
 // Render fills an exactly-sized buffer without panicking.
 func TestRenderExactSize(t *testing.T) {
 	s := New(720, 440)
@@ -37,7 +44,7 @@ func TestRenderPanicsOnSizeMismatch(t *testing.T) {
 
 // The sidebar background colour appears at the SidebarSamplePoint (a column
 // inside the left pane that the renderer guarantees stays empty -- below
-// every Favorite row, in the centre column).
+// every entry row).
 func TestSidebarBG(t *testing.T) {
 	w, h := 720, 440
 	s := New(w, h)
@@ -63,16 +70,17 @@ func TestWindowBG(t *testing.T) {
 	}
 }
 
-// The toolbar fills the top band with ColorToolbarBG. We sample the far
-// right of the toolbar -- nothing else paints there.
-func TestToolbarBG(t *testing.T) {
+// The header bar fills the top band with ColorHeaderBarBG. We sample the
+// far right of the bar -- nothing else paints there.
+func TestHeaderBarBG(t *testing.T) {
 	w, h := 720, 440
 	s := New(w, h)
 	buf := newRGBA(w, h)
 	Render(s, buf)
-	px := pixelAt(buf, w, w-4, ToolbarHeight/2)
-	if !eqRGB(px, ColorToolbarBG) {
-		t.Errorf("toolbar BG = %v, want %v", px, ColorToolbarBG)
+	hx, hy := HeaderBarSamplePoint(w)
+	px := pixelAt(buf, w, hx, hy)
+	if !eqRGB(px, ColorHeaderBarBG) {
+		t.Errorf("header bar BG = %v, want %v", px, ColorHeaderBarBG)
 	}
 }
 
@@ -82,8 +90,9 @@ func TestSelectedRowAccent(t *testing.T) {
 	s := New(w, h)
 	buf := newRGBA(w, h)
 	Render(s, buf)
-	// Row 0 is selected by default. Sample inside the row, past the icon.
-	y := ToolbarHeight + ColumnHeaderHeight + RowHeight/2
+	// Row 0 is selected by default. Sample inside the row, past the icon
+	// but before the name (the first IconSize+10 pixels are icon-then-gap).
+	y := HeaderBarHeight + ColumnHeaderHeight + RowHeight/2
 	x := SidebarWidth + 4 // just inside the right pane, before any icon
 	px := pixelAt(buf, w, x, y)
 	if !eqRGB(px, ColorAccent) {
@@ -101,92 +110,92 @@ func TestCursorMoveChangesAccent(t *testing.T) {
 	buf := newRGBA(w, h)
 	Render(s, buf)
 	// Row 0 is no longer selected.
-	y0 := ToolbarHeight + ColumnHeaderHeight + RowHeight/2
+	y0 := HeaderBarHeight + ColumnHeaderHeight + RowHeight/2
 	x := SidebarWidth + 4
 	px0 := pixelAt(buf, w, x, y0)
 	if eqRGB(px0, ColorAccent) {
 		t.Errorf("row[0] still accent after ArrowDown: %v", px0)
 	}
 	// Row 1 is now selected.
-	y1 := ToolbarHeight + ColumnHeaderHeight + RowHeight + RowHeight/2
+	y1 := HeaderBarHeight + ColumnHeaderHeight + RowHeight + RowHeight/2
 	px1 := pixelAt(buf, w, x, y1)
 	if !eqRGB(px1, ColorAccent) {
 		t.Errorf("row[1] accent after ArrowDown = %v, want %v", px1, ColorAccent)
 	}
 }
 
-// The selected-favorite highlight paints accent inside the sidebar.
+// The selected-sidebar highlight paints accent inside the sidebar. We
+// sample the right-edge gutter of the row band so the pixel reflects the
+// accent fill rather than the label glyph painted on top of it.
 func TestSidebarSelectionAccent(t *testing.T) {
 	w, h := 720, 440
 	s := New(w, h)
-	// Click on the first Favorite (Documents). Coordinates: sidebar x, y in
-	// the first row band.
-	clickY := ToolbarHeight + SidebarHeaderHeight + 4
+	// Click on the second sidebar row (Documents -- index 1).
+	clickY := firstBookmarkRowY() + SidebarRowHeight + SidebarRowHeight/2
 	if !s.HandleMouse(20, clickY) {
 		t.Fatal("sidebar click returned false")
 	}
 	buf := newRGBA(w, h)
 	Render(s, buf)
-	// Sample a pixel inside the highlighted sidebar row, past the icon.
-	x := SidebarWidth/2 + 20
-	y := ToolbarHeight + SidebarHeaderHeight + SidebarRowHeight/2
+	// Right-edge of the selected band, just inside the 1px divider.
+	x := SidebarWidth - 4
+	y := firstBookmarkRowY() + SidebarRowHeight + SidebarRowHeight/2
 	px := pixelAt(buf, w, x, y)
 	if !eqRGB(px, ColorAccent) {
 		t.Errorf("sidebar selection at (%d,%d) = %v, want accent %v", x, y, px, ColorAccent)
 	}
 }
 
-// paintFolderIcon paints the folder face pixel at the icon's mid-height.
+// paintFolderIcon paints the folder face pixel at the icon's mid-body.
 func TestPaintFolderIcon(t *testing.T) {
 	w, h := 64, 32
 	buf := newRGBA(w, h)
 	paintFolderIcon(buf, w, h, 4, 4, false)
-	// The body (lighter face) sits at y+5..y+10 -- sample mid-body.
-	px := pixelAt(buf, w, 4+8, 4+7)
+	// The body fill sits at y+4..y+15 -- sample interior (avoid stroke edges).
+	px := pixelAt(buf, w, 4+12, 4+10)
 	if !eqRGB(px, ColorFolderFill) {
 		t.Errorf("folder face = %v, want %v", px, ColorFolderFill)
 	}
 	// Selected variant flips to white.
 	buf2 := newRGBA(w, h)
 	paintFolderIcon(buf2, w, h, 4, 4, true)
-	px2 := pixelAt(buf2, w, 4+8, 4+7)
+	px2 := pixelAt(buf2, w, 4+12, 4+10)
 	if !eqRGB(px2, ColorOnAccent) {
 		t.Errorf("selected folder face = %v, want %v", px2, ColorOnAccent)
 	}
 }
 
-// paintFileIcon paints white paper with a gray border.
+// paintFileIcon paints white paper with a gray stroke.
 func TestPaintFileIcon(t *testing.T) {
-	w, h := 64, 32
+	w, h := 64, 64
 	buf := newRGBA(w, h)
 	paintFileIcon(buf, w, h, 4, 4, false)
-	// Mid-paper (offset +2 in x because file body is inset).
-	px := pixelAt(buf, w, 4+2+4, 4+8)
+	// Mid-paper, away from the fold cut + edges.
+	px := pixelAt(buf, w, 4+4, 4+15)
 	if !eqRGB(px, ColorFilePaper) {
 		t.Errorf("file paper = %v, want %v", px, ColorFilePaper)
 	}
-	// Border on the left edge (x = 4+2).
-	pxB := pixelAt(buf, w, 4+2, 4+8)
+	// Stroke on the left edge.
+	pxB := pixelAt(buf, w, 4, 4+10)
 	if !eqRGB(pxB, ColorFileBorder) {
 		t.Errorf("file border = %v, want %v", pxB, ColorFileBorder)
 	}
 	// Selected variant flips the paper to white-on-accent.
 	buf2 := newRGBA(w, h)
 	paintFileIcon(buf2, w, h, 4, 4, true)
-	px2 := pixelAt(buf2, w, 4+2+4, 4+8)
+	px2 := pixelAt(buf2, w, 4+4, 4+15)
 	if !eqRGB(px2, ColorOnAccent) {
 		t.Errorf("selected file paper = %v, want %v", px2, ColorOnAccent)
 	}
 }
 
-// paintToolbar paints the back-arrow chevron in the primary ink.
-func TestPaintToolbarBackButton(t *testing.T) {
+// paintHeaderBar paints the back-arrow chevron in the primary ink.
+func TestPaintHeaderBarBackButton(t *testing.T) {
 	w, h := 720, 440
 	s := New(w, h)
 	buf := newRGBA(w, h)
-	paintToolbar(buf, w, h, s)
-	// The chevron sits roughly at BackBtnX+BackBtnW/2, BackBtnY+BackBtnH/2.
-	// Sample around the tip to find at least one ink pixel.
+	paintHeaderBar(buf, w, h, s)
+	// The chevron sits roughly at BackBtnX+BackBtnW/2-3, BackBtnY+BackBtnH/2.
 	found := false
 	for dy := -4; dy <= 4 && !found; dy++ {
 		for dx := -4; dx <= 4 && !found; dx++ {
@@ -205,19 +214,125 @@ func TestPaintToolbarBackButton(t *testing.T) {
 	}
 }
 
-// paintColumnHeaders paints the header band with the toolbar BG colour.
+// paintHamburger paints three horizontal lines in the primary ink.
+func TestPaintHamburger(t *testing.T) {
+	w, h := 720, 440
+	buf := newRGBA(w, h)
+	fillRect(buf, w, h, 0, 0, w, h, ColorHeaderBarBG)
+	paintHamburger(buf, w, h)
+	// Sample the first line (the top "stripe"): inside the button at lx+1.
+	px := pixelAt(buf, w, HamburgerBtnX+8, HamburgerBtnY+7)
+	if !eqRGB(px, ColorTextPrimary) {
+		t.Errorf("hamburger top line = %v, want %v", px, ColorTextPrimary)
+	}
+}
+
+// paintForwardButton with enabled=false uses the disabled ink.
+func TestPaintForwardButtonDisabled(t *testing.T) {
+	w, h := 720, 440
+	buf := newRGBA(w, h)
+	fillRect(buf, w, h, 0, 0, w, h, ColorHeaderBarBG)
+	paintForwardButton(buf, w, h, false)
+	// Look for ColorButtonDisabled ink anywhere inside the forward button.
+	found := false
+	for y := ForwardBtnY + 4; y < ForwardBtnY+ForwardBtnH-4 && !found; y++ {
+		for x := ForwardBtnX + 4; x < ForwardBtnX+ForwardBtnW-4 && !found; x++ {
+			if eqRGB(pixelAt(buf, w, x, y), ColorButtonDisabled) {
+				found = true
+			}
+		}
+	}
+	if !found {
+		t.Error("forward chevron (disabled) not painted in disabled ink")
+	}
+}
+
+// paintForwardButton with enabled=true uses the primary ink.
+func TestPaintForwardButtonEnabled(t *testing.T) {
+	w, h := 720, 440
+	buf := newRGBA(w, h)
+	fillRect(buf, w, h, 0, 0, w, h, ColorHeaderBarBG)
+	paintForwardButton(buf, w, h, true)
+	found := false
+	for y := ForwardBtnY + 4; y < ForwardBtnY+ForwardBtnH-4 && !found; y++ {
+		for x := ForwardBtnX + 4; x < ForwardBtnX+ForwardBtnW-4 && !found; x++ {
+			if eqRGB(pixelAt(buf, w, x, y), ColorTextPrimary) {
+				found = true
+			}
+		}
+	}
+	if !found {
+		t.Error("forward chevron (enabled) not painted in primary ink")
+	}
+}
+
+// paintPathBar at root renders just "Home" as the active crumb.
+func TestPaintPathBarRoot(t *testing.T) {
+	w, h := 720, 440
+	s := New(w, h)
+	buf := newRGBA(w, h)
+	fillRect(buf, w, h, 0, 0, w, h, ColorHeaderBarBG)
+	paintPathBar(buf, w, h, s)
+	// At the root the only crumb is "Home"; sample the active-crumb fill.
+	px := pixelAt(buf, w, PathBarX+2, PathBarY+PathBarH/2)
+	if !eqRGB(px, ColorCrumbActiveBG) {
+		t.Errorf("active crumb fill = %v, want %v", px, ColorCrumbActiveBG)
+	}
+}
+
+// paintPathBar with a nested path renders Home > <child> with two crumbs.
+func TestPaintPathBarNested(t *testing.T) {
+	w, h := 720, 440
+	s := New(w, h)
+	_ = s.HandleKey("ArrowDown") // -> Documents row
+	_ = s.HandleKey("ArrowUp")
+	s.Browser.Cursor = 0
+	_ = s.Browser.ActivateCurrent(s.VFS) // descend into Documents
+	buf := newRGBA(w, h)
+	fillRect(buf, w, h, 0, 0, w, h, ColorHeaderBarBG)
+	paintPathBar(buf, w, h, s)
+	// At /Documents the path is ["Home", "Documents"]; the second crumb is
+	// active, so the active fill sits further to the right than at root.
+	crumbs := PathCrumbs(s.Browser.CurrentPath)
+	if len(crumbs) != 2 {
+		t.Fatalf("crumbs = %v, want [Home Documents]", crumbs)
+	}
+}
+
+// PathCrumbs handles a deeper path correctly.
+func TestPathCrumbsDeep(t *testing.T) {
+	got := PathCrumbs("/a/b/c")
+	want := []string{"Home", "a", "b", "c"}
+	if len(got) != len(want) {
+		t.Fatalf("PathCrumbs(/a/b/c) = %v, want %v", got, want)
+	}
+	for i := range got {
+		if got[i] != want[i] {
+			t.Errorf("crumb[%d] = %q, want %q", i, got[i], want[i])
+		}
+	}
+}
+
+// PathCrumbs at the root returns just "Home".
+func TestPathCrumbsRoot(t *testing.T) {
+	got := PathCrumbs("/")
+	if len(got) != 1 || got[0] != "Home" {
+		t.Errorf("PathCrumbs(/) = %v, want [Home]", got)
+	}
+}
+
+// paintColumnHeaders paints the header band with the window BG colour.
 func TestPaintColumnHeaders(t *testing.T) {
 	w, h := 720, 440
 	buf := newRGBA(w, h)
-	// Paint a baseline window BG so the test exercises the header on its
-	// own (no prior paint stage to confuse the sample).
-	fillRect(buf, w, h, 0, 0, w, h, ColorWindowBG)
+	// Paint a baseline so the test exercises the header on its own.
+	fillRect(buf, w, h, 0, 0, w, h, [3]uint8{1, 2, 3})
 	paintColumnHeaders(buf, w, h)
 	// Sample a column in the header band, well to the right (past "Name").
-	y := ToolbarHeight + 4
+	y := HeaderBarHeight + 4
 	px := pixelAt(buf, w, w-50, y)
-	if !eqRGB(px, ColorToolbarBG) {
-		t.Errorf("column header BG = %v, want %v", px, ColorToolbarBG)
+	if !eqRGB(px, ColorWindowBG) {
+		t.Errorf("column header BG = %v, want %v", px, ColorWindowBG)
 	}
 }
 
@@ -230,7 +345,7 @@ func TestPaintListRowsEmpty(t *testing.T) {
 	fillRect(buf, w, h, 0, 0, w, h, ColorWindowBG)
 	paintListRows(buf, w, h, s)
 	// The first row band should still be window BG (no accent strip).
-	y := ToolbarHeight + ColumnHeaderHeight + RowHeight/2
+	y := HeaderBarHeight + ColumnHeaderHeight + RowHeight/2
 	px := pixelAt(buf, w, SidebarWidth+4, y)
 	if !eqRGB(px, ColorWindowBG) {
 		t.Errorf("empty list row[0] BG = %v, want %v", px, ColorWindowBG)
@@ -241,8 +356,8 @@ func TestPaintListRowsEmpty(t *testing.T) {
 // `y >= h` early-break).
 func TestPaintListRowsClipsBeyondSurface(t *testing.T) {
 	w := 720
-	// Surface tall enough for the toolbar+header+1 row but short of all 4.
-	h := ToolbarHeight + ColumnHeaderHeight + RowHeight + 2
+	// Surface tall enough for the header+column-header+1 row but short of all 4.
+	h := HeaderBarHeight + ColumnHeaderHeight + RowHeight + 2
 	s := New(w, h)
 	buf := newRGBA(w, h)
 	Render(s, buf) // must not panic
@@ -254,9 +369,9 @@ func TestFormatSize(t *testing.T) {
 		in   int64
 		want string
 	}{
-		{0, "0 B"},
-		{1, "1 B"},
-		{1023, "1023 B"},
+		{0, "0 bytes"},
+		{1, "1 bytes"},
+		{1023, "1023 bytes"},
 		{1024, "1.0 KB"},
 		{1234, "1.2 KB"},
 		{89012, "86.9 KB"},
@@ -317,7 +432,6 @@ func TestDrawTextRight(t *testing.T) {
 	buf := newRGBA(w, h)
 	drawTextRight(buf, w, h, 100, 2, "ABC", 1, ColorTextPrimary, false)
 	// At x = 100 - 3*8 = 76, we expect "A" ink in the band 2..10.
-	// Just assert SOMETHING was painted near the expected column.
 	found := false
 	for x := 76; x < 100 && !found; x++ {
 		for y := 2; y < 10 && !found; y++ {
@@ -336,7 +450,6 @@ func TestDrawTextRightBold(t *testing.T) {
 	w, h := 200, 16
 	buf := newRGBA(w, h)
 	drawTextRight(buf, w, h, 100, 2, "X", 1, ColorTextPrimary, true)
-	// Just confirm no panic + at least one ink pixel landed.
 	found := false
 	for i := 0; i+3 < len(buf); i += 4 {
 		if buf[i] == ColorTextPrimary[0] {
@@ -409,12 +522,16 @@ func TestGlyphKnown(t *testing.T) {
 // expected regions.
 func TestSamplePoints(t *testing.T) {
 	x, y := SidebarSamplePoint()
-	if x < 0 || x >= SidebarWidth || y < ToolbarHeight {
+	if x < 0 || x >= SidebarWidth || y < HeaderBarHeight {
 		t.Errorf("SidebarSamplePoint() = (%d,%d), expected inside sidebar", x, y)
 	}
 	x, y = WindowBGSamplePoint(720, 440)
-	if x <= SidebarWidth || y <= ToolbarHeight {
+	if x <= SidebarWidth || y <= HeaderBarHeight {
 		t.Errorf("WindowBGSamplePoint() = (%d,%d), expected in right pane", x, y)
+	}
+	x, y = HeaderBarSamplePoint(720)
+	if y >= HeaderBarHeight || x <= 0 {
+		t.Errorf("HeaderBarSamplePoint() = (%d,%d), expected inside header bar", x, y)
 	}
 }
 
@@ -435,16 +552,20 @@ func TestDrawTextExported(t *testing.T) {
 	}
 }
 
-// paintSidebar with no SidebarSelected (-1) paints no accent strip.
+// paintSidebar with SidebarSelected=-1 paints no accent strip on any row.
+// We sample a point inside a row band, but in the right-edge gutter (past
+// the label glyphs) so the sample reflects pure sidebar BG -- not label ink.
 func TestPaintSidebarNoSelection(t *testing.T) {
 	w, h := 720, 440
 	s := New(w, h)
 	s.SidebarSelected = -1
 	buf := newRGBA(w, h)
 	Render(s, buf)
-	// Inside the first Favorite row, past the icon: should be sidebar BG.
-	y := ToolbarHeight + SidebarHeaderHeight + SidebarRowHeight/2
-	x := SidebarWidth/2 + 20
+	// Inside the second sidebar row (Documents), at x=SidebarWidth-4 (the
+	// 1px divider sits at SidebarWidth-1, so -4 is well clear of the
+	// label glyph + the divider).
+	y := firstBookmarkRowY() + SidebarRowHeight + SidebarRowHeight/2
+	x := SidebarWidth - 4
 	px := pixelAt(buf, w, x, y)
 	if !eqRGB(px, ColorSidebarBG) {
 		t.Errorf("unselected sidebar row at (%d,%d) = %v, want %v", x, y, px, ColorSidebarBG)
@@ -457,9 +578,47 @@ func TestRenderAtProductionSize(t *testing.T) {
 	w, h := 720, 440
 	s := New(w, h)
 	Render(s, newRGBA(w, h))
-	// All four root entries fit -- the 4th row's accent strip is reachable
-	// at row index 3.
 	if len(s.Browser.Entries) != 4 {
 		t.Errorf("entries = %d, want 4", len(s.Browser.Entries))
+	}
+}
+
+// paintSidebarIcon exercises every kind (the dispatch is keyed by Kind).
+func TestPaintSidebarIconKinds(t *testing.T) {
+	w, h := 32, 32
+	for _, kind := range []string{"home", "computer", "trash", "folder", "unknown"} {
+		buf := newRGBA(w, h)
+		paintSidebarIcon(buf, w, h, 4, 8, kind, false)
+		// Each glyph must paint at least one non-zero pixel.
+		any := false
+		for _, b := range buf {
+			if b != 0 {
+				any = true
+				break
+			}
+		}
+		if !any {
+			t.Errorf("paintSidebarIcon(%q) drew nothing", kind)
+		}
+	}
+}
+
+// paintSidebarIcon selected variant flips colours for every kind.
+func TestPaintSidebarIconSelected(t *testing.T) {
+	w, h := 32, 32
+	for _, kind := range []string{"home", "computer", "trash", "folder"} {
+		buf := newRGBA(w, h)
+		paintSidebarIcon(buf, w, h, 4, 8, kind, true)
+		// Selected variants paint at least one ColorOnAccent pixel.
+		any := false
+		for i := 0; i+3 < len(buf); i += 4 {
+			if buf[i] == ColorOnAccent[0] && buf[i+1] == ColorOnAccent[1] && buf[i+2] == ColorOnAccent[2] && buf[i+3] == 0xFF {
+				any = true
+				break
+			}
+		}
+		if !any {
+			t.Errorf("paintSidebarIcon(%q,selected) produced no white ink", kind)
+		}
 	}
 }
