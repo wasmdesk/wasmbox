@@ -30,18 +30,26 @@ const SCREENSHOT_PATH = "/tmp/files-nautilus.png";
 
 // Adwaita (light) palette duplicated from clients/files/internal/scene/render.go
 // so the probe is self-contained. Keep in sync if the colour table changes there.
-const COLOR_WINDOW_BG     = [250, 250, 250];
-const COLOR_SIDEBAR_BG    = [241, 241, 241];
-const COLOR_HEADERBAR_BG  = [248, 248, 248];
-const COLOR_ACCENT        = [53, 132, 228];
+const COLOR_WINDOW_BG      = [250, 250, 250];
+const COLOR_SIDEBAR_BG     = [241, 241, 241];
+const COLOR_HEADERBAR_BG   = [248, 248, 248];
+const COLOR_ACCENT         = [53, 132, 228];
+const COLOR_TEXT_PRIMARY   = [46, 52, 54];
+const COLOR_FOLDER_FILL    = [95, 161, 224];
+const COLOR_ON_ACCENT      = [255, 255, 255];
 
 // Layout constants must match render.go.
-const HEADER_BAR_HEIGHT     = 44;
-const COLUMN_HEADER_HEIGHT  = 28;
-const ROW_HEIGHT            = 32;
-const SIDEBAR_WIDTH         = 160;
-const SURFACE_W             = 720;
-const SURFACE_H             = 440;
+const HEADER_BAR_HEIGHT          = 44;
+const COLUMN_HEADER_HEIGHT       = 28;
+const ROW_HEIGHT                 = 32;
+const SIDEBAR_WIDTH              = 160;
+const SIDEBAR_TOP_PADDING        = 8;
+const SIDEBAR_SECTION_HEADER_H   = 22;
+const SIDEBAR_ROW_H              = 28;
+const ICON_SIZE                  = 18;
+const NAME_COL_X                 = SIDEBAR_WIDTH + 12;
+const SURFACE_W                  = 720;
+const SURFACE_H                  = 440;
 
 const MIME = {
   ".html": "text/html; charset=utf-8",
@@ -251,6 +259,72 @@ try {
       fail(`selected-row accent at (${accentSampleX},${accentSampleY}) = ${accentPx}, want ${COLOR_ACCENT}`);
     } else {
       console.log(`ok  selected-row accent @ (${accentSampleX},${accentSampleY}) = (${accentPx.join(",")}) -- COLOR_ACCENT`);
+    }
+
+    // ----- FOREGROUND CONTENT ASSERTIONS -----
+    // The "window frame with nothing inside" regression: BG colours paint,
+    // but icons + text do not. The earlier probe sampled only background
+    // colours + accent, so a "BG-only" frame passed as ok. We now require
+    // explicit non-zero pixel counts for the folder icon AND the row text
+    // AND the sidebar entry text -- the foreground content the user looks at.
+    //
+    // We count pixels INSIDE a region (rather than sampling a single point)
+    // because the 8x8 font lays out glyphs sparsely; one wrong x/y could miss
+    // ink even on a healthy frame. We use png1 (the pre-ArrowDown frame) so
+    // row 0 is selected (white-on-accent) and row 1+ are unselected.
+    const countIn = (png, x, y, rw, rh, c) => {
+      let n = 0;
+      for (let yy = y; yy < y + rh; yy++) {
+        for (let xx = x; xx < x + rw; xx++) {
+          if (eqColor(pixelAt(png, xx, yy), c)) n++;
+        }
+      }
+      return n;
+    };
+
+    // (a) Folder icon on a non-selected list row (row 1 in png1 = Pictures).
+    //     paintFolderIcon fills 24x14 with ColorFolderFill (95,161,224). We
+    //     scan the icon's bounding box -- if drawing fails, this is 0.
+    const listY0 = surface.y + HEADER_BAR_HEIGHT + COLUMN_HEADER_HEIGHT;
+    const iconRowY = listY0 + ROW_HEIGHT + (ROW_HEIGHT - ICON_SIZE) / 2;
+    const iconRowX = surface.x + NAME_COL_X;
+    const folderPixels = countIn(png1, iconRowX, iconRowY, 24, ICON_SIZE, COLOR_FOLDER_FILL);
+    if (folderPixels < 30) {
+      fail(`folder-icon pixels on list row 1 = ${folderPixels} (need >= 30 of ${COLOR_FOLDER_FILL}); icons not painting`);
+    } else {
+      console.log(`ok  list-row folder icon: ${folderPixels} ColorFolderFill pixels in 24x${ICON_SIZE} band`);
+    }
+
+    // (b) List row 1 NAME label in primary ink (file/folder name on the
+    //     unselected row). drawText paints (46,52,54) glyphs; if drawGlyph
+    //     fails this is 0.
+    const nameTextX = surface.x + NAME_COL_X + ICON_SIZE + 10;
+    const nameTextY = listY0 + ROW_HEIGHT;
+    const namePixels = countIn(png1, nameTextX, nameTextY, 160, ROW_HEIGHT, COLOR_TEXT_PRIMARY);
+    if (namePixels < 20) {
+      fail(`list row 1 name-text pixels = ${namePixels} (need >= 20 of ${COLOR_TEXT_PRIMARY}); drawText is failing`);
+    } else {
+      console.log(`ok  list-row name text: ${namePixels} ColorTextPrimary pixels`);
+    }
+
+    // (c) Sidebar Documents entry text -- the unselected sidebar entry's
+    //     label paints ColorTextPrimary at x ~32 inside the sidebar.
+    const sbFirstRowY = surface.y + HEADER_BAR_HEIGHT + SIDEBAR_TOP_PADDING + SIDEBAR_SECTION_HEADER_H;
+    const sbDocsY = sbFirstRowY + SIDEBAR_ROW_H; // row 1 = Documents
+    const sbTextPixels = countIn(png1, surface.x + 30, sbDocsY, SIDEBAR_WIDTH - 32, SIDEBAR_ROW_H, COLOR_TEXT_PRIMARY);
+    if (sbTextPixels < 6) {
+      fail(`sidebar Documents text pixels = ${sbTextPixels} (need >= 6 of ${COLOR_TEXT_PRIMARY}); sidebar labels invisible`);
+    } else {
+      console.log(`ok  sidebar Documents text: ${sbTextPixels} ColorTextPrimary pixels`);
+    }
+
+    // (d) Sidebar Home entry icon -- the selected row paints white ink
+    //     (ColorOnAccent) for the icon glyph + label.
+    const sbHomeWhite = countIn(png1, surface.x + 8, sbFirstRowY, SIDEBAR_WIDTH - 16, SIDEBAR_ROW_H, COLOR_ON_ACCENT);
+    if (sbHomeWhite < 8) {
+      fail(`sidebar Home selected-row white pixels = ${sbHomeWhite} (need >= 8 of ${COLOR_ON_ACCENT}); selected icon/label missing`);
+    } else {
+      console.log(`ok  sidebar Home selected: ${sbHomeWhite} ColorOnAccent pixels (icon + label)`);
     }
 
     // Save the screenshot before we navigate so the saved frame shows the

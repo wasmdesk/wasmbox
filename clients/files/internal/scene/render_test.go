@@ -622,3 +622,186 @@ func TestPaintSidebarIconSelected(t *testing.T) {
 		}
 	}
 }
+
+// countPixelsIn counts how many pixels inside the rectangle (x,y)..(x+w,y+h)
+// of a w-wide buffer match colour c (alpha is ignored).
+func countPixelsIn(buf []byte, surfW, x, y, rw, rh int, c [3]uint8) int {
+	n := 0
+	for yy := y; yy < y+rh; yy++ {
+		for xx := x; xx < x+rw; xx++ {
+			off := (yy*surfW + xx) * 4
+			if buf[off] == c[0] && buf[off+1] == c[1] && buf[off+2] == c[2] {
+				n++
+			}
+		}
+	}
+	return n
+}
+
+// glyphHasInkBits reports how many ink bits Glyph(c) carries -- a regression
+// guard for "the font table got zeroed", the most likely root cause of a
+// "window frame with nothing inside" rendering bug.
+func glyphInkBits(c byte) int {
+	g := Glyph(c)
+	n := 0
+	for _, row := range g {
+		for bit := 0; bit < 8; bit++ {
+			if (row>>uint(bit))&1 == 1 {
+				n++
+			}
+		}
+	}
+	return n
+}
+
+// The 8x8 font table must carry non-trivial ink for every printable ASCII
+// letter we render in the UI -- if Glyph('A') ever returns all zeros, every
+// label across the window goes invisible while the BG fills still paint.
+// This is the test the Nautilus rewrite did not have (the existing tests
+// only check the fallback + ' ', which is intentionally blank).
+func TestFontLettersHaveInk(t *testing.T) {
+	// Letters / digits / "structural" punctuation that MUST carry meaningful
+	// ink. Single-dot / colon-style glyphs are deliberately tiny (Nautilus
+	// uses them as filename separators); they are not in this list because
+	// even an all-zero version would not look obviously "blank".
+	mustInk := []byte{
+		'A', 'B', 'C', 'D', 'H', 'I', 'N', 'O', 'P', 'S', 'T', 'X', 'Z',
+		'a', 'b', 'c', 'd', 'e', 'g', 'h', 'i', 'l', 'm', 'n', 'o', 'r', 's', 't', 'u', 'y', 'z',
+		'0', '1', '5', '9',
+		'/', '>',
+	}
+	for _, c := range mustInk {
+		if got := glyphInkBits(c); got < 5 {
+			t.Errorf("Glyph(%q) has only %d ink bits, want >= 5 (font regression?)", c, got)
+		}
+	}
+}
+
+// State.New must populate BOTH the sidebar AND the browser's Entries slice;
+// either left empty silently produces "window frame with nothing inside".
+// The check is independent of pixel-painting so it fingerprints exactly which
+// half regressed.
+func TestNewPopulatesSidebarAndEntries(t *testing.T) {
+	s := New(720, 440)
+	if len(s.Sidebar) == 0 {
+		t.Error("State.New produced an empty Sidebar (DefaultSidebar not wired)")
+	}
+	if len(s.Browser.Entries) == 0 {
+		t.Error("State.New produced empty Browser.Entries (Refresh not called)")
+	}
+}
+
+// Render at production size MUST paint visible foreground ink (icons + text)
+// in BOTH panes -- a "frame with only background colours" regression is the
+// thing the existing tests missed. We assert non-trivial pixel counts in:
+//
+//   - sidebar row 0 (Home, selected at boot, accent fill + white icon + white label)
+//   - sidebar row 1 (Documents, unselected, primary-ink label + folder icon)
+//   - list row 0 (selected, accent fill + white icon + white label)
+//   - list row 1 (Pictures, unselected, primary-ink label + folder icon)
+//
+// Each pane must show meaningful counts of (a) icon-colour pixels and
+// (b) text-ink pixels. Zero of either is the regression we are guarding.
+func TestRenderPaintsForegroundInBothPanes(t *testing.T) {
+	w, h := 720, 440
+	s := New(w, h)
+	buf := newRGBA(w, h)
+	Render(s, buf)
+
+	// --- Sidebar row 0 (Home is the selected row at boot: accent fill,
+	//     icon + label inverted to white).
+	firstRowY := HeaderBarHeight + SidebarTopPadding + SidebarSectionHeaderHeight
+	// The icon glyph sits in roughly (12..26)x(iconY..iconY+12). White
+	// pixels MUST appear -- selected variant always paints ColorOnAccent ink.
+	whiteSidebar0 := countPixelsIn(buf, w, 8, firstRowY, 22, SidebarRowHeight, ColorOnAccent)
+	if whiteSidebar0 < 8 {
+		t.Errorf("sidebar row 0 (Home, selected): %d white-on-accent pixels, want >= 8 (icon + label invisible?)", whiteSidebar0)
+	}
+
+	// --- Sidebar row 1 (Documents, unselected: folder-fill icon + primary-ink label).
+	secondRowY := firstRowY + SidebarRowHeight
+	folderFillCount := countPixelsIn(buf, w, 8, secondRowY, 22, SidebarRowHeight, ColorFolderFill)
+	if folderFillCount < 8 {
+		t.Errorf("sidebar row 1 folder-fill pixels = %d, want >= 8 (paintMiniFolder not running?)", folderFillCount)
+	}
+	textInk1 := countPixelsIn(buf, w, 30, secondRowY, SidebarWidth-32, SidebarRowHeight, ColorTextPrimary)
+	if textInk1 < 6 {
+		t.Errorf("sidebar row 1 text-primary pixels = %d, want >= 6 (label drawText returned no ink?)", textInk1)
+	}
+
+	// --- List row 0 (selected: ColorAccent fill + ColorOnAccent ink for icon + name).
+	listY := HeaderBarHeight + ColumnHeaderHeight
+	whiteList0 := countPixelsIn(buf, w, SidebarWidth+8, listY, IconSize+200, RowHeight, ColorOnAccent)
+	if whiteList0 < 30 {
+		t.Errorf("list row 0 (selected) white pixels = %d, want >= 30 (folder icon + name not painted on accent fill?)", whiteList0)
+	}
+
+	// --- List row 1 (Pictures, unselected: folder-fill icon + primary-ink name).
+	list1Y := listY + RowHeight
+	folderFillList := countPixelsIn(buf, w, SidebarWidth+8, list1Y, IconSize+20, RowHeight, ColorFolderFill)
+	if folderFillList < 30 {
+		t.Errorf("list row 1 folder-fill pixels = %d, want >= 30 (paintFolderIcon not running?)", folderFillList)
+	}
+	textPrimaryList := countPixelsIn(buf, w, NameColX+IconSize, list1Y, 200, RowHeight, ColorTextPrimary)
+	if textPrimaryList < 10 {
+		t.Errorf("list row 1 text-primary pixels = %d, want >= 10 (drawText painted no ink for the name?)", textPrimaryList)
+	}
+
+	// --- Column-header band: "Name" / "Size" labels in secondary ink.
+	chY := HeaderBarHeight
+	secondaryInk := countPixelsIn(buf, w, SidebarWidth, chY, w-SidebarWidth, ColumnHeaderHeight, ColorTextSecondary)
+	if secondaryInk < 10 {
+		t.Errorf("column-header secondary-ink pixels = %d, want >= 10 (Name/Size labels missing?)", secondaryInk)
+	}
+
+	// --- Header-bar breadcrumb "Home" text in primary ink.
+	hbInk := countPixelsIn(buf, w, PathBarX, PathBarY, 80, PathBarH, ColorTextPrimary)
+	if hbInk < 10 {
+		t.Errorf("header-bar breadcrumb primary-ink pixels = %d, want >= 10 (path bar text invisible?)", hbInk)
+	}
+}
+
+// SmallSurfaceForegroundProbe -- as the prompt asked, paint a small 240x200
+// surface with one folder entry + DefaultSidebar and assert non-bg pixels
+// land inside the sidebar's first-entry icon band, the list area, AND the
+// text band. Smaller surface = fewer pixels to scan; same correctness signal.
+func TestRenderForegroundOnSmallSurface(t *testing.T) {
+	w, h := 240, 200
+	vfs := &InMemoryVFS{root: Entry{Name: "", IsDir: true, Children: []Entry{
+		{Name: "Folder0", IsDir: true, ModTime: DemoModTime},
+	}}}
+	bs := &BrowserState{CurrentPath: "/"}
+	bs.Refresh(vfs)
+	s := &State{W: w, H: h, VFS: vfs, Browser: bs, Sidebar: DefaultSidebar(), SidebarSelected: 0}
+
+	buf := newRGBA(w, h)
+	Render(s, buf)
+
+	// (a) Sidebar first-entry icon region: the selected "Home" row paints
+	//     ColorAccent across the row, with ColorOnAccent ink for icon + label.
+	firstRowY := HeaderBarHeight + SidebarTopPadding + SidebarSectionHeaderHeight
+	acc := countPixelsIn(buf, w, 0, firstRowY, SidebarWidth-1, SidebarRowHeight, ColorAccent)
+	if acc < 200 {
+		t.Errorf("sidebar selected-row accent fill = %d pixels, want >= 200", acc)
+	}
+	whiteIco := countPixelsIn(buf, w, 8, firstRowY, 24, SidebarRowHeight, ColorOnAccent)
+	if whiteIco < 5 {
+		t.Errorf("sidebar selected-row white icon ink = %d, want >= 5", whiteIco)
+	}
+
+	// (b) List area: row 0 carries the accent fill + ColorOnAccent icon + name
+	//     (entry index 0 is selected by clampCursor at boot).
+	listY := HeaderBarHeight + ColumnHeaderHeight
+	listAcc := countPixelsIn(buf, w, SidebarWidth, listY, w-SidebarWidth, RowHeight, ColorAccent)
+	if listAcc < 100 {
+		t.Errorf("list row 0 accent fill = %d pixels, want >= 100", listAcc)
+	}
+
+	// (c) Text pixel region: the column-header band carries "Name" + "Size"
+	//     in ColorTextSecondary; without text rendering this is 0.
+	chY := HeaderBarHeight
+	chInk := countPixelsIn(buf, w, SidebarWidth, chY, w-SidebarWidth, ColumnHeaderHeight, ColorTextSecondary)
+	if chInk < 10 {
+		t.Errorf("column-header text ink (secondary) = %d, want >= 10", chInk)
+	}
+}
