@@ -1,0 +1,110 @@
+# Deploy wasmbox to GitHub Pages: the desktop + a SAME-ORIGIN static /v2 OCI
+# mirror of each client app, so the whole thing loads from a static host with
+# no server, no CORS and no token (ghcr/registries refuse cross-origin browser
+# reads; the artifacts are served beside the page instead).
+#
+# Cross-origin isolation (needed for SharedArrayBuffer) is supplied at runtime
+# by coi-serviceworker.js, since Pages cannot set COOP/COEP headers.
+#
+# v1 deploys the self-contained in-repo apps (hello, terminal, files). dock and
+# quake build from sibling repos (wasmdesk/wasmdock, go-quake1/engine) and are a
+# follow-up once their checkout is wired here. Publishing the canonical images
+# to ghcr.io/wasmdesk/<app> is a separate step (needs push auth in ociapps-push)
+# — the mirror bytes are identical either way, so Pages delivery does not block
+# on it.
+name: pages
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+# One in-flight deploy at a time; let a newer push supersede an older run.
+concurrency:
+  group: pages
+  cancel-in-progress: true
+
+env:
+  GOWORK: "off"
+  CGO_ENABLED: "0"
+
+jobs:
+  build:
+    name: Build desktop + static /v2 mirror
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      # The ociapps-pack + ociapps-static CLIs come from the sibling repo.
+      - name: Checkout wasmdesk/ociapps
+        uses: actions/checkout@v4
+        with:
+          repository: wasmdesk/ociapps
+          path: _ociapps
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.26.4"
+          check-latest: true
+          cache: true
+
+      - name: Build ociapps CLIs (pack + static mirror)
+        run: |
+          mkdir -p bin
+          go -C _ociapps build -o "$PWD/bin/ociapps-pack"   ./cmd/ociapps-pack
+          go -C _ociapps build -o "$PWD/bin/ociapps-static" ./cmd/ociapps-static
+
+      - name: Build the compositor wasm (embeds compositor.rb) + wasm_exec.js
+        run: |
+          GOOS=js GOARCH=wasm go build -o wasmbox.wasm .
+          root="$(go env GOROOT)"
+          cp "$root/lib/wasm/wasm_exec.js" ./wasm_exec.js 2>/dev/null || cp "$root/misc/wasm/wasm_exec.js" ./wasm_exec.js
+
+      - name: Build + prep the in-repo client apps
+        run: |
+          set -e
+          root="$(go env GOROOT)"
+          wexec="$root/lib/wasm/wasm_exec.js"; [ -f "$wexec" ] || wexec="$root/misc/wasm/wasm_exec.js"
+          for app in hello terminal files; do
+            GOOS=js GOARCH=wasm go build -o "clients/$app/$app.wasm" "./clients/$app"
+            cp clients/sdk/sdk.js "clients/$app/sdk.js"
+            cp "$wexec" "clients/$app/wasm_exec.js"
+          done
+
+      - name: Assemble the Pages site (desktop + shared SDK + static /v2 mirror)
+        run: |
+          set -e
+          SITE=_site
+          rm -rf "$SITE" && mkdir -p "$SITE/clients/sdk"
+          cp index.html coi-serviceworker.js bridge.js boot-config.js compositor.worker.js ociapps-loader.js wasm_exec.js wasmbox.wasm "$SITE/"
+          cp clients/sdk/sdk.js "$SITE/clients/sdk/sdk.js"
+          # .nojekyll so Pages serves the blobs/sha256:<hex> files (colon in the
+          # name) verbatim instead of running them through Jekyll.
+          touch "$SITE/.nojekyll"
+          for app in hello terminal files; do
+            ./bin/ociapps-pack -in "clients/$app" -manifest "packs/$app.toml" -out "/tmp/oci-$app" -ref "$app:latest"
+            ./bin/ociapps-static -in "/tmp/oci-$app" -repo "$app" -out "$SITE"
+          done
+          echo "assembled $SITE: $(find "$SITE/v2" -type f | wc -l) /v2 files"
+
+      - name: Upload Pages artifact
+        uses: actions/upload-pages-artifact@v3
+        with:
+          path: _site
+
+  deploy:
+    name: Deploy to GitHub Pages
+    needs: build
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - name: Deploy
+        id: deployment
+        uses: actions/deploy-pages@v4
