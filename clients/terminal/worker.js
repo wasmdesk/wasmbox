@@ -28,6 +28,14 @@ const client = new WasmboxClient({ title: "Terminal", w: 640, h: 400 });
 self.wasmboxClient = client;
 
 client.start().then(async () => {
+  // Pre-paint the terminal background (dark panel) + commit immediately,
+  // so the user sees a flat dark pane while terminal.wasm is still
+  // fetching + parsing + booting. Without this the SAB stays at init
+  // zeros = transparent, and the compositor blits "see-through" into
+  // the desktop, leaving the user staring at an empty window frame.
+  client.fillRect(16, 16, 16, 255);
+  client.commit();
+
   const assets = isOCI
     ? await WasmboxClient.bootFromOCIAssets({ fallbackMs: 2000 })
     : null;

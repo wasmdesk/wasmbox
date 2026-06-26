@@ -30,6 +30,15 @@ const client = new WasmboxClient({ title: "Files", w: 720, h: 440 });
 self.wasmboxClient = client;
 
 client.start().then(async () => {
+  // Pre-paint the surface with the Adwaita window background + commit
+  // immediately, so the user sees a flat gray pane while files.wasm
+  // is still fetching + parsing + booting (~2 s for a 2 MB binary).
+  // Without this the SAB stays at init zeros = transparent, and the
+  // compositor blits "see-through" into the desktop = user reads it
+  // as "empty window with nothing inside".
+  client.fillRect(250, 250, 250, 255);
+  client.commit();
+
   const assets = isOCI
     ? await WasmboxClient.bootFromOCIAssets({ fallbackMs: 2000 })
     : null;
