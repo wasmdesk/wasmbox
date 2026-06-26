@@ -417,16 +417,26 @@ tasks:
           docker stop ociapps-registry || true
         fi
         docker run -d -p 5000:5000 --rm --name ociapps-registry \
-          -e 'REGISTRY_HTTP_HEADERS_Access-Control-Allow-Origin=[*]' \
+          -e 'REGISTRY_HTTP_HEADERS_Access-Control-Allow-Origin=["*"]' \
           -e 'REGISTRY_HTTP_HEADERS_Access-Control-Allow-Methods=[HEAD,GET,OPTIONS]' \
           -e 'REGISTRY_HTTP_HEADERS_Cross-Origin-Resource-Policy=[cross-origin]' \
           registry:2
         # Wait for the registry to start accepting connections (registry:2 is
-        # usually ready inside 1 s; loop to be safe).
+        # usually ready inside 1 s; loop to be safe). FAIL loudly if it never
+        # comes up -- a silent timeout used to mask config-parse crashes
+        # (e.g. bare [*] is a YAML anchor ref + crashes registry:2 on boot).
+        ready=0
         for i in 1 2 3 4 5 6 7 8 9 10; do
-          if curl -sf http://127.0.0.1:5000/v2/ >/dev/null; then break; fi
+          if curl -sf http://127.0.0.1:5000/v2/ >/dev/null 2>&1; then ready=1; break; fi
           sleep 0.5
         done
+        if [ "$ready" != "1" ]; then
+          echo "ociapps:registry:up: registry never became ready on :5000" >&2
+          echo "ociapps:registry:up: container logs (if any):" >&2
+          docker logs ociapps-registry 2>&1 | tail -20 >&2 || true
+          exit 1
+        fi
+        echo "ociapps:registry:up: ready on http://localhost:5000"
 
   ociapps:registry:down:
     desc: Stop the local OCI registry container started by ociapps:registry:up.
