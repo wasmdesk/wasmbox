@@ -130,6 +130,12 @@ jobs:
           WASMBOX_BASE_URL: "http://127.0.0.1:8137"
         run: node probe-popup.mjs
 
+      - name: Run headless nested-popup probe (submenu + layered grab)
+        working-directory: test
+        env:
+          WASMBOX_BASE_URL: "http://127.0.0.1:8137"
+        run: node probe-nested.mjs
+
       - name: Stop the server
         if: always()
         run: |
