@@ -904,6 +904,22 @@ func TestWindowCarriesWorkspaceField(t *testing.T) {
 	}
 }
 
+// TestSetThemeReplacesTheme: SetTheme swaps the active theme + the next
+// Render call uses the new colours.
+func TestSetTheme(t *testing.T) {
+	s := New(tW, tH)
+	orig := s.Theme.Border.Color
+	custom := theme.Theme{}
+	custom.Border.Color = theme.Color{0xAB, 0xCD, 0xEF}
+	s.SetTheme(custom)
+	if s.Theme.Border.Color == orig {
+		t.Fatalf("SetTheme did not swap the theme: still %v", s.Theme.Border.Color)
+	}
+	if s.Theme.Border.Color != (theme.Color{0xAB, 0xCD, 0xEF}) {
+		t.Fatalf("SetTheme stored = %v", s.Theme.Border.Color)
+	}
+}
+
 // bytesEqual is a tiny []byte compare so the workspace render-change test
 // does not pull in reflect.DeepEqual.
 func bytesEqual(a, b []byte) bool {

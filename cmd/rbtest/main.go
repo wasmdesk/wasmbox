@@ -577,18 +577,20 @@ assert(root.is_a?(Menu), "RootMenu.build returns a Menu")
 labels = root.entries.map { |e| e[:label] }
 assert_eq(labels[0], "Applications", "top-level[0] = Applications")
 assert_eq(labels[1], "Workspaces",   "top-level[1] = Workspaces")
-# Top-level row 2 is the separator (no label).
-assert_eq(root.entries[2][:separator], true, "top-level[2] is a separator")
-assert_eq(labels[3], "About wasmbox", "top-level[3] = About wasmbox")
-assert_eq(labels[4], "Reload",        "top-level[4] = Reload")
-assert_eq(labels[5], "Exit",          "top-level[5] = Exit")
-# Applications + Workspaces carry a submenu.
+assert_eq(labels[2], "Theme",        "top-level[2] = Theme")
+# Top-level row 3 is the separator (no label).
+assert_eq(root.entries[3][:separator], true, "top-level[3] is a separator")
+assert_eq(labels[4], "About wasmbox", "top-level[4] = About wasmbox")
+assert_eq(labels[5], "Reload",        "top-level[5] = Reload")
+assert_eq(labels[6], "Exit",          "top-level[6] = Exit")
+# Applications + Workspaces + Theme carry a submenu.
 assert(root.entries[0][:submenu].is_a?(Menu), "Applications carries a submenu")
 assert(root.entries[1][:submenu].is_a?(Menu), "Workspaces carries a submenu")
+assert(root.entries[2][:submenu].is_a?(Menu), "Theme carries a submenu")
 # About/Reload/Exit each carry a :noop action (dismiss-only in v0).
-assert_eq(root.entries[3][:action][0], :noop, "About is a :noop action")
-assert_eq(root.entries[4][:action][0], :noop, "Reload is a :noop action")
-assert_eq(root.entries[5][:action][0], :noop, "Exit is a :noop action")
+assert_eq(root.entries[4][:action][0], :noop, "About is a :noop action")
+assert_eq(root.entries[5][:action][0], :noop, "Reload is a :noop action")
+assert_eq(root.entries[6][:action][0], :noop, "Exit is a :noop action")
 
 # ---- RootMenu.build: Applications submenu lists LAUNCHABLE -----------
 apps = root.entries[0][:submenu]
@@ -654,6 +656,69 @@ assert_eq(wmr.launchable_url("hello"), "clients/hello/worker.js",
           "hello maps to the bundled hello worker")
 assert_eq(wmr.launchable_url("quake"), "clients/quake/worker.js",
           "quake maps to the bundled quake worker")
+
+# ---- Theme machinery: defaults, switch, broadcast contract -----------
+wmt = WindowManager.new
+assert_eq(wmt.active_theme, "Fluxbox Light", "default active theme")
+assert_eq(wmt.theme_names.length, 3, "three bundled themes")
+assert(wmt.theme_names.include?("Fluxbox Light"), "Fluxbox Light in registry")
+assert(wmt.theme_names.include?("Fluxbox Dark"),  "Fluxbox Dark in registry")
+assert(wmt.theme_names.include?("GNOME Adwaita"), "GNOME Adwaita in registry")
+# theme_source returns the raw .themerc for known names, nil otherwise.
+src = wmt.theme_source("Fluxbox Dark")
+assert(!src.nil?, "Fluxbox Dark source present")
+assert(src.include?("window.active.title.bg.color:"), "Dark source carries Openbox keys")
+assert(wmt.theme_source("nope").nil?, "unknown theme has no source")
+# set_theme: unknown name -> nil, already-active -> nil, valid swap -> new name.
+assert(wmt.set_theme("nope").nil?, "unknown theme name rejected")
+assert(wmt.set_theme("Fluxbox Light").nil?, "already-active theme yields nil")
+assert_eq(wmt.set_theme("Fluxbox Dark"), "Fluxbox Dark", "valid switch returns new name")
+assert_eq(wmt.active_theme, "Fluxbox Dark", "active_theme updated after switch")
+# Bad-type guard: a non-String name does not crash, returns nil.
+assert(wmt.set_theme(42).nil?, "non-string name rejected")
+
+# ---- handle_client_message :set_theme arm ----------------------------
+wmt2 = WindowManager.new
+res = wmt2.handle_client_message({ type: "set_theme", name: "Fluxbox Dark" })
+assert_eq(res, :theme_changed, "set_theme -> :theme_changed on a fresh switch")
+assert_eq(wmt2.active_theme, "Fluxbox Dark", "set_theme arm updated active_theme")
+# Already-active is :ignored.
+res2 = wmt2.handle_client_message({ type: "set_theme", name: "Fluxbox Dark" })
+assert_eq(res2, :ignored, "set_theme -> :ignored when already active")
+# Unknown name is :ignored, active_theme unchanged.
+res3 = wmt2.handle_client_message({ type: "set_theme", name: "nope" })
+assert_eq(res3, :ignored, "set_theme -> :ignored on unknown name")
+assert_eq(wmt2.active_theme, "Fluxbox Dark", "active_theme unchanged after unknown")
+
+# ---- RootMenu.build_themes: shape + active marker --------------------
+themes_sub = root.entries[2][:submenu]
+assert_eq(themes_sub.entries.length, 3, "Theme submenu has 3 entries")
+themes_sub.entries.each do |e|
+  assert_eq(e[:action][0], :theme, "Theme entry action[0] = :theme")
+  assert(wmt.theme_names.include?(e[:action][1]), "Theme action[1] is a known theme name")
+end
+# Fluxbox Light is active in wmr (default) so its label is "* Fluxbox Light".
+labels_t = themes_sub.entries.map { |e| e[:label] }
+assert(labels_t.include?("* Fluxbox Light"), "active theme marked with *")
+assert(labels_t.include?("Fluxbox Dark"), "inactive theme has no *")
+# After a switch the active marker follows.
+wmr_dark = WindowManager.new
+wmr_dark.set_theme("GNOME Adwaita")
+sub2 = RootMenu.build_themes(wmr_dark)
+labels2 = sub2.entries.map { |e| e[:label] }
+assert(labels2.include?("* GNOME Adwaita"), "active marker follows active theme")
+assert(labels2.include?("Fluxbox Light"), "previously-active theme now unmarked")
+
+# ---- WindowManager#externals: panel + normal in stack order ----------
+wme = WindowManager.new
+wme.spawn("normal-a", 100, 100)
+wme.register_external("dock", 480, 28, "panel")
+wme.register_external("client", 200, 150)
+exts = wme.externals
+# The non-external "normal-a" came from spawn (no worker), so it does NOT
+# appear in externals. The two register_external entries DO.
+assert_eq(exts.length, 2, "externals counts only register_external windows")
+exts.each { |w| assert(w.external?, "every externals entry is external?") }
 
 puts "rbtest: ran all pure-WM assertions"
 `
