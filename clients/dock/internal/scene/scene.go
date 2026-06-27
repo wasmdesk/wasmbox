@@ -5,13 +5,22 @@
 // sections that read left-to-right —
 //
 //   - a fixed-width workspace label on the left ("1" by default),
-//   - an iconbar in the middle carrying one launcher button per known app
-//     (terminal / editor / files / hello), each painted as a bevelled
-//     button with a tiny built-in glyph + truncated text label, FOLLOWED
-//     by one "task" button per minimized window the compositor handed us
-//     via the `tasks_changed` input event — the task button looks like a
-//     launcher but carries a "[*]" accent in front of the title and
-//     dispatches a `restore` message on click instead of a `launch`, and
+//   - an iconbar in the middle. Reading left-to-right inside the iconbar:
+//     first the static LAUNCHERS (one button per known app —
+//     terminal / editor / files / hello), then a 1-pixel separator, then
+//     one button per OPEN WINDOW the compositor handed us via the
+//     `windows_changed` input event. Window buttons render in three styles
+//     that match Fluxbox semantics:
+//       - focused window: sunken bevel + active-title background +
+//         active-label ink — reads as the currently selected button;
+//       - unfocused open window: raised bevel + inactive-title background
+//         + active-label ink — reads as a normal button;
+//       - minimized window: raised bevel + inactive-title background +
+//         inactive-label ink + "[*] " accent prefix — reads as a folded
+//         entry;
+//     Left-clicking a window button posts a `focus` message to the
+//     compositor (which raises + focuses it, restoring it first if it was
+//     minimized); right-clicking posts a `close` message;
 //   - a fixed-width clock ("HH:MM") on the right, kept in sync by a `tick`
 //     event posted by the JS worker every 30 seconds.
 //
@@ -38,15 +47,23 @@ type App struct {
 	Label string
 }
 
-// Task identifies one minimized window the compositor has folded into the
-// iconbar. Id is the compositor's window id (echoed back in a
-// {type:"restore", window_id:Id} message on click); Title is the window
-// title painted inside the button. The dock paints task buttons in a
-// dedicated sub-section to the right of the launchers, with a "[*]" accent
-// prefix so the user reads them as folded windows, not new launchers.
-type Task struct {
-	Id    int    `json:"id"`
-	Title string `json:"title"`
+// Window identifies one open (or folded) compositor window the iconbar
+// surfaces as a button. Id is the compositor's window id (echoed back in
+// `focus` / `close` / `restore` messages); Title is the window title painted
+// inside the button; Minimized is true iff the compositor reports the window
+// as currently folded into the iconbar (rendered with a "[*]" prefix +
+// inactive-label dim ink so the user reads it as a folded entry); Focused is
+// true iff this is the keyboard-focused window (rendered with a sunken bevel
+// + active-title background so the user reads it as the selected button).
+// Role mirrors the compositor's role attribute — panels are filtered out
+// server-side so Role is always "window" in practice, but the field is here
+// so a future iconbar style for non-window roles needs no schema change.
+type Window struct {
+	Id        int    `json:"id"`
+	Title     string `json:"title"`
+	Minimized bool   `json:"minimized"`
+	Focused   bool   `json:"focused"`
+	Role      string `json:"role"`
 }
 
 // Glyph enumerates the built-in icon drawings.
@@ -92,17 +109,23 @@ const (
 	// IconLabelGap is the gap between the glyph and the start of the label
 	// text.
 	IconLabelGap = 4
+	// SeparatorW is the horizontal width reserved between the static launcher
+	// row and the dynamic open-window row. The separator is painted as a
+	// 1-pixel dark line centered inside this gap so the user reads the two
+	// sub-sections as distinct stripes.
+	SeparatorW = 8
 )
 
-// State is the toolbar's mutable model: surface size, the launcher row, the
-// active task row (one button per minimized window the compositor has folded
-// into the iconbar), the active workspace label, the current clock string,
-// the cursor position (recorded for a future hover highlight; unused by the
-// v0 paint pass) and the active Openbox-compatible Theme.
+// State is the toolbar's mutable model: surface size, the static launcher
+// row, the active open-window row (one button per non-panel window the
+// compositor has open, including folded ones — flagged via Window.Minimized),
+// the active workspace label, the current clock string, the cursor position
+// (recorded for a future hover highlight; unused by the v0 paint pass) and
+// the active Openbox-compatible Theme.
 type State struct {
 	W, H         int
 	Apps         []App
-	Tasks        []Task
+	Windows      []Window
 	Workspace    string
 	Clock        string
 	CursorX      int
@@ -149,11 +172,12 @@ func (s *State) SetClock(t string) { s.Clock = t }
 // SetWorkspace records the active workspace label ("1", "2", ...).
 func (s *State) SetWorkspace(w string) { s.Workspace = w }
 
-// SetTasks replaces the minimized-window task list. The slice is stored
-// directly (callers must not mutate it after the call); the caller is the
-// compositor's `tasks_changed` event handler, which posts a fresh list on
-// every change.
-func (s *State) SetTasks(ts []Task) { s.Tasks = ts }
+// SetWindows replaces the open-window list (open + minimized, flagged via
+// Window.Minimized). The slice is stored directly (callers must not mutate
+// it after the call); the caller is the compositor's `windows_changed` event
+// handler, which posts a fresh list on every change (new window, close,
+// minimize, restore, focus shift, title rename).
+func (s *State) SetWindows(ws []Window) { s.Windows = ws }
 
 // ---- section geometry ----------------------------------------------------
 
@@ -196,20 +220,36 @@ func (s *State) IconbarButtonRect(i int) (x, y, w, h int) {
 	return
 }
 
-// TaskButtonRect returns the rectangle (in surface coordinates) of the i-th
-// task button. Tasks sit AFTER the launchers in the same iconbar row, so the
-// first task button is placed at the slot one past the last launcher. Same
-// width / gap / height rules as the launcher buttons — visually consistent
-// row, distinguished only by the "[*]" prefix on the label.
-func (s *State) TaskButtonRect(i int) (x, y, w, h int) {
-	off := len(s.Apps) + i
-	return s.IconbarButtonRect(off)
+// WindowButtonRect returns the rectangle (in surface coordinates) of the
+// i-th open-window button. The open-window row sits AFTER the launcher row
+// in the same iconbar, separated by SeparatorW pixels of gap so the user
+// reads the two sub-sections as distinct stripes. Same width / gap / height
+// rules as the launcher buttons. The first window button starts at
+// (last_launcher_right + SeparatorW); subsequent buttons cascade with
+// IconbarButtonGap between them.
+func (s *State) WindowButtonRect(i int) (x, y, w, h int) {
+	bx, _, _, _ := s.IconbarRect()
+	// Anchor past the last launcher slot's right edge (NOT including the
+	// trailing IconbarButtonGap — the SeparatorW replaces it).
+	lastLauncherRight := bx + len(s.Apps)*(IconbarButtonW+IconbarButtonGap) - IconbarButtonGap
+	if len(s.Apps) == 0 {
+		lastLauncherRight = bx - SeparatorW // empty launcher row: window row starts at iconbar left
+	}
+	x = lastLauncherRight + SeparatorW + i*(IconbarButtonW+IconbarButtonGap)
+	y = IconbarVPad
+	w = IconbarButtonW
+	h = s.H - 2*IconbarVPad
+	if h < 1 {
+		h = 1
+	}
+	return
 }
 
 // HitTest returns the iconbar-button index under (x, y) in surface
 // coordinates, or -1 if (x, y) does not fall inside any LAUNCHER button.
 // Clicks on the workspace label or the clock are intentionally inert in v0.
-// Use HitTestTask to probe the minimized-window task buttons.
+// Use HitTestWindow to probe the open-window buttons (which sit to the right
+// of the launcher row, past a SeparatorW gap).
 func (s *State) HitTest(x, y int) int {
 	// Reject anything outside the iconbar's horizontal range up front so a
 	// click on the workspace label / clock never matches.
@@ -231,19 +271,20 @@ func (s *State) HitTest(x, y int) int {
 	return -1
 }
 
-// HitTestTask returns the task-button index under (x, y) in surface
-// coordinates, or -1 if (x, y) does not fall inside any task button. The
-// task row sits to the right of the launcher row in the same iconbar; we
-// reject anything outside the iconbar's horizontal range and skip task
-// buttons whose anchor falls past the iconbar's right edge (very narrow
-// surface fallback — the iconbar paints what fits, the rest is dropped).
-func (s *State) HitTestTask(x, y int) int {
+// HitTestWindow returns the open-window button index under (x, y) in surface
+// coordinates, or -1 if (x, y) does not fall inside any window button. The
+// open-window row sits past the launcher row + SeparatorW gap in the same
+// iconbar; we reject anything outside the iconbar's horizontal range and
+// skip window buttons whose anchor falls past the iconbar's right edge (very
+// narrow surface fallback — the iconbar paints what fits, the rest is
+// dropped).
+func (s *State) HitTestWindow(x, y int) int {
 	ix, _, iw, _ := s.IconbarRect()
 	if x < ix || x >= ix+iw {
 		return -1
 	}
-	for i := range s.Tasks {
-		bx, by, bw, bh := s.TaskButtonRect(i)
+	for i := range s.Windows {
+		bx, by, bw, bh := s.WindowButtonRect(i)
 		if bx >= ix+iw {
 			return -1
 		}
@@ -297,12 +338,30 @@ func Render(s *State, buf []byte) {
 		drawIconbarButton(s, buf, bx, by, cw, bh, app)
 	}
 
-	// Task row — one button per minimized window. Painted immediately after
-	// the launcher row (same iconbar coordinates, same width/gap/height) so
-	// the toolbar reads as a single continuous strip. The label carries a
-	// "[*]" accent prefix to set the task buttons apart from the launchers.
-	for i, task := range s.Tasks {
-		bx, by, bw, bh := s.TaskButtonRect(i)
+	// Separator between the static launcher row and the dynamic open-window
+	// row: a 1-pixel-wide dark vertical line centered inside the SeparatorW
+	// gap. Skipped entirely when no launchers exist (empty Apps).
+	if len(s.Apps) > 0 {
+		sepRight := ix + len(s.Apps)*(IconbarButtonW+IconbarButtonGap) - IconbarButtonGap + SeparatorW
+		sepX := sepRight - SeparatorW/2 - 1
+		if sepX >= ix && sepX < ix+iw {
+			sepInk := [3]uint8{0x40, 0x40, 0x40}
+			for jj := IconbarVPad; jj < s.H-IconbarVPad; jj++ {
+				setPixel(s, buf, sepX, jj, sepInk)
+			}
+		}
+	}
+
+	// Open-window row — one button per non-panel compositor window (open +
+	// minimized). Painted past the SeparatorW gap so the user reads the
+	// launcher row + the window row as two distinct iconbar stripes. Each
+	// button picks one of three styles via drawWindowButton:
+	//   - focused: sunken bevel + active title bg + active label ink
+	//   - unfocused open: raised bevel + inactive title bg + active label ink
+	//   - minimized: raised bevel + inactive title bg + inactive (dim)
+	//     label ink + "[*] " accent prefix
+	for i, win := range s.Windows {
+		bx, by, bw, bh := s.WindowButtonRect(i)
 		if bx >= ix+iw {
 			break
 		}
@@ -310,7 +369,7 @@ func Render(s *State, buf []byte) {
 		if bx+cw > ix+iw {
 			cw = ix + iw - bx
 		}
-		drawTaskButton(s, buf, bx, by, cw, bh, task)
+		drawWindowButton(s, buf, bx, by, cw, bh, win)
 	}
 
 	// Clock section — OSD look.
@@ -353,19 +412,65 @@ func drawBevel(s *State, buf []byte, x, y, w, h int) {
 	}
 }
 
-// drawTaskButton paints a single minimized-window task button: a bevelled
-// face identical to the launcher button, but with the title prefixed by
-// "[*] " so the user reads it as "this folded window" rather than "launch
-// this app". Painted in the launcher slot just past the last App.
-func drawTaskButton(s *State, buf []byte, x, y, w, h int, task Task) {
-	bg := s.Theme.Window.Inactive.Title.Bg
+// drawSunkenBevel paints a 1-pixel sunken bevel around the (x, y, w, h)
+// section: dark top + left, bright bottom + right — the inverse of drawBevel.
+// Used to mark the focused open-window button so the user reads it as the
+// currently selected one (a Fluxbox-style "pressed" look).
+func drawSunkenBevel(s *State, buf []byte, x, y, w, h int) {
+	if w <= 0 || h <= 0 {
+		return
+	}
+	hi := [3]uint8{0xFF, 0xFF, 0xFF}
+	lo := [3]uint8{0x40, 0x40, 0x40}
+	for i := 0; i < w; i++ {
+		setPixel(s, buf, x+i, y, lo)
+		setPixel(s, buf, x+i, y+h-1, hi)
+	}
+	for j := 0; j < h; j++ {
+		setPixel(s, buf, x, y+j, lo)
+		setPixel(s, buf, x+w-1, y+j, hi)
+	}
+}
+
+// drawWindowButton paints a single open-window iconbar button. The look
+// follows Fluxbox-style semantics chosen from the three Openbox theme states
+// the toolbar can render:
+//
+//   - Focused window: sunken bevel + active.title background gradient +
+//     active.label ink — the "this is the current window" look.
+//   - Unfocused open window: raised bevel + inactive.title background +
+//     active.label ink — the "another open window, click to focus" look.
+//   - Minimized window: raised bevel + inactive.title background +
+//     inactive.label (dimmer) ink + "[*] " accent prefix on the label — the
+//     "this window is folded into the iconbar" look.
+//
+// Painted at the launcher-row offset past the SeparatorW gap so the user
+// reads it as a separate stripe from the static launchers.
+func drawWindowButton(s *State, buf []byte, x, y, w, h int, win Window) {
+	var bg theme.Bg
+	var ink theme.Color
+	label := win.Title
+	if win.Focused {
+		bg = s.Theme.Window.Active.Title.Bg
+		ink = s.Theme.Window.Active.Title.Label.Color
+	} else if win.Minimized {
+		bg = s.Theme.Window.Inactive.Title.Bg
+		ink = s.Theme.Window.Inactive.Title.Label.Color
+		label = "[*] " + label
+	} else {
+		bg = s.Theme.Window.Inactive.Title.Bg
+		ink = s.Theme.Window.Active.Title.Label.Color
+	}
 	theme.PaintGradient(buf, s.W, s.H, x, y, w, h, bg.Gradient, bg.Color, bg.ColorTo)
-	drawBevel(s, buf, x, y, w, h)
+	if win.Focused {
+		drawSunkenBevel(s, buf, x, y, w, h)
+	} else {
+		drawBevel(s, buf, x, y, w, h)
+	}
 	tx := x + IconGlyphLeftPad
 	ty := y + (h-glyphHeight)/2
 	max := x + w - tx - 2
-	drawTextClipped(s, buf, "[*] "+task.Title, tx, ty,
-		s.Theme.Window.Active.Title.Label.Color, max)
+	drawTextClipped(s, buf, label, tx, ty, ink, max)
 }
 
 // drawIconbarButton paints a single iconbar button (bevelled face + glyph +

@@ -282,9 +282,24 @@ class WindowManager
     # panel is never focused, so wm.focused cannot identify a freshly-registered
     # panel.
     @last_registered = nil
+    # Stash for the window most recently closed by a peer-issued `close` wire
+    # message (the dock right-clicking an iconbar entry). Filled in by
+    # handle_client_message's "close" arm BEFORE the close so the Compositor
+    # can post a `closed` event to the gone window's worker without a
+    # post-close lookup. Cleared by reader on consumption.
+    @last_closed_by_peer = nil
     # Records the most recent commit/lifecycle messages we have processed, for
     # introspection from tests. (Bounded to the last 16 — pure data.)
     @last_messages = []
+  end
+
+  # Consume + clear the most recent peer-close stash. The route layer reads
+  # this exactly once after a :closed_by_peer dispatch and posts the `closed`
+  # event to the now-removed window's worker.
+  def take_last_closed_by_peer
+    p = @last_closed_by_peer
+    @last_closed_by_peer = nil
+    p
   end
 
   # Apply any persisted geometry for win.title (size + position), overriding the
@@ -492,10 +507,20 @@ class WindowManager
     @stack.select { |w| w.minimized? && !w.panel? }
   end
 
-  # Snapshot the current minimized windows as plain Hashes the Compositor can
-  # serialize and post to the dock as a tasks_changed event. Pure data — no JS.
-  def tasks_snapshot
-    minimized_windows.map { |w| { id: w.id, title: w.title.to_s } }
+  # Snapshot EVERY non-panel window (open + minimized), bottom-to-top, as plain
+  # Hashes the Compositor can serialize and post to the dock as a
+  # `windows_changed` event. Each entry carries:
+  #   :id         compositor window id (echoed back in focus/close/restore wires)
+  #   :title      current title (verbatim)
+  #   :minimized  true iff the window is currently folded into the iconbar
+  #   :focused    true iff this is the keyboard-focused window
+  #   :role       "window" (always non-panel here — panels are filtered out)
+  # The order mirrors the stack so first-spawned windows sit leftmost in the
+  # iconbar even when later windows are raised on top. Pure data — no JS.
+  def windows_snapshot
+    @stack.reject { |w| w.panel? }.map do |w|
+      { id: w.id, title: w.title.to_s, minimized: w.minimized?, focused: w.focused?, role: w.role.to_s }
+    end
   end
 
   # Top-most window under the pointer (search the stack top-down). A minimized
@@ -625,6 +650,39 @@ class WindowManager
       return :ignored unless win.minimized?
       restore_window(win)
       :restored
+    when "focus"
+      # The dock asks to focus + raise a window the user clicked on its iconbar.
+      # If the window is currently minimized we also restore it (Fluxbox semantics:
+      # one click on an iconbar entry brings the window to the foreground regardless
+      # of its current state). Unknown id or panel id is dropped.
+      win = find(msg[:window_id])
+      return :ignored unless win
+      return :ignored if win.panel?
+      if win.minimized?
+        restore_window(win)
+      else
+        focus(win)
+      end
+      :focused
+    when "close"
+      # The dock asks to close a window the user right-clicked on its iconbar.
+      # Same effect as clicking the window's close box. Unknown id or panel id
+      # is dropped. Returns :closed_by_peer (distinct from the :closed symbol
+      # used by a window closing ITSELF via request_close) so the Compositor
+      # tells the CLOSED window's worker about the closure — not the dock's
+      # worker, which is the peer that asked. The closed window's worker ref
+      # + id are stashed in @last_closed_by_peer so route_worker_message can
+      # post the `closed` event without re-looking-up a window we just removed
+      # from the stack. An in-process (non-external) window has no worker, so
+      # the stash carries external: false and the route layer skips the post.
+      win = find(msg[:window_id])
+      return :ignored unless win
+      return :ignored if win.panel?
+      ext = win.external?
+      w_ref = ext ? win.worker : nil
+      @last_closed_by_peer = { worker: w_ref, window_id: win.id, external: ext }
+      close(win)
+      :closed_by_peer
     else
       :ignored
     end
@@ -799,6 +857,11 @@ class Compositor
         "granted_w", win.w,
         "granted_h", win.h)
       JS.global.call("wasmboxPostMessage", worker, welcome)
+      # A new window joins the iconbar — but only AFTER the dock panel itself
+      # has registered, otherwise notify_windows_changed is a no-op anyway. For
+      # the dock's own welcome, notify_windows_changed still publishes the
+      # initial list of any already-spawned in-process boot windows.
+      notify_windows_changed
     when :launch
       # Validated launch: route by descriptor shape.
       #   String      → wasmboxSpawnWorker(url) via spawn_external
@@ -818,24 +881,51 @@ class Compositor
       stub_msg = JS.global.call("wasmboxMakeObject",
         "type", "closed", "window_id", win_id, "reason", "client")
       JS.global.call("wasmboxPostMessage", worker, stub_msg)
-      notify_tasks_changed
+      notify_windows_changed
+    when :closed_by_peer
+      # The dock right-clicked an iconbar entry — handle_client_message already
+      # removed the window from the WM and stashed its worker ref. We post the
+      # `closed` event to THAT worker (not the peer that asked), then refresh
+      # the iconbar.
+      stash = @wm.take_last_closed_by_peer
+      if stash && stash[:external] && !stash[:worker].nil?
+        stub_msg = JS.global.call("wasmboxMakeObject",
+          "type", "closed", "window_id", stash[:window_id], "reason", "peer")
+        JS.global.call("wasmboxPostMessage", stash[:worker], stub_msg)
+      end
+      notify_windows_changed
     when :restored
-      # The dock asked to restore a minimized window — push a refreshed task
-      # list so the icon for the restored window disappears from the iconbar.
-      notify_tasks_changed
+      # The dock asked to restore a minimized window — push a refreshed window
+      # list so the icon switches back to its "open" style in the iconbar.
+      notify_windows_changed
+    when :focused
+      # The dock asked to focus a window — push a refreshed window list so the
+      # iconbar's focused indicator follows.
+      notify_windows_changed
+    when :title
+      # A client renamed itself — refresh the iconbar so the new title shows.
+      notify_windows_changed
     end
   end
 
-  # Encode the wm.tasks_snapshot array as a tiny JSON string so the dock can
+  # Encode the wm.windows_snapshot array as a tiny JSON string so the dock can
   # decode it through encoding/json without any new JS bridge helpers. The
-  # snapshot is always [{id:<int>, title:<string>}, ...]; titles are escaped
-  # for backslash, double-quote, newline, carriage return and tab — every
-  # other ASCII character is passed through verbatim. Pure string concatenation;
-  # no JSON library required (rbgo has none).
-  def tasks_json(tasks)
+  # snapshot is always [{id:<int>, title:<string>, minimized:<bool>,
+  # focused:<bool>, role:<string>}, ...]; titles are escaped for backslash,
+  # double-quote, newline, carriage return and tab — every other ASCII
+  # character is passed through verbatim. Pure string concatenation; no JSON
+  # library required (rbgo has none).
+  def windows_json(wins)
     parts = []
-    tasks.each do |t|
-      parts << '{"id":' + t[:id].to_s + ',"title":"' + json_escape(t[:title].to_s) + '"}'
+    wins.each do |w|
+      mflag = w[:minimized] ? "true" : "false"
+      fflag = w[:focused] ? "true" : "false"
+      s = '{"id":' + w[:id].to_s
+      s += ',"title":"' + json_escape(w[:title].to_s) + '"'
+      s += ',"minimized":' + mflag
+      s += ',"focused":' + fflag
+      s += ',"role":"' + json_escape(w[:role].to_s) + '"}'
+      parts << s
     end
     "[" + parts.join(",") + "]"
   end
@@ -858,23 +948,26 @@ class Compositor
     out
   end
 
-  # Push the current tasks_changed list to the dock (the first registered
-  # panel). Delivered as an `input` event of kind "tasks_changed" carrying a
-  # JSON-encoded tasks array — this reuses the existing input-event channel
-  # the dock's SDK already dispatches, so no new SDK message type is needed.
-  # No-op when no dock panel is registered or it lacks a worker ref.
-  def notify_tasks_changed
+  # Push the current windows list (open + minimized + focus state) to the dock
+  # (the first registered panel). Delivered as an `input` event of kind
+  # "windows_changed" carrying a JSON-encoded array — this reuses the existing
+  # input-event channel the dock's SDK already dispatches, so no new SDK
+  # message type is needed. Fires from EVERY site that changes the windows
+  # list, the focus, or the minimized flag: registration, close, minimize,
+  # restore, focus, cycle, set_title. No-op when no dock panel is registered
+  # or it lacks a worker ref.
+  def notify_windows_changed
     panel = @wm.panels.first
     return nil unless panel
     return nil unless panel.external?
     return nil if panel.worker.nil?
-    json = tasks_json(@wm.tasks_snapshot)
+    json = windows_json(@wm.windows_snapshot)
     payload = JS.global.call("wasmboxMakeObject",
       "type", "input",
       "window_id", panel.id,
       "event", JS.global.call("wasmboxMakeObject",
-        "kind", "tasks_changed",
-        "tasks_json", json))
+        "kind", "windows_changed",
+        "windows_json", json))
     JS.global.call("wasmboxPostMessage", panel.worker, payload)
   end
 
@@ -1011,14 +1104,17 @@ class Compositor
     end
 
     @wm.focus(win)
+    # The focus call may have re-ordered the stack: tell the dock so its
+    # iconbar's focused indicator follows the click.
+    notify_windows_changed
 
     if win.on_close?(mx, my)
       @wm.close(win)
       notify_closed(win, "user")
-      notify_tasks_changed
+      notify_windows_changed
     elsif win.on_minimize?(mx, my)
       @wm.minimize(win)
-      notify_tasks_changed
+      notify_windows_changed
     elsif win.on_resize?(mx, my)
       @drag = { win: win, mode: :resize, dx: win.right - mx, dy: win.bottom - my }
     elsif win.on_titlebar?(mx, my)
@@ -1071,6 +1167,11 @@ class Compositor
     e.call("preventDefault")
     mx = e.get("offsetX")
     my = e.get("offsetY")
+    # A right-click that hovers a panel (the dock) is handled by the panel's
+    # client — the dock turns a right-click on a window-iconbar entry into a
+    # `close` wire message. Swallow it here so we do NOT also open the
+    # desktop menu underneath the dock.
+    return if panel_at(mx, my)
     win = @wm.window_at(mx, my)
     @menu = if win
       { x: mx, y: my, items: [
@@ -1091,6 +1192,7 @@ class Compositor
     when "Tab"
       e.call("preventDefault")
       @wm.cycle
+      notify_windows_changed
       return
     when "Escape"
       @menu = nil
@@ -1110,6 +1212,9 @@ class Compositor
     if mx >= x && mx < x + MENU_W && my >= y && my < y + items.length * MENU_ITEM_H
       idx = (my - y) / MENU_ITEM_H
       items[idx][1].call
+      # Menu actions (Raise/Close/New window) reshape the windows list — push a
+      # refreshed snapshot to the dock so its iconbar follows.
+      notify_windows_changed
     end
     @menu = nil
   end

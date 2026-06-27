@@ -93,6 +93,13 @@
       this._welcomeCbs = [];
       this._inputCbs = [];
       this._closedCbs = [];
+      // Buffer for input events that arrived BEFORE any onInput handler was
+      // attached. The Go side of an external client only calls onInput after
+      // its wasm boots, which can race a `windows_changed` snapshot the
+      // compositor posts in the welcome handler — without this buffer the
+      // initial snapshot would be silently dropped. Flushed (in FIFO order)
+      // by the first onInput() call.
+      this._pendingInputs = [];
       this._onMessage = (e) => this._handle(e.data);
     }
 
@@ -119,7 +126,16 @@
     }
 
     onWelcome(fn) { this._welcomeCbs.push(fn); }
-    onInput(fn)   { this._inputCbs.push(fn); }
+    onInput(fn)   {
+      this._inputCbs.push(fn);
+      // Drain any input events that arrived before the first onInput handler
+      // was attached — see _pendingInputs in the constructor.
+      if (this._pendingInputs.length) {
+        const queued = this._pendingInputs;
+        this._pendingInputs = [];
+        for (const ev of queued) fn(ev);
+      }
+    }
     onClosed(fn)  { this._closedCbs.push(fn); }
 
     // Tell the compositor "I have new pixels". `damage` defaults to the full
@@ -156,9 +172,26 @@
     // a task button. The compositor's WindowManager.handle_client_message
     // routes the message to its `:restore` arm; an unknown id (or a window
     // that is not currently minimized) is dropped — restore is idempotent.
-    // Fire-and-forget like `launch`.
+    // Kept as an alias of focus for backward compatibility with the existing
+    // protocol; the compositor's `:focus` arm now restores minimized windows
+    // on its own. Fire-and-forget like `launch`.
     restore(id) {
       send({ type: "restore", window_id: id | 0 });
+    }
+
+    // focus asks the compositor to raise + focus a window the user clicked
+    // on its iconbar button. If the window is currently minimized it is
+    // restored first, matching Fluxbox semantics. Fire-and-forget.
+    focus(id) {
+      send({ type: "focus", window_id: id | 0 });
+    }
+
+    // closeWindow asks the compositor to close a window the user
+    // right-clicked on its iconbar button. Same effect as clicking the
+    // window's title-bar close box. Fire-and-forget. (Named closeWindow,
+    // not close, because `close()` is taken on the global Worker scope.)
+    closeWindow(id) {
+      send({ type: "close", window_id: id | 0 });
     }
 
     // putPixel + fillRect: minimal SAB scribblers used by bootWasm's loading
@@ -200,7 +233,13 @@
           for (const fn of this._welcomeCbs) fn(msg);
           break;
         case "input":
-          for (const fn of this._inputCbs) fn(msg.event || {});
+          if (this._inputCbs.length) {
+            for (const fn of this._inputCbs) fn(msg.event || {});
+          } else {
+            // No onInput handler yet (wasm not booted) — buffer the event
+            // so the first onInput() call drains it. See _pendingInputs.
+            this._pendingInputs.push(msg.event || {});
+          }
           break;
         case "closed":
           for (const fn of this._closedCbs) fn(msg.reason || "user");

@@ -174,24 +174,27 @@ try {
   } else {
     ok(`pre-minimize: editor body visible (${before} fill pixels)`);
   }
-  // The dock should have zero ink in its task sub-section (just past the 4
-  // launcher buttons) — no minimized windows yet.
-  // The dock is registered as a panel with requested h=28 (worker.js). The
-  // compositor's register_external bypasses MIN_H clamping for panels, so
-  // the granted height is exactly 28.
+  // The dock's open-window sub-section (past the 4 launcher buttons + a
+  // SeparatorW gap) NOW renders one button per open compositor window — so
+  // pre-minimize it carries ink (the "xterm" + "editor" + "about rbgo"
+  // labels). The compositor's register_external bypasses MIN_H clamping for
+  // panels, so the granted height is exactly 28.
   const DOCK_H = 28;
   const dockTop = 800 - DOCK_H;
-  // Launcher row: 4 buttons * (120 + 2) starting at x=100 -> ends at x=586.
-  // The task section starts at x=588 (5th iconbar slot) and continues until
-  // the clock at x=W-80=1200.
-  const TASKS_X0 = 100 + 4 * (120 + 2);
+  // Launcher row: 4 buttons * (120 + 2) - 2 = 486 wide. The open-window row
+  // starts at x = 100 + 486 + 8 (SeparatorW) = 594 and runs to the clock at
+  // x = W - 80 = 1200.
+  const SEPARATOR_W = 8;
+  const TASKS_X0 = 100 + 4 * (120 + 2) - 2 + SEPARATOR_W;
   const TASKS_X1 = 1280 - 80;
   const phase0TaskInk = countInk(png0, TASKS_X0, dockTop, TASKS_X1 - TASKS_X0, DOCK_H);
-  console.log(`info phase0 task-section ink: ${phase0TaskInk}`);
-  if (phase0TaskInk > 30) {
-    fail(`pre-minimize: task section already inked (${phase0TaskInk} px) — expected ~0`);
+  console.log(`info phase0 open-window-section ink: ${phase0TaskInk}`);
+  // With 3 boot windows + the new "iconbar shows all" rule, the section
+  // should now be inked with at least the 3 titles.
+  if (phase0TaskInk < 30) {
+    fail(`pre-minimize: open-window section not inked (${phase0TaskInk} px) — expected 3 entries`);
   } else {
-    ok("pre-minimize: task section blank");
+    ok(`pre-minimize: open-window section inked (${phase0TaskInk} px, 3 windows)`);
   }
 
   // Click the minimize box of the editor window.
@@ -211,22 +214,32 @@ try {
   } else {
     ok(`minimized: editor pixels removed (${afterMin} fill pixels, was ${before})`);
   }
-  // The dock's task section must now carry ink (the "[*] editor" label).
+  // The dock's open-window section must still carry ink (now showing "[*]
+  // editor" instead of "editor" + the unchanged xterm + about-rbgo entries).
   const phase1TaskInk = countInk(png1, TASKS_X0, dockTop, TASKS_X1 - TASKS_X0, DOCK_H);
-  console.log(`info phase1 task-section ink: ${phase1TaskInk}`);
+  console.log(`info phase1 open-window-section ink: ${phase1TaskInk}`);
   if (phase1TaskInk < 30) {
-    fail(`minimized: task section not inked (${phase1TaskInk} px) — expected the "[*] editor" label`);
+    fail(`minimized: open-window section not inked (${phase1TaskInk} px) — expected entries`);
   } else {
-    ok(`minimized: task section inked (${phase1TaskInk} px)`);
+    ok(`minimized: open-window section inked (${phase1TaskInk} px)`);
   }
 
-  // Click the task entry — first task button sits at the 5th iconbar slot,
-  // x = 100 + 4*(120+2) = 588, width 120 -> center at x=648. Vertical
-  // center of the button row at dockTop + DOCK_H/2.
-  const taskBtnX = 100 + 4 * (120 + 2) + Math.floor(120 / 2);
-  const taskBtnY = dockTop + Math.floor(DOCK_H / 2);
-  console.log(`info clicking task button @(${taskBtnX},${taskBtnY})`);
-  await page.mouse.click(taskBtnX, taskBtnY);
+  // Click the editor's iconbar entry to restore it. With the new "iconbar
+  // shows all" rule, the iconbar mirrors the WM stack (bottom-to-top). The
+  // minimize-box click on editor first FOCUSED editor (raising it to top of
+  // stack) then minimized it — so the stack is now
+  //   [xterm, about rbgo, hello, editor (minimized)]
+  // and the editor's iconbar entry sits at the LAST position.
+  const ICONBAR_BUTTON_W = 120;
+  const ICONBAR_BUTTON_GAP = 2;
+  // The dock surface is 1280 wide; the 4 launcher buttons + 3 window buttons
+  // for [xterm, about rbgo, hello] + 1 for the minimized editor fit easily.
+  const N_OPEN_AT_PHASE1 = 4; // 3 boot + 1 hello autoSpawn — all still present
+  const editorIdxInIconbar = N_OPEN_AT_PHASE1 - 1; // editor is now at the LAST iconbar slot
+  const editorBtnX = TASKS_X0 + editorIdxInIconbar * (ICONBAR_BUTTON_W + ICONBAR_BUTTON_GAP) + Math.floor(ICONBAR_BUTTON_W / 2);
+  const editorBtnY = dockTop + Math.floor(DOCK_H / 2);
+  console.log(`info clicking editor iconbar button @(${editorBtnX},${editorBtnY})`);
+  await page.mouse.click(editorBtnX, editorBtnY);
   await page.waitForTimeout(1500);
 
   // Phase 2: restored screenshot.
@@ -240,13 +253,15 @@ try {
   } else {
     ok(`restored: editor body back (${afterRestore} fill pixels)`);
   }
-  // Task section should be blank again.
+  // The open-window section keeps showing the 3 entries (one per window),
+  // but the editor's label loses its "[*]" prefix. Easiest invariant: ink
+  // is still present in roughly the same range as phase0.
   const phase2TaskInk = countInk(png2, TASKS_X0, dockTop, TASKS_X1 - TASKS_X0, DOCK_H);
-  console.log(`info phase2 task-section ink: ${phase2TaskInk}`);
-  if (phase2TaskInk > 30) {
-    fail(`restored: task section still inked (${phase2TaskInk} px) — expected ~0 after restore`);
+  console.log(`info phase2 open-window-section ink: ${phase2TaskInk}`);
+  if (phase2TaskInk < 30) {
+    fail(`restored: open-window section not inked (${phase2TaskInk} px) — expected 3 entries`);
   } else {
-    ok("restored: task section blank again");
+    ok(`restored: open-window section still inked (${phase2TaskInk} px)`);
   }
 
   if (pageErrors.length) {

@@ -286,12 +286,21 @@ assert(wmin2.focused.equal?(a), "focus moves to next normal non-minimized window
 # minimize is idempotent.
 res2 = wmin2.minimize(b)
 assert(res2.nil?, "second minimize is a no-op")
-# Minimized windows tracked + snapshot reports them.
+# Minimized windows tracked + windows_snapshot reports them with the new shape.
 assert_eq(wmin2.minimized_windows.length, 1, "1 minimized window tracked")
-snap = wmin2.tasks_snapshot
-assert_eq(snap.length, 1, "tasks_snapshot length matches")
-assert_eq(snap[0][:id], b.id, "tasks_snapshot id matches")
-assert_eq(snap[0][:title], "b", "tasks_snapshot title matches")
+snap = wmin2.windows_snapshot
+# Snapshot returns ALL non-panel windows, not just minimized ones, so both
+# a (open) and b (minimized) appear. Stack order is bottom-to-top: a, b.
+assert_eq(snap.length, 2, "windows_snapshot length includes open + minimized")
+assert_eq(snap[0][:id], a.id, "windows_snapshot[0] is a")
+assert_eq(snap[0][:title], "a", "windows_snapshot[0].title")
+assert_eq(snap[0][:minimized], false, "windows_snapshot[0].minimized = false (a is open)")
+assert_eq(snap[0][:focused], true, "windows_snapshot[0].focused = true (a took focus on minimize)")
+assert_eq(snap[0][:role], "window", "windows_snapshot[0].role = window")
+assert_eq(snap[1][:id], b.id, "windows_snapshot[1] is b")
+assert_eq(snap[1][:title], "b", "windows_snapshot[1].title")
+assert_eq(snap[1][:minimized], true, "windows_snapshot[1].minimized = true (b is folded)")
+assert_eq(snap[1][:focused], false, "windows_snapshot[1].focused = false")
 # A minimized window is excluded from cycle.
 wmin2.cycle
 assert(wmin2.focused.equal?(a), "cycle skips minimized window with only one normal left")
@@ -333,6 +342,77 @@ res = wmin4.handle_client_message({ type: "restore", window_id: 999 })
 assert_eq(res, :ignored, "restore on unknown id is :ignored")
 res = wmin4.handle_client_message({ type: "restore", window_id: d.id })
 assert_eq(res, :ignored, "restore on a non-minimized window is :ignored")
+
+# ---- focus wire message -----------------------------------------------
+wmf = WindowManager.new
+fa = wmf.spawn("fa")
+fb = wmf.spawn("fb")
+assert(wmf.focused.equal?(fb), "fb is focused before focus wire")
+# Focus fa via the wire message — moves it to the top of the stack.
+res = wmf.handle_client_message({ type: "focus", window_id: fa.id })
+assert_eq(res, :focused, "focus message yields :focused")
+assert(wmf.focused.equal?(fa), "focus wire raised + focused fa")
+# Focusing a MINIMIZED window restores it (Fluxbox semantics).
+wmf.minimize(fa) # fa now minimized; fb takes focus
+assert(fa.minimized?, "fa minimized for focus-restore test")
+assert(wmf.focused.equal?(fb), "fb focused while fa is minimized")
+res = wmf.handle_client_message({ type: "focus", window_id: fa.id })
+assert_eq(res, :focused, "focus on a minimized window yields :focused")
+assert(!fa.minimized?, "focus wire restored the minimized window")
+assert(wmf.focused.equal?(fa), "focus wire raised + focused the restored window")
+# Unknown id is ignored.
+res = wmf.handle_client_message({ type: "focus", window_id: 999 })
+assert_eq(res, :ignored, "focus on unknown id is :ignored")
+# Focus on a panel is ignored.
+wmf.register_external("dock", 480, 28, "panel")
+pan = wmf.last_registered
+res = wmf.handle_client_message({ type: "focus", window_id: pan.id })
+assert_eq(res, :ignored, "focus on panel id is :ignored")
+
+# ---- close wire message -----------------------------------------------
+wmc = WindowManager.new
+ca = wmc.spawn("ca")
+cb = wmc.spawn("cb")
+assert_eq(wmc.windows.length, 2, "2 windows before close wire")
+res = wmc.handle_client_message({ type: "close", window_id: ca.id })
+assert_eq(res, :closed_by_peer, "close message yields :closed_by_peer")
+assert_eq(wmc.windows.length, 1, "1 window left after close wire")
+# The closed window's worker ref is stashed for the route layer to pick up.
+stash = wmc.take_last_closed_by_peer
+assert(!stash.nil?, "take_last_closed_by_peer returns the stash")
+assert_eq(stash[:window_id], ca.id, "stash window_id matches")
+# Stash is cleared on read.
+assert(wmc.take_last_closed_by_peer.nil?, "stash cleared after first read")
+# Unknown id ignored.
+res = wmc.handle_client_message({ type: "close", window_id: 999 })
+assert_eq(res, :ignored, "close on unknown id is :ignored")
+# Panel close ignored.
+wmc.register_external("dock", 480, 28, "panel")
+panc = wmc.last_registered
+res = wmc.handle_client_message({ type: "close", window_id: panc.id })
+assert_eq(res, :ignored, "close on panel id is :ignored")
+
+# ---- windows_snapshot includes focus + role on every entry -----------
+wms = WindowManager.new
+sa = wms.spawn("sa")
+sb = wms.spawn("sb")
+sc = wms.spawn("sc")
+# Stack order = creation order: sa, sb, sc. Top (sc) is focused.
+snap = wms.windows_snapshot
+assert_eq(snap.length, 3, "windows_snapshot has 3 entries")
+assert_eq(snap[0][:focused], false, "snapshot[0] not focused")
+assert_eq(snap[1][:focused], false, "snapshot[1] not focused")
+assert_eq(snap[2][:focused], true, "snapshot[2] (top of stack) focused")
+# Raise sa via focus — focus indicator must move to sa.
+wms.focus(sa)
+snap = wms.windows_snapshot
+# Stack order after focus(sa): sb, sc, sa (sa pushed to top).
+assert_eq(snap[2][:id], sa.id, "snapshot[2] is sa after focus")
+assert_eq(snap[2][:focused], true, "snapshot[2] is now focused")
+# Panels are excluded.
+wms.register_external("dock", 480, 28, "panel")
+snap = wms.windows_snapshot
+assert_eq(snap.length, 3, "panels excluded from windows_snapshot")
 
 puts "rbtest: ran all pure-WM assertions"
 `
