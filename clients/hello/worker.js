@@ -43,21 +43,36 @@ client.onInput((ev) => {
   const p = client.openPopup({ title: "hello menu", w: 132, h: 96, rel_x: ev.x | 0, rel_y: ev.y | 0 });
   demoPopup = p;
   p.onClosed(() => { if (demoPopup === p) demoPopup = null; });
-  p.onWelcome(() => {
+  // Repaint the menu with item `sel` highlighted (a blue accent). sel = -1 is
+  // "no selection". Keyboard arrows move it; Escape dismissal is compositor-side.
+  let hi = -1;
+  const paint = (sel) => {
     p.fillRect(236, 236, 240, 255);                                  // light menu body
     p.fillRect(180, 182, 190, 255, { x: 0, y: 0, w: p.w, h: 1 });    // top hairline
     p.fillRect(180, 182, 190, 255, { x: 0, y: p.h - 1, w: p.w, h: 1 }); // bottom hairline
     for (let i = 0; i < 3; i++) {                                    // three menu items
-      p.fillRect(210, 214, 222, 255, { x: 6, y: 8 + i * 28, w: p.w - 12, h: 20 });
+      const on = i === sel;
+      p.fillRect(on ? 53 : 210, on ? 132 : 214, on ? 228 : 222, 255,
+        { x: 6, y: 8 + i * 28, w: p.w - 12, h: 20 });
     }
     p.commit();
-  });
+  };
+  p.onWelcome(() => paint(hi));
   // Nested popup: clicking the TOP item opens a submenu anchored to this menu's
   // right edge -- a popup whose parent is itself a popup. The compositor's
   // layered grab dismisses the submenu when the pointer goes back to the parent
-  // menu (a click elsewhere in it) without closing the parent.
+  // menu (a click elsewhere in it) without closing the parent. Arrow keys move
+  // the highlight: the compositor routes keys to the active popup (keyboard
+  // grab), and Escape dismisses it.
   let sub = null;
   p.onInput((sev) => {
+    if (sev.kind === "keydown") {
+      if (sev.key === "ArrowDown") hi = (hi + 1) % 3;
+      else if (sev.key === "ArrowUp") hi = (hi + 2) % 3;
+      else return;
+      paint(hi);
+      return;
+    }
     if (sev.kind !== "mousedown" || sub || (sev.y | 0) >= 28) return;
     const s = p.openPopup({ title: "submenu", w: 120, h: 72, rel_x: p.w - 6, rel_y: (sev.y | 0) - 4 });
     sub = s;

@@ -282,12 +282,16 @@ window_id, and the relative offset. The compositor then:
 
 * **places** the popup at `(parent.x + rel_x, parent.y + rel_y)` and stacks it
   directly above the parent (it owns its size — no MIN clamp);
-* draws **no decoration** and keeps it **out of the keyboard-focus ring** (it
-  still receives mouse input by hit-testing);
+* draws **no decoration** and stays **out of the keyboard-focus ring** (it
+  never becomes the focused *window*);
 * **grabs the pointer** (layered): a click inside the top-most popup under the
   cursor is forwarded to it *and* closes any popups stacked above it (open
   submenus the pointer left); a click outside every popup dismisses the whole
   chain (each gets a `closed`). Either way the click is consumed;
+* **grabs the keyboard**: while any popup is open its keys are routed to the
+  top-most popup instead of the focused window (so a menu can do arrow/Enter
+  navigation), and **Escape dismisses the top-most popup** one level at a time
+  (submenu before its parent). The pure routing policy is `WindowManager#key_target`;
 * **orphans** are cleaned up — closing a window dismisses its popups, and
   closing a popup dismisses its child submenus.
 
@@ -296,8 +300,9 @@ submenu (placed relative to the parent popup, stacked above it). The layered
 grab means clicking back in the parent menu dismisses just the submenu, leaving
 the parent open — standard menu/submenu behaviour.
 
-`clients/hello` demonstrates it: clicking the window opens a menu popup, and
-clicking that menu's top item opens a submenu to its right.
+`clients/hello` demonstrates it: clicking the window opens a menu popup; its
+top item opens a submenu to the right; arrow keys move a highlight and Escape
+closes it.
 
 ## Implemented since step B
 
@@ -307,7 +312,8 @@ clicking that menu's top item opens a submenu to its right.
   (xdg-popup analog) alongside `window`.
 * **Popups / subsurfaces** — multi-surface clients with grab-dismissed,
   parent-anchored child surfaces, including **nested submenus** with a layered
-  pointer grab (see *Popups* above).
+  pointer grab and **keyboard grab** (arrow routing + Escape-dismiss); see
+  *Popups* above.
 * **`launch`** — id-gated client spawning through the `LAUNCHABLE` trust table.
 * **OCI client delivery** — clients pulled at runtime as OCI artifacts
   (`wasmboxSpawnFromOCI` / `OCIAppsLoader`).
@@ -315,8 +321,6 @@ clicking that menu's top item opens a submenu to its right.
 
 ## Roadmap / not yet implemented
 
-* Keyboard-driven menu navigation (popups take mouse input but not keyboard
-  focus yet — arrows/Enter/Escape would need keys routed to the active popup).
 * `request_resize` (would need a fresh SAB) + surface-size clamping negotiation.
 * GPU offload (everything blits through 2D `putImageData`; no dmabuf/WebGPU).
 * Client-side decorations (decorations are always compositor-drawn).

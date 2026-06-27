@@ -412,6 +412,13 @@ class WindowManager
     @stack.select { |w| w.popup? && w.parent_id == parent_id }
   end
 
+  # The surface a keyboard event should be routed to: an open popup grabs the
+  # keyboard (the top-most one), otherwise the focused window. nil if neither.
+  def key_target
+    p = popups
+    p.empty? ? focused : p.last
+  end
+
   # The compositing order: every normal window first, then every panel on top.
   # render() walks this so panels stay above the normal-window pool each frame
   # regardless of focus/raise activity.
@@ -1019,9 +1026,11 @@ class Compositor
   end
 
   def on_keyup(e)
-    win = @wm.focused
-    return nil unless win&.external?
-    forward_key_to_client(win, "keyup", e)
+    # Mirror on_keydown's routing: a key-up while a popup is open goes to that
+    # popup (the keyboard grab), otherwise to the focused window.
+    target = @wm.key_target
+    return nil unless target&.external?
+    forward_key_to_client(target, "keyup", e)
   end
 
   def forward_mouse_to_client(win, kind, mx, my, e)
@@ -1188,6 +1197,20 @@ class Compositor
 
   def on_keydown(e)
     key = e.get("key")
+    # An open client popup grabs the keyboard too. Escape dismisses the top-most
+    # popup one level at a time (submenu before its parent — layered, like the
+    # pointer grab); every other key is routed to that popup so a menu client
+    # can do its own arrow/Enter navigation. Nothing reaches the window beneath.
+    popups = @wm.popups
+    unless popups.empty?
+      top = popups.last
+      if key == "Escape"
+        dismiss_popups([top])
+      elsif top.external?
+        forward_key_to_client(top, "keydown", e)
+      end
+      return
+    end
     case key
     when "Tab"
       e.call("preventDefault")

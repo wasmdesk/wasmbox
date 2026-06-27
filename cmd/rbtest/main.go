@@ -264,10 +264,15 @@ pops = wmn.popups
 assert_eq(pops.length, 2, "two popups tracked")
 assert(pops[0].equal?(p1) && pops[1].equal?(p2), "popups bottom-to-top (p1 below its child p2)")
 assert_eq(wmn.child_popups(p1.id).length, 1, "child_popups(p1) finds the submenu")
+# Keyboard grab policy: an open popup is the key_target (top-most first),
+# overriding the focused window beneath.
+assert(wmn.key_target.equal?(p2), "key_target is the top-most popup while popups are open")
 # Closing the level-1 popup orphans + unmaps its submenu too.
 wmn.close(p1)
 assert_eq(wmn.popups.length, 0, "closing a popup unmaps its child submenu")
 assert(!wmn.find(base.id).nil?, "the parent window itself is untouched")
+# With no popups left, key_target falls back to the focused window.
+assert(wmn.key_target.equal?(base), "key_target falls back to the focused window when no popups")
 
 # ---- launch registry: known id -> :launch, unknown id -> :ignored ---------
 wml = WindowManager.new
