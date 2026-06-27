@@ -465,13 +465,20 @@ class WindowManager
   # and is not subject to saved-layout geometry — its size is its own.
   def register_external(title, req_w, req_h, role = "window")
     @next_id += 1
-    granted_w = [req_w, Theme::MIN_W].max
-    granted_h = [req_h, Theme::MIN_H].max
     panel = role == "panel"
+    # Panels (the dock + future Fluxbox-style toolbars) own their own
+    # geometry -- a 28-px-tall bottom bar is the whole point. Skip the
+    # MIN_W / MIN_H clamps that exist to keep a normal window's title +
+    # close box reachable; a panel has neither. Granted dims = requested
+    # for panels, [requested, MIN] for everything else.
     if panel
+      granted_w = req_w
+      granted_h = req_h
       x = 0
       y = 0
     else
+      granted_w = [req_w, Theme::MIN_W].max
+      granted_h = [req_h, Theme::MIN_H].max
       step = 28
       x = 60 + (@cascade % 6) * step
       y = 60 + (@cascade % 6) * step

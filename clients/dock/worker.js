@@ -27,15 +27,16 @@ if (isOCI) {
 
 // The dock asks for the "panel" role (anchored, always-on-top, undecorated)
 // at the documented Fluxbox toolbar geometry: 1280 px wide. The compositor
-// enforces a minimum surface height (Theme::MIN_H = 60 in compositor.rb),
-// so we request that as our surface height — the toolbar's pure-Go scene
-// scales every section to whatever h the SDK grants, so the visual layout
-// holds whether the panel is 28 or 60 px tall.
+// Panels bypass the compositor's MIN_W / MIN_H clamps (see
+// register_external in compositor.rb), so we can request the natural
+// Fluxbox toolbar height of 28 px. The scene still scales correctly
+// for any granted_h the compositor returns -- so older compositors
+// that still enforce MIN_H = 60 just get a thicker bar.
 const client = new WasmboxClient({
   title: "wasmdock",
   role: "panel",
   w: 1280,
-  h: 60,
+  h: 28,
 });
 
 // Expose the client to the Go program through globalThis so it can grab the
