@@ -217,8 +217,8 @@ Sent once. After this the worker may shut itself down (`self.close()`).
   *above* the body (`Theme::TITLE_H` pixels tall).
 * The surface SAB covers exactly the body rectangle (no decorations). A
   client that wants to paint its own titlebar would need a larger surface
-  *and* the compositor would need to suppress its decoration — out of scope
-  for step B.
+  *and* the compositor would need to suppress its decoration — see
+  Roadmap (client-side decorations).
 * `commit.damage` and `input.event.{x,y}` are **surface-local** (i.e.
   `(0,0)` is the top-left of the client surface, not the canvas).
 
