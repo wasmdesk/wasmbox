@@ -52,6 +52,22 @@ client.onInput((ev) => {
     }
     p.commit();
   });
+  // Nested popup: clicking the TOP item opens a submenu anchored to this menu's
+  // right edge -- a popup whose parent is itself a popup. The compositor's
+  // layered grab dismisses the submenu when the pointer goes back to the parent
+  // menu (a click elsewhere in it) without closing the parent.
+  let sub = null;
+  p.onInput((sev) => {
+    if (sev.kind !== "mousedown" || sub || (sev.y | 0) >= 28) return;
+    const s = p.openPopup({ title: "submenu", w: 120, h: 72, rel_x: p.w - 6, rel_y: (sev.y | 0) - 4 });
+    sub = s;
+    s.onClosed(() => { if (sub === s) sub = null; });
+    s.onWelcome(() => {
+      s.fillRect(224, 232, 240, 255);                                // light submenu body
+      for (let i = 0; i < 2; i++) s.fillRect(198, 210, 224, 255, { x: 6, y: 8 + i * 28, w: s.w - 12, h: 20 });
+      s.commit();
+    });
+  });
 });
 
 client.start().then(async () => {

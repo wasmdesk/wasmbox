@@ -244,6 +244,31 @@ wmpp.close(parent)
 assert_eq(wmpp.popups.length, 0, "closing the parent unmaps its popup")
 assert_eq(wmpp.windows.length, 0, "no windows remain after parent close")
 
+# ---- nested popups: a popup parented to another popup (submenu) ------------
+wmn = WindowManager.new
+base = wmn.register_external("editor", 300, 200); base.move_to(50, 40)
+wmn.handle_client_message({ type: "hello", title: "menu", role: "popup",
+                            parent: base.id, rel_x: 10, rel_y: 10, w: 80, h: 60, sab: :s1 })
+p1 = wmn.last_registered
+assert_eq(p1.x, 60, "level-1 popup x = window.x + rel (50+10)")
+# A submenu anchored to the FIRST popup, not the window.
+wmn.handle_client_message({ type: "hello", title: "submenu", role: "popup",
+                            parent: p1.id, rel_x: 70, rel_y: 5, w: 80, h: 50, sab: :s2 })
+p2 = wmn.last_registered
+assert(p2.popup?, "level-2 surface is a popup")
+assert_eq(p2.parent_id, p1.id, "submenu's parent is the level-1 popup")
+assert_eq(p2.x, p1.x + 70, "submenu x = parent popup.x + rel_x")
+assert_eq(p2.y, p1.y + 5, "submenu y = parent popup.y + rel_y")
+# popups is bottom-to-top: the submenu stacks above its parent popup.
+pops = wmn.popups
+assert_eq(pops.length, 2, "two popups tracked")
+assert(pops[0].equal?(p1) && pops[1].equal?(p2), "popups bottom-to-top (p1 below its child p2)")
+assert_eq(wmn.child_popups(p1.id).length, 1, "child_popups(p1) finds the submenu")
+# Closing the level-1 popup orphans + unmaps its submenu too.
+wmn.close(p1)
+assert_eq(wmn.popups.length, 0, "closing a popup unmaps its child submenu")
+assert(!wmn.find(base.id).nil?, "the parent window itself is untouched")
+
 # ---- launch registry: known id -> :launch, unknown id -> :ignored ---------
 wml = WindowManager.new
 assert_eq(wml.handle_client_message({ type: "launch", app: "terminal" }), :launch,

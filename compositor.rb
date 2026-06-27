@@ -1063,15 +1063,32 @@ class Compositor
       return
     end
 
-    # A client popup (menu / tooltip) grabs the pointer while open. A click
-    # inside any popup is forwarded to it (so it can act on the selection); a
-    # click anywhere else dismisses every open popup and is consumed (one click
-    # to close, matching how desktop menus dismiss).
+    # A client popup (menu / tooltip / submenu) grabs the pointer while open.
+    # `popups` is bottom-to-top, so a child submenu sits AFTER its parent. A
+    # click inside the top-most popup under the cursor is forwarded to it AND
+    # closes any popups stacked above it (open submenus the user navigated away
+    # from); a click outside every popup dismisses the whole chain. Either way
+    # the click is consumed (one click to dismiss, like desktop menus).
     popups = @wm.popups
     unless popups.empty?
       hit = nil
-      popups.each { |p| hit = p if p.hit?(p.body_rect, mx, my) }
+      hit_i = -1
+      i = 0
+      popups.each do |p|
+        if p.hit?(p.body_rect, mx, my)
+          hit = p
+          hit_i = i
+        end
+        i += 1
+      end
       if hit
+        above = []
+        j = hit_i + 1
+        while j < popups.length
+          above.push(popups[j])
+          j += 1
+        end
+        dismiss_popups(above)
         forward_mouse_to_client(hit, "mousedown", mx, my, e) if hit.external?
       else
         dismiss_popups(popups)

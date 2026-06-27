@@ -284,12 +284,20 @@ window_id, and the relative offset. The compositor then:
   directly above the parent (it owns its size — no MIN clamp);
 * draws **no decoration** and keeps it **out of the keyboard-focus ring** (it
   still receives mouse input by hit-testing);
-* **grabs the pointer**: a click inside the popup is forwarded to it; a click
-  anywhere else dismisses every open popup (each gets a `closed`) and is
-  consumed;
-* **orphans** are cleaned up — closing a window also dismisses its popups.
+* **grabs the pointer** (layered): a click inside the top-most popup under the
+  cursor is forwarded to it *and* closes any popups stacked above it (open
+  submenus the pointer left); a click outside every popup dismisses the whole
+  chain (each gets a `closed`). Either way the click is consumed;
+* **orphans** are cleaned up — closing a window dismisses its popups, and
+  closing a popup dismisses its child submenus.
 
-`clients/hello` demonstrates it: clicking the window opens a small menu popup.
+**Nesting**: a popup's `parent` may be *another popup*, so a menu can open a
+submenu (placed relative to the parent popup, stacked above it). The layered
+grab means clicking back in the parent menu dismisses just the submenu, leaving
+the parent open — standard menu/submenu behaviour.
+
+`clients/hello` demonstrates it: clicking the window opens a menu popup, and
+clicking that menu's top item opens a submenu to its right.
 
 ## Implemented since step B
 
@@ -298,7 +306,8 @@ window_id, and the relative offset. The compositor then:
 * **Surface roles** — `panel` (dock / layer-shell analog) and `popup`
   (xdg-popup analog) alongside `window`.
 * **Popups / subsurfaces** — multi-surface clients with grab-dismissed,
-  parent-anchored child surfaces (see *Popups* above).
+  parent-anchored child surfaces, including **nested submenus** with a layered
+  pointer grab (see *Popups* above).
 * **`launch`** — id-gated client spawning through the `LAUNCHABLE` trust table.
 * **OCI client delivery** — clients pulled at runtime as OCI artifacts
   (`wasmboxSpawnFromOCI` / `OCIAppsLoader`).
@@ -306,8 +315,8 @@ window_id, and the relative offset. The compositor then:
 
 ## Roadmap / not yet implemented
 
-* Nested popups (a popup opening its own sub-popup) + keyboard-driven menu
-  navigation.
+* Keyboard-driven menu navigation (popups take mouse input but not keyboard
+  focus yet — arrows/Enter/Escape would need keys routed to the active popup).
 * `request_resize` (would need a fresh SAB) + surface-size clamping negotiation.
 * GPU offload (everything blits through 2D `putImageData`; no dmabuf/WebGPU).
 * Client-side decorations (decorations are always compositor-drawn).
