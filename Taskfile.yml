@@ -28,6 +28,13 @@ vars:
   # OCI registry the demo flow pushes to + the page pulls from. Matches the
   # compositor worker's DEFAULT_OCI_REGISTRIES = [{url: "http://127.0.0.1:5000"}].
   OCI_REGISTRY: '{{default "localhost:5000" .OCI_REGISTRY}}'
+  # OCI reference for the Quake asset image (pak0 + music tracks). The
+  # cmd/quake-wasmbox client streams these layers at boot when built with
+  # -tags no_embed_assets + -X main.OCIReference=$QUAKE_OCI_REFERENCE. The
+  # ociassets.Client adds the /v2/ prefix at fetch time; do NOT include it
+  # in the reference. Default points at the local registry the engine's
+  # `task oci-push` (or this Taskfile's oci-push mirror) writes to.
+  QUAKE_OCI_REFERENCE: '{{default "http://localhost:5000/quake-assets:1.0" .QUAKE_OCI_REFERENCE}}'
 
 tasks:
   default:
@@ -73,7 +80,7 @@ tasks:
       - clients/dock/wasm_exec.js
 
   build:quake:
-    desc: Build the cmd/quake-wasmbox client from the sibling go-quake1/engine repo into clients/quake/quake.wasm (embeds the pak + music -- ~200 MB wasm). Override ENGINE_DIR if engine repo lives elsewhere.
+    desc: Build the cmd/quake-wasmbox client from the sibling go-quake1/engine repo into clients/quake/quake.wasm in OCI-streaming mode (-tags no_embed_assets, ~11 MB wasm). pak0 + music are streamed from $QUAKE_OCI_REFERENCE at runtime; push them first with `task oci-pack && task oci-push`. The 200 MB embedded variant is `build:quake:embed`. Override ENGINE_DIR / QUAKE_OCI_REFERENCE if the defaults don't fit.
     env:
       GOWORK: "off"
       GOOS: js
@@ -91,8 +98,32 @@ tasks:
       # would be interpreted against the wasmbox module + fail with
       # "outside main module or its selected dependencies". The output is
       # written to wasmbox's clients/quake/ via an absolute path.
+      - |
+        go -C "{{.ENGINE_DIR}}" build \
+          -trimpath -tags no_embed_assets \
+          -ldflags "-s -w -X main.OCIReference={{.QUAKE_OCI_REFERENCE}}" \
+          -o "$(pwd)/clients/quake/quake.wasm" \
+          ./cmd/quake-wasmbox/
+      - 'echo "build:quake: wrote clients/quake/quake.wasm ($(wc -c < clients/quake/quake.wasm) bytes); OCIReference={{.QUAKE_OCI_REFERENCE}}"'
+    generates:
+      - clients/quake/quake.wasm
+
+  build:quake:embed:
+    desc: Legacy build of cmd/quake-wasmbox with pak + music baked into the wasm via //go:embed (~200 MB, unusable in browser but kept for native-debug). Use `build:quake` for the OCI-streaming default.
+    env:
+      GOWORK: "off"
+      GOOS: js
+      GOARCH: wasm
+    cmds:
+      - mkdir -p clients/quake
+      - |
+        if [ ! -d "{{.ENGINE_DIR}}" ]; then
+          echo "engine dir not found: {{.ENGINE_DIR}}" >&2
+          echo "set ENGINE_DIR=/path/to/go-quake1/engine" >&2
+          exit 1
+        fi
       - go -C "{{.ENGINE_DIR}}" build -trimpath -ldflags '-s -w' -o "$(pwd)/clients/quake/quake.wasm" ./cmd/quake-wasmbox/
-      - 'echo "build:quake: wrote clients/quake/quake.wasm ($(wc -c < clients/quake/quake.wasm) bytes)"'
+      - 'echo "build:quake:embed: wrote clients/quake/quake.wasm ($(wc -c < clients/quake/quake.wasm) bytes)"'
     generates:
       - clients/quake/quake.wasm
 
