@@ -86,7 +86,12 @@ tasks:
           echo "set ENGINE_DIR=/path/to/go-quake1/engine" >&2
           exit 1
         fi
-      - go build -trimpath -ldflags '-s -w' -o "$(pwd)/clients/quake/quake.wasm" "{{.ENGINE_DIR}}/cmd/quake-wasmbox/"
+      # `go -C <dir> build ./cmd/quake-wasmbox` switches into the engine's
+      # module BEFORE resolving the package path -- a plain relative path
+      # would be interpreted against the wasmbox module + fail with
+      # "outside main module or its selected dependencies". The output is
+      # written to wasmbox's clients/quake/ via an absolute path.
+      - go -C "{{.ENGINE_DIR}}" build -trimpath -ldflags '-s -w' -o "$(pwd)/clients/quake/quake.wasm" ./cmd/quake-wasmbox/
       - 'echo "build:quake: wrote clients/quake/quake.wasm ($(wc -c < clients/quake/quake.wasm) bytes)"'
     generates:
       - clients/quake/quake.wasm
@@ -217,6 +222,7 @@ tasks:
       - go test ./
       - go test ./packs/...
       - go run ./cmd/rbtest
+      - node test/sdk-bootwasm.test.mjs
 
   clean:
     desc: Remove the build artifacts

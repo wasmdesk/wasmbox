@@ -46,9 +46,16 @@ client.start().then(async () => {
   }
   const go = new Go();
   const wasmURL = assets ? assets.wasm_url : "./hello.wasm";
-  const wasm = await WebAssembly.instantiateStreaming(
-    fetch(wasmURL), go.importObject);
+  // bootWasm replaces the bare WebAssembly.instantiateStreaming call: it
+  // paints an Adwaita-style progress bar onto the SAB while hello.wasm is
+  // downloading + instantiating, then resolves to the instance. hello.wasm
+  // overwrites the bar with its gradient scene on first commit.
+  const instance = await WasmboxClient.bootWasm(wasmURL, go.importObject, {
+    bg:    [250, 250, 250],
+    track: [218, 220, 224],
+    fill:  [ 53, 132, 228],
+  });
   // go.run() does not return until main() exits; the hello program parks on
   // `select {}` to keep its handlers live, so we don't await it.
-  go.run(wasm.instance);
+  go.run(instance);
 });

@@ -252,5 +252,87 @@ assert(!wml.launchable?("nope"), "unknown id is not launchable")
 assert(wml.launchable_url("nope").nil?, "unknown id has no static url")
 assert(wml.launchable_oci("nope").nil?, "unknown id has no OCI ref")
 
+# ---- minimize: geometry -----------------------------------------------
+wmin = WindowManager.new
+mw = wmin.spawn("min-test", 200, 120)
+# minimize_rect sits just left of close_rect at the same vertical pad.
+crect = mw.close_rect
+mrect = mw.minimize_rect
+assert_eq(mrect[2], Theme::MIN_SZ, "minimize_rect width = MIN_SZ")
+assert_eq(mrect[3], Theme::MIN_SZ, "minimize_rect height = MIN_SZ")
+assert_eq(mrect[1], crect[1], "minimize_rect y = close_rect y (same row)")
+pad = (Theme::TITLE_H - Theme::MIN_SZ) / 2
+assert_eq(mrect[0], crect[0] - Theme::MIN_SZ - pad, "minimize_rect x sits left of close_rect")
+# on_minimize? hit-test responds true inside, false outside.
+mid_x = mrect[0] + mrect[2]/2
+mid_y = mrect[1] + mrect[3]/2
+assert(mw.on_minimize?(mid_x, mid_y), "on_minimize? hits center of box")
+assert(!mw.on_minimize?(mid_x - mrect[2], mid_y), "on_minimize? misses outside box")
+# A panel never reports on_minimize?.
+pn = wmin.register_external("panel", 480, 28, "panel")
+assert(!pn.on_minimize?(pn.x + 2, pn.y + 2), "panel never hits on_minimize?")
+
+# ---- minimize: state transitions --------------------------------------
+wmin2 = WindowManager.new
+a = wmin2.spawn("a")
+b = wmin2.spawn("b")
+assert(!a.minimized?, "fresh window not minimized")
+assert(wmin2.focused.equal?(b), "b is focused before minimize")
+res = wmin2.minimize(b)
+assert(!res.nil?, "minimize returns the window on a real transition")
+assert(b.minimized?, "minimized flag flipped")
+assert(!b.focused?, "minimized window loses focus")
+assert(wmin2.focused.equal?(a), "focus moves to next normal non-minimized window")
+# minimize is idempotent.
+res2 = wmin2.minimize(b)
+assert(res2.nil?, "second minimize is a no-op")
+# Minimized windows tracked + snapshot reports them.
+assert_eq(wmin2.minimized_windows.length, 1, "1 minimized window tracked")
+snap = wmin2.tasks_snapshot
+assert_eq(snap.length, 1, "tasks_snapshot length matches")
+assert_eq(snap[0][:id], b.id, "tasks_snapshot id matches")
+assert_eq(snap[0][:title], "b", "tasks_snapshot title matches")
+# A minimized window is excluded from cycle.
+wmin2.cycle
+assert(wmin2.focused.equal?(a), "cycle skips minimized window with only one normal left")
+# Restore puts it back at the top with focus.
+res3 = wmin2.restore_window(b)
+assert(!res3.nil?, "restore_window returns the window on a real transition")
+assert(!b.minimized?, "minimized cleared on restore")
+assert(wmin2.focused.equal?(b), "restored window is focused")
+res4 = wmin2.restore_window(b)
+assert(res4.nil?, "restore on a non-minimized window is a no-op")
+# Minimizing a panel is a no-op.
+wmin2.register_external("dock", 480, 28, "panel")
+panel = wmin2.last_registered
+assert(wmin2.minimize(panel).nil?, "minimize on panel is a no-op")
+assert(!panel.minimized?, "panel never gets the minimized flag")
+
+# ---- minimized window: render-loop skip + click hit-test --------------
+# A minimized window must be excluded from window_at so a click at its
+# former coordinates does not surface it instead of the desktop.
+wmin3 = WindowManager.new
+c = wmin3.spawn("c", 200, 120)
+cx = c.x + c.w/2
+cy = c.y + c.h/2
+assert(wmin3.window_at(cx, cy).equal?(c), "window_at finds the window pre-minimize")
+wmin3.minimize(c)
+assert(wmin3.window_at(cx, cy).nil?, "window_at skips a minimized window")
+# Restore re-exposes it.
+wmin3.restore_window(c)
+assert(wmin3.window_at(cx, cy).equal?(c), "window_at finds the restored window again")
+
+# ---- restore wire message ----------------------------------------------
+wmin4 = WindowManager.new
+d = wmin4.spawn("d", 200, 120)
+wmin4.minimize(d)
+res = wmin4.handle_client_message({ type: "restore", window_id: d.id })
+assert_eq(res, :restored, "restore message yields :restored")
+assert(!d.minimized?, "restore message cleared the flag")
+res = wmin4.handle_client_message({ type: "restore", window_id: 999 })
+assert_eq(res, :ignored, "restore on unknown id is :ignored")
+res = wmin4.handle_client_message({ type: "restore", window_id: d.id })
+assert_eq(res, :ignored, "restore on a non-minimized window is :ignored")
+
 puts "rbtest: ran all pure-WM assertions"
 `

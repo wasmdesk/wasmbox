@@ -28,6 +28,11 @@ const client = new WasmboxClient({ title: "Terminal", w: 640, h: 400 });
 self.wasmboxClient = client;
 
 client.start().then(async () => {
+  // Pre-paint via the SDK's bootWasm loader using the terminal's dark
+  // palette: black BG, charcoal track, soft-green fill -- visually obvious
+  // motion during the multi-second wasm fetch + boot. terminal.wasm
+  // overwrites the bar with its first render once go.run() repaints the
+  // shell.
   const assets = isOCI
     ? await WasmboxClient.bootFromOCIAssets({ fallbackMs: 2000 })
     : null;
@@ -37,9 +42,13 @@ client.start().then(async () => {
   }
   const go = new Go();
   const wasmURL = assets ? assets.wasm_url : "./terminal.wasm";
-  const wasm = await WebAssembly.instantiateStreaming(
-    fetch(wasmURL), go.importObject);
+  const instance = await WasmboxClient.bootWasm(wasmURL, go.importObject, {
+    // Dark terminal palette.
+    bg:    [ 16,  16,  16],
+    track: [ 44,  44,  44],
+    fill:  [160, 224, 160],
+  });
   // go.run() does not return until main() exits; the terminal client parks
   // on `select {}` to keep its handlers live, so we don't await it.
-  go.run(wasm.instance);
+  go.run(instance);
 });

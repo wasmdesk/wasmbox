@@ -39,6 +39,7 @@ module Theme
   TITLE_H   = 22 # titlebar height
   BORDER    = 1  # decoration border width
   CLOSE_SZ  = 14 # close-box side
+  MIN_SZ    = 14 # minimize-box side (matches close-box)
   GRIP      = 14 # resize-corner side
   MIN_W     = 90
   MIN_H     = 60
@@ -49,7 +50,7 @@ end
 # Pure data + math; no JS here.
 # ---------------------------------------------------------------------------
 class Window
-  attr_accessor :id, :title, :x, :y, :w, :h, :fill, :focused, :role
+  attr_accessor :id, :title, :x, :y, :w, :h, :fill, :focused, :role, :minimized
 
   def initialize(id, title, x, y, w, h, fill, role = "window")
     @id = id
@@ -65,9 +66,14 @@ class Window
     # behave like a normal window, so anything that is not exactly "panel" is
     # treated as a window. See docs/protocol.md + wasmdock INTEGRATION.md.
     @role = role
+    # Openbox-style minimize: a minimized window is removed from the render
+    # pipeline (decoration + body) but kept in the stack so a click on its
+    # entry in the dock's iconbar can restore it. Panels are never minimized.
+    @minimized = false
   end
 
   def focused? = @focused
+  def minimized? = @minimized
 
   # A panel (dock-style surface) has no decoration and is anchored, never
   # cascade-placed. Anything else is a normal window.
@@ -91,6 +97,18 @@ class Window
     [right - Theme::CLOSE_SZ - pad, frame_top + pad, Theme::CLOSE_SZ, Theme::CLOSE_SZ]
   end
 
+  # Minimize-box rect: a 14x14 button (Theme::MIN_SZ side) placed just LEFT of
+  # the close box in the titlebar, with the same vertical padding. Openbox
+  # paints a single horizontal bar near the bottom of this box (the "_" glyph)
+  # to signal "fold this window into the dock". Panels carry no decoration so
+  # this collapses to an empty (zero-size) rect, same as close_rect.
+  def minimize_rect
+    return [@x, @y, 0, 0] if panel?
+    pad = (Theme::TITLE_H - Theme::MIN_SZ) / 2
+    cx, cy, _cw, _ch = close_rect
+    [cx - Theme::MIN_SZ - pad, cy, Theme::MIN_SZ, Theme::MIN_SZ]
+  end
+
   def resize_rect
     return [@x, @y, 0, 0] if panel?
     [right - Theme::GRIP, bottom - Theme::GRIP, Theme::GRIP, Theme::GRIP]
@@ -106,10 +124,11 @@ class Window
   end
 
   def contains?(px, py)   = hit?(frame_rect, px, py)
-  # A panel is never draggable, closable-by-box or resizable, so all three
-  # decoration hit-tests report "no hit" — those gestures can never start.
+  # A panel is never draggable, closable-by-box, minimizable or resizable, so
+  # every decoration hit-test reports "no hit" — those gestures can never start.
   def on_titlebar?(px, py)= panel? ? false : hit?(titlebar_rect, px, py)
   def on_close?(px, py)   = panel? ? false : hit?(close_rect, px, py)
+  def on_minimize?(px, py)= panel? ? false : hit?(minimize_rect, px, py)
   def on_resize?(px, py)  = panel? ? false : hit?(resize_rect, px, py)
 
   def move_to(nx, ny)
@@ -310,10 +329,17 @@ class WindowManager
 
   def windows = @stack
 
-  # The keyboard-focused window: the top-most NORMAL window. Panels (the dock)
-  # are excluded from the focus ring, so a panel is never "focused" even though
-  # it sits on top visually. Returns nil when no normal window exists.
-  def focused = normal_windows.last
+  # The keyboard-focused window: the top-most NORMAL non-minimized window.
+  # Panels (the dock) are excluded from the focus ring, so a panel is never
+  # "focused" even though it sits on top visually. A minimized window has been
+  # folded into the dock's iconbar and is not visible on the canvas; it must
+  # not receive synthetic focus traffic either. Returns nil when no normal
+  # non-minimized window exists.
+  def focused
+    top = nil
+    @stack.each { |w| top = w if !w.panel? && !w.minimized? }
+    top
+  end
 
   # Look up a window (in or out of process) by its compositor id.
   # Implemented as a manual scan because rbgo's block-`return` does not return
@@ -429,19 +455,70 @@ class WindowManager
     win
   end
 
-  # Top-most window under the pointer (search the stack top-down).
+  # Minimize a normal window: mark it minimized (so the render loop skips it),
+  # drop focus (the dock will not receive synthetic focus traffic), and let the
+  # caller emit a tasks_changed notification afterwards. Panels are NEVER
+  # minimized — they are the always-on-top stratum hosting the iconbar that
+  # restores other windows. Returns the window on a real state change, nil
+  # when the call is a no-op (panel, already minimized, unknown window).
+  def minimize(win)
+    return nil unless win
+    return nil if win.panel?
+    return nil if win.minimized?
+    win.minimized = true
+    # Clear focus so on-screen state matches: a minimized window cannot be
+    # the focused one. The top normal non-minimized window takes focus.
+    @stack.each { |o| o.focused = false unless o.panel? }
+    next_top = nil
+    @stack.each { |w| next_top = w if !w.panel? && !w.minimized? }
+    next_top.focused = true if next_top
+    win
+  end
+
+  # Restore a minimized window: clear the minimized flag and raise+focus so it
+  # comes back to the top of the stack, ready for keyboard input. Returns the
+  # window on a real state change, nil for unknown / non-minimized inputs.
+  def restore_window(win)
+    return nil unless win
+    return nil unless win.minimized?
+    win.minimized = false
+    focus(win)
+    win
+  end
+
+  # Every window currently in the minimized state, bottom-to-top. The
+  # Compositor turns this into the dock's iconbar "tasks" sub-section.
+  def minimized_windows
+    @stack.select { |w| w.minimized? && !w.panel? }
+  end
+
+  # Snapshot the current minimized windows as plain Hashes the Compositor can
+  # serialize and post to the dock as a tasks_changed event. Pure data — no JS.
+  def tasks_snapshot
+    minimized_windows.map { |w| { id: w.id, title: w.title.to_s } }
+  end
+
+  # Top-most window under the pointer (search the stack top-down). A minimized
+  # window has been folded into the dock's iconbar — it leaves no pixels on the
+  # canvas, so a click at its former coordinates must NOT hit it. The
+  # compositor's render loop skips minimized windows for the same reason; this
+  # keeps input + paint in lockstep.
   def window_at(px, py)
     hit = nil
-    @stack.each { |w| hit = w if w.contains?(px, py) } # last (topmost) wins
+    @stack.each do |w|
+      next if w.minimized?
+      hit = w if w.contains?(px, py) # last (topmost) wins
+    end
     hit
   end
 
-  # Alt+Tab-ish cycle over the NORMAL windows only — panels (the dock) are
-  # excluded from the focus ring so Tab never lands on the dock. Sends the
-  # current focused window to the bottom of the normal pool and focuses the next
-  # normal window down, so repeated presses walk the whole app stack.
+  # Alt+Tab-ish cycle over the NORMAL non-minimized windows only — panels (the
+  # dock) and minimized windows are excluded from the focus ring so Tab never
+  # lands on the dock or on a folded window. Sends the current focused window
+  # to the bottom of the normal pool and focuses the next normal window down,
+  # so repeated presses walk the whole visible app stack.
   def cycle
-    normals = normal_windows
+    normals = normal_windows.reject(&:minimized?)
     return nil if normals.length < 2
     top = normals.last
     next_win = normals[-2]
@@ -465,13 +542,20 @@ class WindowManager
   # and is not subject to saved-layout geometry — its size is its own.
   def register_external(title, req_w, req_h, role = "window")
     @next_id += 1
-    granted_w = [req_w, Theme::MIN_W].max
-    granted_h = [req_h, Theme::MIN_H].max
     panel = role == "panel"
+    # Panels (the dock + future Fluxbox-style toolbars) own their own
+    # geometry -- a 28-px-tall bottom bar is the whole point. Skip the
+    # MIN_W / MIN_H clamps that exist to keep a normal window's title +
+    # close box reachable; a panel has neither. Granted dims = requested
+    # for panels, [requested, MIN] for everything else.
     if panel
+      granted_w = req_w
+      granted_h = req_h
       x = 0
       y = 0
     else
+      granted_w = [req_w, Theme::MIN_W].max
+      granted_h = [req_h, Theme::MIN_H].max
       step = 28
       x = 60 + (@cascade % 6) * step
       y = 60 + (@cascade % 6) * step
@@ -532,6 +616,16 @@ class WindowManager
     when "request_resize"
       # Reserved — the SDK does not implement size renegotiation yet.
       :ignored
+    when "restore"
+      # The dock asks to un-minimize a window the user clicked on its iconbar.
+      # An unknown id, a non-minimized window or a panel id is dropped — the
+      # restore op is idempotent + safe.
+      win = find(msg[:window_id])
+      return :ignored unless win
+      return :ignored if win.panel?
+      return :ignored unless win.minimized?
+      restore_window(win)
+      :restored
     else
       :ignored
     end
@@ -725,7 +819,64 @@ class Compositor
       stub_msg = JS.global.call("wasmboxMakeObject",
         "type", "closed", "window_id", win_id, "reason", "client")
       JS.global.call("wasmboxPostMessage", worker, stub_msg)
+      notify_tasks_changed
+    when :restored
+      # The dock asked to restore a minimized window — push a refreshed task
+      # list so the icon for the restored window disappears from the iconbar.
+      notify_tasks_changed
     end
+  end
+
+  # Encode the wm.tasks_snapshot array as a tiny JSON string so the dock can
+  # decode it through encoding/json without any new JS bridge helpers. The
+  # snapshot is always [{id:<int>, title:<string>}, ...]; titles are escaped
+  # for backslash, double-quote, newline, carriage return and tab — every
+  # other ASCII character is passed through verbatim. Pure string concatenation;
+  # no JSON library required (rbgo has none).
+  def tasks_json(tasks)
+    parts = []
+    tasks.each do |t|
+      parts << '{"id":' + t[:id].to_s + ',"title":"' + json_escape(t[:title].to_s) + '"}'
+    end
+    "[" + parts.join(",") + "]"
+  end
+
+  def json_escape(s)
+    out = ""
+    i = 0
+    while i < s.length
+      c = s[i]
+      case c
+      when "\\" then out += "\\\\"
+      when '"'  then out += '\\"'
+      when "\n" then out += "\\n"
+      when "\r" then out += "\\r"
+      when "\t" then out += "\\t"
+      else out += c
+      end
+      i += 1
+    end
+    out
+  end
+
+  # Push the current tasks_changed list to the dock (the first registered
+  # panel). Delivered as an `input` event of kind "tasks_changed" carrying a
+  # JSON-encoded tasks array — this reuses the existing input-event channel
+  # the dock's SDK already dispatches, so no new SDK message type is needed.
+  # No-op when no dock panel is registered or it lacks a worker ref.
+  def notify_tasks_changed
+    panel = @wm.panels.first
+    return nil unless panel
+    return nil unless panel.external?
+    return nil if panel.worker.nil?
+    json = tasks_json(@wm.tasks_snapshot)
+    payload = JS.global.call("wasmboxMakeObject",
+      "type", "input",
+      "window_id", panel.id,
+      "event", JS.global.call("wasmboxMakeObject",
+        "kind", "tasks_changed",
+        "tasks_json", json))
+    JS.global.call("wasmboxPostMessage", panel.worker, payload)
   end
 
   # Pull the protocol fields out of the JS message object. We hand a plain
@@ -868,6 +1019,10 @@ class Compositor
     if win.on_close?(mx, my)
       @wm.close(win)
       notify_closed(win, "user")
+      notify_tasks_changed
+    elsif win.on_minimize?(mx, my)
+      @wm.minimize(win)
+      notify_tasks_changed
     elsif win.on_resize?(mx, my)
       @drag = { win: win, mode: :resize, dx: win.right - mx, dy: win.bottom - my }
     elsif win.on_titlebar?(mx, my)
@@ -997,7 +1152,9 @@ class Compositor
     # dock tracks viewport resizes and never cascades.
     @wm.panels.each { |p| @wm.anchor_panel(p, @width, @height) }
     # Draw normal windows first, then panels on top (always-on-top stratum).
-    @wm.ordered_windows.each { |win| draw_window(win) }
+    # Minimized windows have been folded into the dock's iconbar; the
+    # compositor skips them entirely so they leave no pixels on the canvas.
+    @wm.ordered_windows.each { |win| draw_window(win) unless win.minimized? }
     draw_menu if @menu
     draw_hud
   end
@@ -1073,6 +1230,19 @@ class Compositor
     @ctx.call("lineTo", cx + cw - 3, cy + ch - 3)
     @ctx.call("moveTo", cx + cw - 3, cy + 3)
     @ctx.call("lineTo", cx + 3, cy + ch - 3)
+    @ctx.call("stroke")
+
+    # Minimize box (left of the close box). Openbox draws this as a small box
+    # with a single horizontal bar near the bottom — the "_" glyph. When the
+    # window is inactive the face is the same neutral CLOSE_BG but the bar ink
+    # is lighter so the button reads as muted.
+    mx, my, mw, mh = win.minimize_rect
+    fill_rect(win.minimize_rect, Theme::CLOSE_BG)
+    @ctx.set("strokeStyle", active ? Theme::CLOSE_GLYPH : Theme::BORDER_INACTIVE)
+    @ctx.set("lineWidth", 1.5)
+    @ctx.call("beginPath")
+    @ctx.call("moveTo", mx + 3,      my + mh - 4)
+    @ctx.call("lineTo", mx + mw - 3, my + mh - 4)
     @ctx.call("stroke")
 
     # Client body. In-process windows paint a solid fill; external windows

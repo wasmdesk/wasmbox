@@ -6,9 +6,22 @@ package scene
 
 import "testing"
 
+// firstBookmarkY (test-only) returns the y of the first sidebar entry row,
+// duplicated here so state_test does not depend on render_test's helpers.
+func firstBookmarkY() int {
+	return HeaderBarHeight + SidebarTopPadding + SidebarSectionHeaderHeight
+}
+
+// otherLocationsY returns the y of the first entry under the "OTHER
+// LOCATIONS" section (the Computer row). DefaultSidebar has 4 BOOKMARKS
+// entries between the section header and the Other-Locations header.
+func otherLocationsY() int {
+	return firstBookmarkY() + 4*SidebarRowHeight + SidebarSectionHeaderHeight
+}
+
 // New returns a usable State rooted at "/" with a non-empty entry list, a
-// default Favorites sidebar, and no Favorite selected (since "/" is not in
-// the default sidebar by path).
+// default sidebar, and SidebarSelected pointing at the Home row (which owns
+// "/" in DefaultSidebar).
 func TestNewSeedsRoot(t *testing.T) {
 	s := New(720, 440)
 	if s.W != 720 || s.H != 440 {
@@ -26,22 +39,39 @@ func TestNewSeedsRoot(t *testing.T) {
 	if len(s.Sidebar) == 0 {
 		t.Errorf("sidebar empty")
 	}
-	if s.SidebarSelected != -1 {
-		t.Errorf("SidebarSelected = %d, want -1 (root not in sidebar)", s.SidebarSelected)
+	if s.SidebarSelected != 0 {
+		t.Errorf("SidebarSelected = %d, want 0 (Home owns /)", s.SidebarSelected)
 	}
 }
 
-// DefaultSidebar contains at least Documents + Pictures + Downloads.
+// DefaultSidebar contains the canonical Nautilus-style two-section list.
 func TestDefaultSidebar(t *testing.T) {
 	sb := DefaultSidebar()
-	names := map[string]bool{}
-	for _, e := range sb {
-		names[e.Name] = true
+	wantNames := []string{"Home", "Documents", "Pictures", "Downloads", "Computer", "Trash"}
+	if len(sb) != len(wantNames) {
+		t.Fatalf("sidebar len = %d, want %d", len(sb), len(wantNames))
 	}
-	for _, want := range []string{"Documents", "Pictures", "Downloads"} {
-		if !names[want] {
-			t.Errorf("sidebar missing %q", want)
+	for i, want := range wantNames {
+		if sb[i].Name != want {
+			t.Errorf("sidebar[%d].Name = %q, want %q", i, sb[i].Name, want)
 		}
+	}
+	// Verify the two sections (Bookmarks first, Other Locations second).
+	if sb[0].Section != "BOOKMARKS" || sb[3].Section != "BOOKMARKS" {
+		t.Errorf("expected Bookmarks for indices 0..3")
+	}
+	if sb[4].Section != "OTHER LOCATIONS" || sb[5].Section != "OTHER LOCATIONS" {
+		t.Errorf("expected Other Locations for indices 4..5")
+	}
+	// Verify kinds.
+	if sb[0].Kind != "home" {
+		t.Errorf("sb[0].Kind = %q, want home", sb[0].Kind)
+	}
+	if sb[4].Kind != "computer" {
+		t.Errorf("sb[4].Kind = %q, want computer", sb[4].Kind)
+	}
+	if sb[5].Kind != "trash" {
+		t.Errorf("sb[5].Kind = %q, want trash", sb[5].Kind)
 	}
 }
 
@@ -158,9 +188,9 @@ func TestHandleKey(t *testing.T) {
 	if s.Browser.CurrentPath != "/Documents" {
 		t.Errorf("CurrentPath after Enter = %q, want /Documents", s.Browser.CurrentPath)
 	}
-	// SidebarSelected should now point to Documents (index 0 in DefaultSidebar).
-	if s.SidebarSelected != 0 {
-		t.Errorf("SidebarSelected after Enter into /Documents = %d, want 0", s.SidebarSelected)
+	// SidebarSelected should now point to Documents (index 1).
+	if s.SidebarSelected != 1 {
+		t.Errorf("SidebarSelected after Enter into /Documents = %d, want 1", s.SidebarSelected)
 	}
 	if !s.HandleKey("Escape") {
 		t.Errorf("Escape returned false")
@@ -241,28 +271,60 @@ func TestHandleMouseBackAfterDescent(t *testing.T) {
 	}
 }
 
-// HandleMouse in the toolbar away from the back button is a no-op.
-func TestHandleMouseToolbarMiss(t *testing.T) {
+// HandleMouse on the hamburger button returns false but logs (stub).
+func TestHandleMouseHamburger(t *testing.T) {
 	s := New(720, 440)
-	if s.HandleMouse(400, 10) {
-		t.Errorf("HandleMouse(toolbar miss) returned true")
+	x := HamburgerBtnX + HamburgerBtnW/2
+	y := HamburgerBtnY + HamburgerBtnH/2
+	if s.HandleMouse(x, y) {
+		t.Errorf("HandleMouse(hamburger) returned true (expected stub no-op)")
 	}
 }
 
-// HandleMouse on a sidebar Favorite jumps to that path.
-func TestHandleMouseSidebarFavorite(t *testing.T) {
+// HandleMouse on the forward button returns false (no forward history).
+func TestHandleMouseForward(t *testing.T) {
 	s := New(720, 440)
-	// Click on the first Favorite (Documents).
+	x := ForwardBtnX + ForwardBtnW/2
+	y := ForwardBtnY + ForwardBtnH/2
+	if s.HandleMouse(x, y) {
+		t.Errorf("HandleMouse(forward) returned true (expected no-op stub)")
+	}
+}
+
+// HandleMouse in the header bar away from any button is a no-op.
+func TestHandleMouseHeaderBarMiss(t *testing.T) {
+	s := New(720, 440)
+	// Click in the empty space inside the header bar past the path bar.
+	if s.HandleMouse(700, HeaderBarHeight/2) {
+		t.Errorf("HandleMouse(header bar miss) returned true")
+	}
+}
+
+// HandleMouse on the first sidebar row (Home) at root is a no-op (already
+// selected).
+func TestHandleMouseSidebarHomeAtRoot(t *testing.T) {
+	s := New(720, 440)
 	x := 20
-	y := ToolbarHeight + SidebarHeaderHeight + SidebarRowHeight/2
+	y := firstBookmarkY() + SidebarRowHeight/2
+	if s.HandleMouse(x, y) {
+		t.Errorf("HandleMouse(Home at root) returned true (already selected)")
+	}
+}
+
+// HandleMouse on a sidebar entry jumps to that path.
+func TestHandleMouseSidebarDocuments(t *testing.T) {
+	s := New(720, 440)
+	// Click on Documents -- second row in the BOOKMARKS section.
+	x := 20
+	y := firstBookmarkY() + SidebarRowHeight + SidebarRowHeight/2
 	if !s.HandleMouse(x, y) {
-		t.Errorf("HandleMouse(sidebar[0]) returned false")
+		t.Errorf("HandleMouse(sidebar Documents) returned false")
 	}
 	if s.Browser.CurrentPath != "/Documents" {
 		t.Errorf("CurrentPath after sidebar click = %q, want /Documents", s.Browser.CurrentPath)
 	}
-	if s.SidebarSelected != 0 {
-		t.Errorf("SidebarSelected = %d, want 0", s.SidebarSelected)
+	if s.SidebarSelected != 1 {
+		t.Errorf("SidebarSelected = %d, want 1", s.SidebarSelected)
 	}
 	// Clicking it again is a no-op (state unchanged).
 	if s.HandleMouse(x, y) {
@@ -270,25 +332,55 @@ func TestHandleMouseSidebarFavorite(t *testing.T) {
 	}
 }
 
-// HandleMouse on the sidebar with y above the first row is a no-op. We pick
-// a y far enough above the first row band that integer division produces a
-// negative idx (SidebarHeaderHeight=8 + a generous margin so the int-div
-// truncation lands at -1, not 0).
-func TestHandleMouseSidebarAboveRows(t *testing.T) {
+// HandleMouse on the "BOOKMARKS" section-label band returns false (the
+// label is not interactive).
+func TestHandleMouseSidebarSectionLabel(t *testing.T) {
 	s := New(720, 440)
-	// y = ToolbarHeight - 5 -> (y - ToolbarHeight - SidebarHeaderHeight)
-	// = -13 -> idx = -1 (after Go's truncation-toward-zero for negatives,
-	// -13/24 == 0; pick a more negative value to guarantee -1).
-	if s.HandleMouse(20, ToolbarHeight-30) {
-		t.Errorf("HandleMouse above sidebar rows returned true")
+	// y inside the section label band.
+	y := HeaderBarHeight + SidebarTopPadding + SidebarSectionHeaderHeight/2
+	if s.HandleMouse(20, y) {
+		t.Errorf("HandleMouse on section label returned true")
+	}
+}
+
+// HandleMouse on the second section's label ("OTHER LOCATIONS") returns
+// false.
+func TestHandleMouseSidebarOtherSectionLabel(t *testing.T) {
+	s := New(720, 440)
+	// The OTHER LOCATIONS label sits right after the 4th bookmark row.
+	y := firstBookmarkY() + 4*SidebarRowHeight + SidebarSectionHeaderHeight/2
+	if s.HandleMouse(20, y) {
+		t.Errorf("HandleMouse on OTHER LOCATIONS label returned true")
+	}
+}
+
+// HandleMouse on a row in the Other Locations section navigates (the path
+// "/" matches Home so Computer/Trash navigate-but-keep-the-Home-selection).
+// We exercise the click landing inside the band; CurrentPath stays "/" so
+// the click reports false ("path unchanged and same selection") -- this
+// drives the early-out branch in handleSidebarClick.
+func TestHandleMouseSidebarComputerAtRoot(t *testing.T) {
+	s := New(720, 440)
+	x := 20
+	y := otherLocationsY() + SidebarRowHeight/2
+	// At root, Home is selected (index 0) and Computer (index 4) points at
+	// "/", so the click switches the selected index even if the path is the
+	// same: handleSidebarClick treats "same path + same idx" as no-op, but
+	// "same path + different idx" must still update.
+	changed := s.HandleMouse(x, y)
+	if !changed {
+		t.Errorf("HandleMouse(Computer) at root returned false; expected SidebarSelected to move")
+	}
+	if s.SidebarSelected != 4 {
+		t.Errorf("SidebarSelected = %d, want 4 (Computer)", s.SidebarSelected)
 	}
 }
 
 // HandleMouse on the sidebar past the last row is a no-op.
 func TestHandleMouseSidebarBelowRows(t *testing.T) {
 	s := New(720, 440)
-	// Way below all Favorite rows.
-	if s.HandleMouse(20, 400) {
+	// Way below all sidebar rows.
+	if s.HandleMouse(20, 430) {
 		t.Errorf("HandleMouse below sidebar rows returned true")
 	}
 }
@@ -298,7 +390,7 @@ func TestHandleMouseListRowFolder(t *testing.T) {
 	s := New(720, 440)
 	// Click on row 0 (Documents) -- it's a directory, so we descend.
 	x := SidebarWidth + 50
-	y := ToolbarHeight + ColumnHeaderHeight + RowHeight/2
+	y := HeaderBarHeight + ColumnHeaderHeight + RowHeight/2
 	if !s.HandleMouse(x, y) {
 		t.Errorf("HandleMouse on list row[0] returned false")
 	}
@@ -312,7 +404,7 @@ func TestHandleMouseListRowFile(t *testing.T) {
 	s := New(720, 440)
 	// Row 3 is about.txt.
 	x := SidebarWidth + 50
-	y := ToolbarHeight + ColumnHeaderHeight + 3*RowHeight + RowHeight/2
+	y := HeaderBarHeight + ColumnHeaderHeight + 3*RowHeight + RowHeight/2
 	if !s.HandleMouse(x, y) {
 		t.Errorf("HandleMouse on file row returned false")
 	}
@@ -324,11 +416,12 @@ func TestHandleMouseListRowFile(t *testing.T) {
 	}
 }
 
-// HandleMouse in the column-header band (between toolbar and rows) is a no-op.
+// HandleMouse in the column-header band (between header bar and rows) is a
+// no-op.
 func TestHandleMouseColumnHeader(t *testing.T) {
 	s := New(720, 440)
 	x := SidebarWidth + 50
-	y := ToolbarHeight + ColumnHeaderHeight/2
+	y := HeaderBarHeight + ColumnHeaderHeight/2
 	if s.HandleMouse(x, y) {
 		t.Errorf("HandleMouse on column-header band returned true")
 	}
@@ -338,13 +431,13 @@ func TestHandleMouseColumnHeader(t *testing.T) {
 func TestHandleMouseListBeyond(t *testing.T) {
 	s := New(720, 440)
 	x := SidebarWidth + 50
-	y := ToolbarHeight + ColumnHeaderHeight + 10*RowHeight
+	y := HeaderBarHeight + ColumnHeaderHeight + 10*RowHeight
 	if s.HandleMouse(x, y) {
 		t.Errorf("HandleMouse past last list row returned true")
 	}
 }
 
-// syncSidebar with a path that does not match any Favorite leaves
+// syncSidebar with a path that does not match any sidebar entry leaves
 // SidebarSelected at -1.
 func TestSyncSidebarUnknownPath(t *testing.T) {
 	s := New(720, 440)
@@ -353,6 +446,21 @@ func TestSyncSidebarUnknownPath(t *testing.T) {
 	s.syncSidebar()
 	if s.SidebarSelected != -1 {
 		t.Errorf("SidebarSelected for /nope = %d, want -1", s.SidebarSelected)
+	}
+}
+
+// sidebarHitIndex returns a stable index across every band, including the
+// last row in Other Locations.
+func TestSidebarHitIndex(t *testing.T) {
+	s := New(720, 440)
+	// Trash is the last sidebar entry (index 5). Land on its row band.
+	y := otherLocationsY() + SidebarRowHeight + SidebarRowHeight/2
+	if idx := s.sidebarHitIndex(y); idx != 5 {
+		t.Errorf("sidebarHitIndex(Trash band) = %d, want 5", idx)
+	}
+	// A y above every row maps to -1.
+	if idx := s.sidebarHitIndex(0); idx != -1 {
+		t.Errorf("sidebarHitIndex(0) = %d, want -1", idx)
 	}
 }
 

@@ -1,21 +1,25 @@
-// Command wasmdock is a macOS-style dock implemented as a wasmbox external
-// client. It paints a bottom-anchored, horizontally-centered translucent bar
-// of app icons into the SAB the SDK allocated for it, magnifies the icons
-// around the cursor on mousemove, and — when an icon is clicked — asks the
-// compositor to launch that app via a {type:"launch", app:"<id>"} message.
+// SPDX-License-Identifier: BSD-3-Clause
 //
-// It runs inside a dedicated Web Worker (see worker.js). The Worker has
-// already imported sdk.js (which exposes globalThis.WasmboxClient) and
-// constructed `wasmboxClient`, then awaited `start()` — so by the time main()
-// runs we are connected. All the windowing-independent logic (layout,
-// magnification, hit-testing, painting) lives in the pure internal/scene
-// package; this file is the thin JS/SAB/postMessage glue.
+// Command wasmdock is a Fluxbox-style bottom toolbar implemented as a
+// wasmbox external client. It paints a full-width, 28-pixel-tall bevelled
+// gray bar split into three sections — a workspace label, an iconbar of
+// launcher buttons, and a clock — into the SAB the SDK allocated for it,
+// and dispatches {type:"launch", app:"<id>"} to the compositor when an
+// iconbar button is clicked.
+//
+// The pure scene + theme packages do all the layout, hit-testing and
+// painting; this file is the thin JS/SAB/postMessage glue. The worker.js
+// shell posts a "tick" input event every 30 seconds carrying the current
+// "HH:MM" string so the clock stays fresh without a Go-side time source
+// (the wasm runtime's clock is fine, but the toolbar reads the JS one for
+// timezone consistency with the rest of the page).
 //
 //go:build js && wasm
 
 package main
 
 import (
+	"encoding/json"
 	"syscall/js"
 
 	"github.com/wasmdesk/wasmbox/clients/dock/internal/scene"
@@ -37,8 +41,8 @@ func main() {
 		return
 	}
 
-	// Pure-Go RGBA buffer; scene.Render fills it, then we copy once per frame
-	// into the SAB through the SDK's Uint8ClampedArray view.
+	// Pure-Go RGBA buffer; scene.Render fills it, then we copy once per
+	// frame into the SAB through the SDK's Uint8ClampedArray view.
 	local := make([]byte, 4*w*h)
 	state := scene.New(w, h)
 
@@ -53,17 +57,25 @@ func main() {
 		client.Call("commit", damage)
 	}
 
-	// launch asks the compositor to start another client. This is a protocol
-	// extension (see INTEGRATION.md); the dock degrades gracefully if the host
-	// does not honor it yet — fire-and-forget. The launch message MUST travel
-	// over the SDK's MessagePort (the per-client wire the compositor listens on
-	// for `wasmbox-msg`), not over `self.postMessage` (the implicit nested-worker
-	// channel to compositor.worker.js, which only handles main<->compositor boot
-	// traffic and silently drops application messages like `launch`). Routing
-	// through `client.launch(app)` keeps us on the port wire end-to-end.
+	// launch asks the compositor to start another client. The launch
+	// message MUST travel over the SDK's MessagePort (the per-client wire
+	// the compositor listens on for `wasmbox-msg`), not over
+	// `self.postMessage` (the implicit nested-worker channel to
+	// compositor.worker.js, which only handles main<->compositor boot
+	// traffic and silently drops application messages like `launch`).
 	launch := func(app string) {
 		println("wasmdock: launch", app)
 		client.Call("launch", app)
+	}
+
+	// restore asks the compositor to un-minimize a folded window the user
+	// clicked on its task button. Travels over the SDK's MessagePort just
+	// like `launch`; the compositor's WindowManager.handle_client_message
+	// routes the message to its `:restore` arm and pushes a refreshed
+	// tasks list back through `tasks_changed`.
+	restore := func(id int) {
+		println("wasmdock: restore", id)
+		client.Call("restore", id)
 	}
 
 	// Initial paint so the compositor has something to blit immediately.
@@ -80,22 +92,54 @@ func main() {
 			x := ev.Get("x").Int()
 			y := ev.Get("y").Int()
 			state.SetCursor(x, y, true)
-			render()
+			// No hover paint in v0; SetCursor is recorded for a future
+			// highlight pass. Avoid an unconditional re-render on every
+			// mousemove so the worker stays idle while the cursor wanders.
 		case "mousedown":
 			x := ev.Get("x").Int()
 			y := ev.Get("y").Int()
 			if i := state.HitTest(x, y); i >= 0 {
 				launch(state.Apps[i].Id)
+				break
 			}
+			if i := state.HitTestTask(x, y); i >= 0 {
+				restore(state.Tasks[i].Id)
+			}
+		case "tasks_changed":
+			// Compositor pushes the current minimized-window list as a
+			// JSON-encoded array string under `tasks_json`. We parse it
+			// into a fresh []scene.Task and re-render so the iconbar
+			// reflects the new state.
+			raw := ev.Get("tasks_json")
+			if raw.IsUndefined() || raw.IsNull() {
+				state.SetTasks(nil)
+			} else {
+				var parsed []scene.Task
+				if err := json.Unmarshal([]byte(raw.String()), &parsed); err != nil {
+					println("wasmdock: tasks_changed parse error:", err.Error())
+					parsed = nil
+				}
+				state.SetTasks(parsed)
+			}
+			render()
+		case "tick":
+			// Clock tick posted by worker.js. The payload field "clock"
+			// carries the latest "HH:MM" string; the optional "workspace"
+			// field can update the workspace label without a separate
+			// event type.
+			clock := ev.Get("clock")
+			if !clock.IsUndefined() && !clock.IsNull() {
+				state.SetClock(clock.String())
+			}
+			ws := ev.Get("workspace")
+			if !ws.IsUndefined() && !ws.IsNull() {
+				state.SetWorkspace(ws.String())
+			}
+			render()
 		}
 		return nil
 	})
 	client.Call("onInput", cb)
-
-	// When the pointer leaves the focused dock window the compositor stops
-	// forwarding mousemove; we cannot observe a DOM mouseleave here, so the
-	// dock simply keeps its last magnification until the next move. A future
-	// protocol "blur" event could reset it via state.SetCursor(0,0,false).
 
 	// Park forever so the Go runtime keeps the FuncOf callback alive.
 	select {}
