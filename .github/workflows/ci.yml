@@ -81,6 +81,10 @@ jobs:
         with:
           node-version: "20"
 
+      - name: Seqlock fence unit test (no deps)
+        working-directory: test
+        run: node seqlock.test.mjs
+
       - name: Build wasm + clients + serve (task build)
         uses: arduino/setup-task@v2
         with:

@@ -126,6 +126,14 @@
       // 4 bytes per pixel (RGBA32), row-major, origin top-left.
       this.sab = new SharedArrayBuffer(this.stride * h);
       this.pixels = new Uint8ClampedArray(this.sab); // worker-side view
+      // Seqlock control word (one Int32 in a tiny shared buffer). The client
+      // bumps it ODD on the first pixel write of a frame and EVEN at commit;
+      // the compositor refuses to blit a surface whose seq is odd or that
+      // changes mid-read, so a half-painted (torn) frame is never shown. There
+      // is a single writer (this worker), so load + conditional add is
+      // race-free here.
+      this.ctl = new SharedArrayBuffer(4);
+      this.seq = new Int32Array(this.ctl);
       this.windowId = null;
       this._welcomeCbs = [];
       this._inputCbs = [];
@@ -160,6 +168,7 @@
         h: this.h,
         sab: this.sab,
         stride: this.stride,
+        ctl: this.ctl,
       });
       return new Promise((resolve) => this.onWelcome(resolve));
     }
@@ -172,12 +181,21 @@
     // surface, which is what naive clients want.
     commit(damage) {
       if (this.windowId === null) return;
+      // Close the seqlock write window (odd -> even) so the compositor may read
+      // a complete frame. Only flips if a paint op opened it this frame.
+      if ((Atomics.load(this.seq, 0) & 1) === 1) Atomics.add(this.seq, 0, 1);
       const d = damage || { x: 0, y: 0, w: this.w, h: this.h };
       send({
         type: "commit",
         window_id: this.windowId,
         damage: d,
       });
+    }
+
+    // Open the seqlock write window (even -> odd) on the first pixel write of a
+    // frame. Idempotent within a frame (no-op once already odd).
+    _beginPaint() {
+      if ((Atomics.load(this.seq, 0) & 1) === 0) Atomics.add(this.seq, 0, 1);
     }
 
     setTitle(title) {
@@ -195,6 +213,7 @@
     // a no-op so naive clients can scribble freely.
     putPixel(x, y, r, gr, b, a) {
       if (x < 0 || y < 0 || x >= this.w || y >= this.h) return;
+      this._beginPaint();
       const off = (y * this.w + x) * 4;
       this.pixels[off] = r;
       this.pixels[off + 1] = gr;
@@ -204,6 +223,7 @@
 
     // Fill a rectangle with a solid RGBA. Default = whole surface.
     fillRect(r, gr, b, a, rect) {
+      this._beginPaint();
       const x0 = rect ? Math.max(0, rect.x | 0) : 0;
       const y0 = rect ? Math.max(0, rect.y | 0) : 0;
       const x1 = rect ? Math.min(this.w, (rect.x + rect.w) | 0) : this.w;

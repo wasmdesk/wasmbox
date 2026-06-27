@@ -158,7 +158,7 @@ end
 # protocol messages to the matching ExternalWindow.
 # ---------------------------------------------------------------------------
 class ExternalWindow < Window
-  attr_accessor :worker, :sab, :image_data, :stride, :pending_damage
+  attr_accessor :worker, :sab, :ctl, :image_data, :stride, :pending_damage
 
   # No fill colour: an ExternalWindow's body is the SAB's RGBA bytes. We pass
   # a sentinel through to Window#initialize because the existing decoration
@@ -588,6 +588,7 @@ class WindowManager
       role = msg[:role].to_s == "panel" ? "panel" : "window"
       win = register_external(msg[:title] || "client", msg[:w] || 200, msg[:h] || 150, role)
       win.sab = msg[:sab]
+      win.ctl = msg[:ctl]   # optional seqlock control word; nil for older clients
       win.stride = msg[:stride] || (4 * win.w)
       :welcome
     when "launch"
@@ -908,7 +909,10 @@ class Compositor
   # putImageData will read from. Sharing the SAB means the worker's writes
   # become visible without any per-frame copy on this side.
   def build_image_data(win)
-    win.image_data = JS.global.call("wasmboxNewImageData", win.sab, win.w, win.h)
+    # Pass the optional seqlock control word (win.ctl, nil for older clients) so
+    # the blit helper can skip a half-painted surface. nil -> JS sees no `ctl`
+    # and the fence is a no-op.
+    win.image_data = JS.global.call("wasmboxNewImageData", win.sab, win.w, win.h, win.ctl)
   end
 
   # Tell a client its window is going away. Safe to call with an in-process
