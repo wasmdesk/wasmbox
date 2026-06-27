@@ -76,23 +76,29 @@ class Window
   def minimized? = @minimized
 
   # A panel (dock-style surface) has no decoration and is anchored, never
-  # cascade-placed. Anything else is a normal window.
+  # cascade-placed. A popup is a child surface anchored to a parent window
+  # (menus / tooltips): also undecorated, but placed parent-relative and
+  # grab-dismissed. Anything else is a normal, decorated window.
   def panel? = @role == "panel"
+  def popup? = @role == "popup"
+  # Decorated = a normal window: titlebar, close/minimize/resize boxes,
+  # draggable, focusable. Panels and popups carry no decoration.
+  def decorated? = !panel? && !popup?
 
   # Outer frame (decoration included): the titlebar sits above the body. For a
   # panel there is no titlebar, so the frame top is the body top.
-  def frame_top = panel? ? @y : @y - Theme::TITLE_H
+  def frame_top = decorated? ? @y - Theme::TITLE_H : @y
   def right     = @x + @w
   def bottom    = @y + @h
 
   # Rectangles, each as [x, y, w, h]. Panels carry no decoration rectangles, so
   # the titlebar / close / resize hit-rects collapse to empty (zero-size) and
   # the frame equals the body.
-  def titlebar_rect = panel? ? [@x, @y, 0, 0] : [@x, frame_top, @w, Theme::TITLE_H]
+  def titlebar_rect = decorated? ? [@x, frame_top, @w, Theme::TITLE_H] : [@x, @y, 0, 0]
   def body_rect     = [@x, @y, @w, @h]
 
   def close_rect
-    return [@x, @y, 0, 0] if panel?
+    return [@x, @y, 0, 0] unless decorated?
     pad = (Theme::TITLE_H - Theme::CLOSE_SZ) / 2
     [right - Theme::CLOSE_SZ - pad, frame_top + pad, Theme::CLOSE_SZ, Theme::CLOSE_SZ]
   end
@@ -103,20 +109,20 @@ class Window
   # to signal "fold this window into the dock". Panels carry no decoration so
   # this collapses to an empty (zero-size) rect, same as close_rect.
   def minimize_rect
-    return [@x, @y, 0, 0] if panel?
+    return [@x, @y, 0, 0] unless decorated?
     pad = (Theme::TITLE_H - Theme::MIN_SZ) / 2
     cx, cy, _cw, _ch = close_rect
     [cx - Theme::MIN_SZ - pad, cy, Theme::MIN_SZ, Theme::MIN_SZ]
   end
 
   def resize_rect
-    return [@x, @y, 0, 0] if panel?
+    return [@x, @y, 0, 0] unless decorated?
     [right - Theme::GRIP, bottom - Theme::GRIP, Theme::GRIP, Theme::GRIP]
   end
 
   # The whole decorated extent, used for "did the click land on me at all?".
-  # For a panel the decorated extent is just the body.
-  def frame_rect = panel? ? [@x, @y, @w, @h] : [@x, frame_top, @w, @h + Theme::TITLE_H]
+  # For an undecorated surface (panel / popup) the extent is just the body.
+  def frame_rect = decorated? ? [@x, frame_top, @w, @h + Theme::TITLE_H] : [@x, @y, @w, @h]
 
   def hit?(rect, px, py)
     rx, ry, rw, rh = rect
@@ -124,12 +130,13 @@ class Window
   end
 
   def contains?(px, py)   = hit?(frame_rect, px, py)
-  # A panel is never draggable, closable-by-box, minimizable or resizable, so
-  # every decoration hit-test reports "no hit" — those gestures can never start.
-  def on_titlebar?(px, py)= panel? ? false : hit?(titlebar_rect, px, py)
-  def on_close?(px, py)   = panel? ? false : hit?(close_rect, px, py)
-  def on_minimize?(px, py)= panel? ? false : hit?(minimize_rect, px, py)
-  def on_resize?(px, py)  = panel? ? false : hit?(resize_rect, px, py)
+  # Only a decorated window is draggable, closable-by-box, minimizable or
+  # resizable; for panels and popups every decoration hit-test reports "no hit"
+  # so those gestures can never start.
+  def on_titlebar?(px, py)= decorated? ? hit?(titlebar_rect, px, py) : false
+  def on_close?(px, py)   = decorated? ? hit?(close_rect, px, py) : false
+  def on_minimize?(px, py)= decorated? ? hit?(minimize_rect, px, py) : false
+  def on_resize?(px, py)  = decorated? ? hit?(resize_rect, px, py) : false
 
   def move_to(nx, ny)
     @x = nx
@@ -159,6 +166,9 @@ end
 # ---------------------------------------------------------------------------
 class ExternalWindow < Window
   attr_accessor :worker, :sab, :ctl, :image_data, :stride, :pending_damage
+  # For popups: the window_id of the parent surface this popup is anchored to
+  # (nil for windows/panels). Used to dismiss a popup when its parent goes.
+  attr_accessor :parent_id
 
   # No fill colour: an ExternalWindow's body is the SAB's RGBA bytes. We pass
   # a sentinel through to Window#initialize because the existing decoration
@@ -337,7 +347,9 @@ class WindowManager
   # non-minimized window exists.
   def focused
     top = nil
-    @stack.each { |w| top = w if !w.panel? && !w.minimized? }
+    # Only decorated windows take keyboard focus; panels and popups are skipped
+    # (a popup still receives mouse input by hit-testing, just not focus).
+    @stack.each { |w| top = w if w.decorated? && !w.minimized? }
     top
   end
 
@@ -386,6 +398,18 @@ class WindowManager
   # panels are always-on-top: a new normal window can never raise above a panel.
   def panels
     @stack.select { |w| w.panel? }
+  end
+
+  # Open popup surfaces (menus / tooltips), bottom-to-top. The pointer is
+  # grabbed while any popup is open: a click inside one is forwarded to it, a
+  # click outside dismisses them (see Compositor#on_mousedown).
+  def popups
+    @stack.select { |w| w.popup? }
+  end
+
+  # Popups anchored to a given parent window_id (dismissed when it closes).
+  def child_popups(parent_id)
+    @stack.select { |w| w.popup? && w.parent_id == parent_id }
   end
 
   # The compositing order: every normal window first, then every panel on top.
@@ -440,7 +464,9 @@ class WindowManager
   # does not participate in focus. So for a panel we leave focus untouched.
   def focus(win)
     return nil unless win
-    return win if win.panel?
+    # Panels and popups never take focus: a panel is the always-on-top dock; a
+    # popup receives mouse via hit-testing but must not re-stack or steal focus.
+    return win if win.panel? || win.popup?
     unstack(win)
     @stack.push(win)
     @stack.each { |o| o.focused = false unless o.panel? }
@@ -450,6 +476,10 @@ class WindowManager
 
   def close(win)
     unstack(win)
+    # Popups anchored to this window are orphaned — unmap them too so a closed
+    # parent never leaves a dangling menu on screen. (Telling the popup client
+    # it was closed is the Compositor's job; see dismiss_popups / notify_closed.)
+    child_popups(win.id).each { |p| unstack(p) } if win
     top = @stack.last
     top.focused = true if top
     win
@@ -540,19 +570,26 @@ class WindowManager
   # (role "panel", e.g. the dock) skips cascade placement entirely (the
   # Compositor anchors it to the bottom-center each frame), is never focused,
   # and is not subject to saved-layout geometry — its size is its own.
-  def register_external(title, req_w, req_h, role = "window")
+  def register_external(title, req_w, req_h, role = "window", parent_id: nil, rel_x: 0, rel_y: 0)
     @next_id += 1
-    panel = role == "panel"
-    # Panels (the dock + future Fluxbox-style toolbars) own their own
-    # geometry -- a 28-px-tall bottom bar is the whole point. Skip the
-    # MIN_W / MIN_H clamps that exist to keep a normal window's title +
-    # close box reachable; a panel has neither. Granted dims = requested
-    # for panels, [requested, MIN] for everything else.
-    if panel
+    case role
+    when "panel"
+      # Panels (the dock + Fluxbox-style toolbars) own their own geometry -- a
+      # 28-px bottom bar is the whole point. Skip the MIN_W / MIN_H clamps that
+      # keep a normal window's title + close box reachable; a panel has neither.
       granted_w = req_w
       granted_h = req_h
       x = 0
       y = 0
+    when "popup"
+      # Popups own their geometry too (a menu can be tiny -- no MIN clamp), and
+      # are placed at (rel_x, rel_y) inside the PARENT window's body. If the
+      # parent has gone, fall back to the bare offset from the screen origin.
+      granted_w = req_w
+      granted_h = req_h
+      parent = parent_id && find(parent_id)
+      x = (parent ? parent.x : 0) + rel_x
+      y = (parent ? parent.y : 0) + rel_y
     else
       granted_w = [req_w, Theme::MIN_W].max
       granted_h = [req_h, Theme::MIN_H].max
@@ -562,15 +599,18 @@ class WindowManager
       @cascade += 1
     end
     win = ExternalWindow.new(@next_id, title, x, y, granted_w, granted_h, role)
+    win.parent_id = parent_id if role == "popup"
+    # Newest surface goes on top: a popup naturally sits above its (older)
+    # parent. Panels are pinned on top each frame by the Compositor regardless.
     @stack.push(win)
     @last_registered = win
-    if panel
-      win
-    else
+    # Only normal windows join the focus ring + saved-layout. Panels are never
+    # focused; popups take mouse input via hit-testing but never keyboard focus.
+    if role == "window"
       focus(win)
       apply_saved(win)
-      win
     end
+    win
   end
 
   # The window most recently created by register_external. The Compositor uses
@@ -585,8 +625,16 @@ class WindowManager
     record(msg)
     case msg[:type]
     when "hello"
-      role = msg[:role].to_s == "panel" ? "panel" : "window"
-      win = register_external(msg[:title] || "client", msg[:w] || 200, msg[:h] || 150, role)
+      role = case msg[:role].to_s
+             when "panel" then "panel"
+             when "popup" then "popup"
+             else "window"
+             end
+      # parent arrives from JS as a Number (Float); coerce so `find` matches the
+      # integer window ids. nil for non-popup hellos (no parent field).
+      parent_id = msg[:parent] && msg[:parent].to_i
+      win = register_external(msg[:title] || "client", msg[:w] || 200, msg[:h] || 150, role,
+                              parent_id: parent_id, rel_x: (msg[:rel_x] || 0).to_i, rel_y: (msg[:rel_y] || 0).to_i)
       win.sab = msg[:sab]
       win.ctl = msg[:ctl]   # optional seqlock control word; nil for older clients
       win.stride = msg[:stride] || (4 * win.w)
@@ -887,7 +935,9 @@ class Compositor
     type = data.get("type")
     return nil if type.nil?
     h = { type: type.to_s }
-    %w[window_id w h stride title role app].each do |k|
+    # Scalar fields. `parent` + `rel_x` + `rel_y` carry popup placement; without
+    # them a popup hello would lose its anchor and land at (0,0).
+    %w[window_id w h stride title role app parent rel_x rel_y].each do |k|
       v = data.get(k)
       h[k.to_sym] = v unless v.nil?
     end
@@ -900,8 +950,12 @@ class Compositor
         h: damage.get("h"),
       }
     end
+    # SharedArrayBuffer refs: the pixel surface (sab) and the optional seqlock
+    # control word (ctl). Both are JS::Refs, kept by reference (not cloned).
     sab = data.get("sab")
     h[:sab] = sab unless sab.nil?
+    ctl = data.get("ctl")
+    h[:ctl] = ctl unless ctl.nil?
     h
   end
 
@@ -925,6 +979,15 @@ class Compositor
       "window_id", win.id,
       "reason", reason)
     JS.global.call("wasmboxPostMessage", win.worker, msg)
+  end
+
+  # Unmap a set of popup surfaces and tell each client it was closed. Used by
+  # the pointer-grab dismissal and when a popup's parent window goes away.
+  def dismiss_popups(list)
+    list.each do |p|
+      @wm.close(p)
+      notify_closed(p, "user")
+    end
   end
 
   def fit_canvas
@@ -1000,6 +1063,22 @@ class Compositor
       return
     end
 
+    # A client popup (menu / tooltip) grabs the pointer while open. A click
+    # inside any popup is forwarded to it (so it can act on the selection); a
+    # click anywhere else dismisses every open popup and is consumed (one click
+    # to close, matching how desktop menus dismiss).
+    popups = @wm.popups
+    unless popups.empty?
+      hit = nil
+      popups.each { |p| hit = p if p.hit?(p.body_rect, mx, my) }
+      if hit
+        forward_mouse_to_client(hit, "mousedown", mx, my, e) if hit.external?
+      else
+        dismiss_popups(popups)
+      end
+      return
+    end
+
     # A panel (the dock) is always-on-top and takes the click on geometric
     # hover without stealing focus from the app windows. Forward mousedown to it
     # (so an icon click reaches the dock, which then posts a `launch`) and stop.
@@ -1017,6 +1096,7 @@ class Compositor
     @wm.focus(win)
 
     if win.on_close?(mx, my)
+      dismiss_popups(@wm.child_popups(win.id))  # notify any orphaned popups first
       @wm.close(win)
       notify_closed(win, "user")
       notify_tasks_changed
@@ -1203,12 +1283,12 @@ class Compositor
   end
 
   def draw_window(win)
-    # A panel (the dock) is undecorated: no titlebar, no close box, no resize
-    # grip, no frame border. Its surface IS the window, so we blit the SAB
-    # straight at the body rectangle. The blit composites (source-over, see
-    # wasmboxBlitFromSAB), so the transparent corners outside the dock bar show
-    # the desktop through instead of a black rectangle.
-    if win.panel?
+    # An undecorated surface (a panel like the dock, or a popup like a menu)
+    # has no titlebar, close box, resize grip or frame border: its surface IS
+    # the window, so we blit the SAB straight at the body rectangle. The blit
+    # composites (source-over, see wasmboxBlitFromSAB), so transparent corners
+    # show the desktop through instead of a black rectangle.
+    unless win.decorated?
       blit_external(win) if win.external?
       return
     end

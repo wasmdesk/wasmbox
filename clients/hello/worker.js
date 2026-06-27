@@ -31,6 +31,29 @@ const client = new WasmboxClient({ title: "hello (wasm)", w: 200, h: 150 });
 // the wasm so the Go side never sees an undefined wasmboxClient.
 self.wasmboxClient = client;
 
+// --- popup demo (xdg-popup / subsurface) -----------------------------------
+// A click on the hello window opens a small child popup anchored under the
+// pointer -- a second surface on THIS worker, made possible by the multi-
+// surface SDK. The compositor anchors it parent-relative, draws no decoration,
+// and grab-dismisses it on a click outside; the `closed` that arrives then
+// clears our handle, so the next click opens a fresh one.
+let demoPopup = null;
+client.onInput((ev) => {
+  if (ev.kind !== "mousedown" || demoPopup) return;
+  const p = client.openPopup({ title: "hello menu", w: 132, h: 96, rel_x: ev.x | 0, rel_y: ev.y | 0 });
+  demoPopup = p;
+  p.onClosed(() => { if (demoPopup === p) demoPopup = null; });
+  p.onWelcome(() => {
+    p.fillRect(236, 236, 240, 255);                                  // light menu body
+    p.fillRect(180, 182, 190, 255, { x: 0, y: 0, w: p.w, h: 1 });    // top hairline
+    p.fillRect(180, 182, 190, 255, { x: 0, y: p.h - 1, w: p.w, h: 1 }); // bottom hairline
+    for (let i = 0; i < 3; i++) {                                    // three menu items
+      p.fillRect(210, 214, 222, 255, { x: 6, y: 8 + i * 28, w: p.w - 12, h: 20 });
+    }
+    p.commit();
+  });
+});
+
 client.start().then(async () => {
   // On the OCI path, await the assets envelope the compositor queued before
   // the port handoff. importScripts wasm_exec.js from that blob URL and
