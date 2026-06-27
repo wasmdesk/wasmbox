@@ -92,12 +92,15 @@ The first message a client sends after `Worker` instantiation completes.
   sab: SharedArrayBuffer,     // 4*w*h bytes, RGBA32, row-major top-left
   stride: 4 * 200,            // bytes per row; canonical = 4*w
   role: "window",             // optional surface role (see below); default "window"
+  ctl: SharedArrayBuffer,     // optional 1×Int32 seqlock control word (tear-free; see below)
 }
 ```
 
 The SAB is transferred by reference (it is shared, not copied). The compositor
 keeps it for the lifetime of the window and reads `damage` rectangles out of
-it on every `commit`.
+it on every `commit`. `ctl` is optional — when present it enables the
+tear-free seqlock (see *Tear-free presentation*); a client that omits it gets
+the older "read whenever" behaviour.
 
 **Surface roles** (`hello.role`, validated by the compositor — anything not
 exactly `"panel"` is treated as `"window"`):
@@ -236,6 +239,26 @@ SAB-backed array ("The provided Uint8ClampedArray value must not be
 shared"); the SAB still avoids an extra structured-clone of the surface
 across the worker/main boundary, which was the protocol's main goal.
 
+## Tear-free presentation (seqlock)
+
+A single-buffered surface can tear: the compositor's per-frame copy might run
+while the client is mid-paint. The optional `ctl` control word fixes that with
+a **seqlock** — no second buffer, so the incremental-damage model is preserved:
+
+* **Client (writer, single thread):** bump `seq` to **odd** on the first pixel
+  write of a frame (`Atomics.add`), and to **even** in `commit()`. Odd = "a
+  frame is being painted".
+* **Compositor (reader):** before copying, load `seq`; if it is **odd**, skip
+  this frame's blit (keep the last complete frame). After copying into its
+  private `ImageData`, load `seq` again; if it **changed**, the client wrote
+  during the copy (a torn read) → discard it (don't `putImageData`). Only a
+  copy bracketed by a stable, even `seq` is presented.
+
+Because the compositor re-composites every window every `requestAnimationFrame`,
+a skipped frame simply retries on the next raf once the client has committed —
+so no update is lost, and a half-painted surface is never shown. A client that
+sends no `ctl` keeps the older unsynchronised behaviour.
+
 ## Implemented since step B
 
 * **Compositor in its own Worker** (step C) + **direct client↔compositor
@@ -244,13 +267,10 @@ across the worker/main boundary, which was the protocol's main goal.
 * **`launch`** — id-gated client spawning through the `LAUNCHABLE` trust table.
 * **OCI client delivery** — clients pulled at runtime as OCI artifacts
   (`wasmboxSpawnFromOCI` / `OCIAppsLoader`).
+* **Tear-free seqlock** — the optional `ctl` control word (see above).
 
 ## Roadmap / not yet implemented
 
-* Multi-buffering with an explicit fence; clients are currently expected to
-  render fully before posting `commit` (single-buffered → possible tearing
-  under contention). Planned: an `Atomics.wait`-based fence on a SAB-resident
-  counter — the most Wayland-faithful next step.
 * Subsurfaces / popups / nested windows.
 * `request_resize` (would need a fresh SAB) + surface-size clamping negotiation.
 * GPU offload (everything blits through 2D `putImageData`; no dmabuf/WebGPU).

@@ -389,22 +389,39 @@ globalThis.wasmboxSpawnFromOCI = async function (ref) {
 // Build an ImageData of size w*h plus a non-shared backing copy that the blit
 // helper reads from. Identical to the step-A/B helper that used to live in
 // index.html -- moved here because the canvas now lives in the worker.
-globalThis.wasmboxNewImageData = function (sab, w, h) {
+globalThis.wasmboxNewImageData = function (sab, w, h, ctl) {
   return {
     image: new ImageData(w, h),
     src:   new Uint8ClampedArray(sab),
+    // Seqlock control word, if the client supplied one (older clients send no
+    // `ctl` -> seq null -> the fence is a no-op and we blit as before).
+    seq:   ctl ? new Int32Array(ctl) : null,
     w: w, h: h,
   };
 };
 
 globalThis.wasmboxBlitFromSAB = function (ctx, slot, dx, dy, sx, sy, sw, sh) {
   const stride = slot.w * 4;
+  // Seqlock read (when the client published a control word): an ODD seq means
+  // the client is mid-paint; a seq that changes across our copy means it wrote
+  // while we read (a torn copy). In either case skip this frame's blit — the
+  // canvas keeps the last complete frame, and the per-frame re-composite retries
+  // next raf once the client has committed (seq even, stable). Never show a
+  // half-painted surface.
+  let s1 = 0;
+  if (slot.seq) {
+    s1 = Atomics.load(slot.seq, 0);
+    if (s1 & 1) return;
+  }
   const dst = slot.image.data;
   for (let row = 0; row < sh; row++) {
     const srcOff = (sy + row) * stride + sx * 4;
     const dstOff = (sy + row) * stride + sx * 4;
     dst.set(slot.src.subarray(srcOff, srcOff + sw * 4), dstOff);
   }
+  // The copy landed in our private ImageData; only present it if the client did
+  // not write during the copy (so a torn copy is discarded, never blitted).
+  if (slot.seq && Atomics.load(slot.seq, 0) !== s1) return;
   // Per-slot OffscreenCanvas for the source-over composite (so the dock's
   // transparent corners do not paint black). Identical to the main-thread
   // version, just using OffscreenCanvas instead of an HTMLCanvasElement.
