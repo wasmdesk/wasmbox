@@ -222,6 +222,7 @@ tasks:
       - go test ./
       - go test ./packs/...
       - go run ./cmd/rbtest
+      - node test/sdk-bootwasm.test.mjs
 
   clean:
     desc: Remove the build artifacts

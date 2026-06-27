@@ -30,15 +30,13 @@ const client = new WasmboxClient({ title: "Files", w: 720, h: 440 });
 self.wasmboxClient = client;
 
 client.start().then(async () => {
-  // Pre-paint the surface with the Adwaita window background + commit
-  // immediately, so the user sees a flat gray pane while files.wasm
-  // is still fetching + parsing + booting (~2 s for a 2 MB binary).
-  // Without this the SAB stays at init zeros = transparent, and the
-  // compositor blits "see-through" into the desktop = user reads it
-  // as "empty window with nothing inside".
-  client.fillRect(250, 250, 250, 255);
-  client.commit();
-
+  // Pre-paint via the SDK's bootWasm loader (Adwaita-light palette): it owns
+  // the surface from start() resolution through wasm boot, painting a
+  // progress bar that grows during fetch + snaps to 100% before
+  // WebAssembly.instantiate(). The SAB sat at init-zeros = transparent
+  // before; now the user sees an Adwaita window with an accent-blue loader
+  // for the 2-3 s the multi-MB wasm takes to come in. files.wasm overwrites
+  // the bar with its first render once go.run() reaches paintScene().
   const assets = isOCI
     ? await WasmboxClient.bootFromOCIAssets({ fallbackMs: 2000 })
     : null;
@@ -48,9 +46,13 @@ client.start().then(async () => {
   }
   const go = new Go();
   const wasmURL = assets ? assets.wasm_url : "./files.wasm";
-  const wasm = await WebAssembly.instantiateStreaming(
-    fetch(wasmURL), go.importObject);
+  const instance = await WasmboxClient.bootWasm(wasmURL, go.importObject, {
+    // Adwaita light: window BG, soft track, accent blue.
+    bg:    [250, 250, 250],
+    track: [218, 220, 224],
+    fill:  [ 53, 132, 228],
+  });
   // go.run() does not return until main() exits; the files client parks on
   // `select {}` to keep its handlers live, so we don't await it.
-  go.run(wasm.instance);
+  go.run(instance);
 });

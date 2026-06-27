@@ -152,6 +152,33 @@
       send({ type: "launch", app: String(app) });
     }
 
+    // putPixel + fillRect: minimal SAB scribblers used by bootWasm's loading
+    // progress bar (kept in lockstep with clients/sdk/sdk.js).
+    putPixel(x, y, r, gr, b, a) {
+      if (x < 0 || y < 0 || x >= this.w || y >= this.h) return;
+      const off = (y * this.w + x) * 4;
+      this.pixels[off] = r;
+      this.pixels[off + 1] = gr;
+      this.pixels[off + 2] = b;
+      this.pixels[off + 3] = a;
+    }
+
+    fillRect(r, gr, b, a, rect) {
+      const x0 = rect ? Math.max(0, rect.x | 0) : 0;
+      const y0 = rect ? Math.max(0, rect.y | 0) : 0;
+      const x1 = rect ? Math.min(this.w, (rect.x + rect.w) | 0) : this.w;
+      const y1 = rect ? Math.min(this.h, (rect.y + rect.h) | 0) : this.h;
+      for (let y = y0; y < y1; y++) {
+        let off = (y * this.w + x0) * 4;
+        for (let x = x0; x < x1; x++) {
+          this.pixels[off++] = r;
+          this.pixels[off++] = gr;
+          this.pixels[off++] = b;
+          this.pixels[off++] = a;
+        }
+      }
+    }
+
     // --- internals -------------------------------------------------------
     _handle(msg) {
       if (!msg || typeof msg.type !== "string") return;
@@ -177,6 +204,97 @@
   }
 
   WasmboxClient.useMessagePort = function (port) { swapChannel(port); };
+
+  // ----- loading progress bar -------------------------------------------
+  //
+  // bootWasm(url, importObject, opts?) -> Promise<WebAssembly.Instance>.
+  // See clients/sdk/sdk.js for the full doc-comment; this is a verbatim copy
+  // because clients/dock/sdk.js is the dock's STANDALONE SDK so the dock
+  // builds outside the wasmbox checkout. Any change here must be mirrored in
+  // clients/sdk/sdk.js (the canonical copy).
+  WasmboxClient.bootWasm = async function bootWasm(url, importObject, opts) {
+    opts = opts || {};
+    const bg    = opts.bg    || [250, 250, 250];
+    const track = opts.track || [218, 220, 224];
+    const fill  = opts.fill  || [ 53, 132, 228];
+    const fetchFn = ("fetch" in opts)
+      ? opts.fetch
+      : (g.fetch || (typeof fetch !== "undefined" ? fetch : null));
+    const instantiateFn = ("instantiate" in opts)
+      ? opts.instantiate
+      : (typeof WebAssembly !== "undefined" ? WebAssembly.instantiate.bind(WebAssembly) : null);
+    const client = (opts.client === undefined) ? activeClient : opts.client;
+
+    function paintBar(progress) {
+      if (!client) return;
+      const w = client.w, h = client.h;
+      const trackW = Math.min(200, Math.max(40, w - 32));
+      const trackH = 6;
+      const trackX = ((w - trackW) >> 1);
+      const trackY = ((h - trackH) >> 1);
+      client.fillRect(bg[0], bg[1], bg[2], 255);
+      client.fillRect(track[0], track[1], track[2], 255,
+        { x: trackX, y: trackY, w: trackW, h: trackH });
+      client.fillRect(bg[0], bg[1], bg[2], 255, { x: trackX, y: trackY, w: 1, h: 1 });
+      client.fillRect(bg[0], bg[1], bg[2], 255, { x: trackX + trackW - 1, y: trackY, w: 1, h: 1 });
+      client.fillRect(bg[0], bg[1], bg[2], 255, { x: trackX, y: trackY + trackH - 1, w: 1, h: 1 });
+      client.fillRect(bg[0], bg[1], bg[2], 255, { x: trackX + trackW - 1, y: trackY + trackH - 1, w: 1, h: 1 });
+      const p = Math.max(0, Math.min(1, progress));
+      const fillW = Math.round(trackW * p);
+      if (fillW > 0) {
+        client.fillRect(fill[0], fill[1], fill[2], 255,
+          { x: trackX, y: trackY, w: fillW, h: trackH });
+      }
+      client.commit();
+    }
+
+    if (!fetchFn) throw new Error("bootWasm: no fetch available");
+    if (!instantiateFn) throw new Error("bootWasm: no WebAssembly.instantiate available");
+
+    paintBar(0);
+
+    const resp = await fetchFn(url);
+    if (!resp || !resp.ok && resp.ok !== undefined) {
+      if (resp && resp.status && (resp.status < 200 || resp.status >= 300)) {
+        throw new Error("bootWasm: HTTP " + resp.status + " for " + url);
+      }
+    }
+    const cl = resp.headers && resp.headers.get ? +resp.headers.get("content-length") : 0;
+    const total = (Number.isFinite(cl) && cl > 0) ? cl : 0;
+
+    const chunks = [];
+    let received = 0;
+
+    if (resp.body && resp.body.getReader) {
+      const reader = resp.body.getReader();
+      for (;;) {
+        const { value, done } = await reader.read();
+        if (done) break;
+        if (value && value.length) {
+          chunks.push(value);
+          received += value.length;
+          if (total > 0) {
+            paintBar(received / total);
+          } else {
+            paintBar(0.5);
+          }
+        }
+      }
+    } else {
+      const buf = await resp.arrayBuffer();
+      chunks.push(new Uint8Array(buf));
+      received = chunks[0].length;
+    }
+
+    const bytes = new Uint8Array(received || chunks.reduce((n, c) => n + c.length, 0));
+    let off = 0;
+    for (const c of chunks) { bytes.set(c, off); off += c.length; }
+
+    paintBar(1);
+
+    const result = await instantiateFn(bytes, importObject);
+    return (result && result.instance) ? result.instance : result;
+  };
 
   g.WasmboxClient = WasmboxClient;
 })(self);

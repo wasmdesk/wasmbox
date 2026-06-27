@@ -248,6 +248,164 @@
   // wire_test.js harness uses it to inject a synthetic port.
   WasmboxClient.useMessagePort = function (port) { swapChannel(port); };
 
+  // ----- loading progress bar -------------------------------------------
+  //
+  // bootWasm(url, importObject, opts?) -> Promise<WebAssembly.Instance>.
+  //
+  // Drop-in replacement for `WebAssembly.instantiateStreaming(fetch(url), io)`
+  // that ALSO paints a loading progress bar onto the active WasmboxClient's
+  // SAB while the wasm is downloading. Without it the SAB sits at a flat
+  // pre-paint colour for the 2-3 s a multi-MB wasm takes to fetch + boot, and
+  // the user reads it as "dead window".
+  //
+  // Strategy:
+  //   1. Paint a window-BG frame + an empty track + commit (frame 0).
+  //   2. fetch(url), read body via reader.read() in a loop; per chunk:
+  //      - paint window-BG over the previous fill region (cheap full-track
+  //        repaint -- 200x6 px ~ 1200 px, trivial)
+  //      - paint the new fill rect (trackW * progress wide)
+  //      - commit
+  //   3. Concat the accumulated chunks into a single Uint8Array.
+  //   4. WebAssembly.instantiate(bytes, importObject).
+  //   5. Resolve the instance. The wasm Go program, once started, will write
+  //      over the bar with its own scene -- bootWasm never paints again past
+  //      this point.
+  //
+  // opts:
+  //   bg     [r,g,b]  window background (default 250,250,250)
+  //   track  [r,g,b]  unfilled bar (default 218,220,224)
+  //   fill   [r,g,b]  filled portion (default 53,132,228) -- Adwaita accent
+  //   client          the WasmboxClient to paint into (defaults to the active
+  //                   one set by start()). Pass null to disable painting (for
+  //                   non-SDK clients like quake that drive the SAB from Go).
+  //
+  // Content-Length headers are honoured for the determinate case; when the
+  // server omits it (or returns 0), we paint a steady 50% indicator instead
+  // of guessing, then snap to 100% on completion. This degraded mode is
+  // visually still "something is happening" rather than a static colour.
+  //
+  // The helper is intentionally tolerant of:
+  //   - missing global fetch (Node tests): tests inject a stub via opts.fetch.
+  //   - missing WebAssembly.instantiate (same reason): tests inject opts.instantiate.
+  //   These seams keep bootWasm 100% unit-testable without a browser.
+  WasmboxClient.bootWasm = async function bootWasm(url, importObject, opts) {
+    opts = opts || {};
+    const bg    = opts.bg    || [250, 250, 250];
+    const track = opts.track || [218, 220, 224];
+    const fill  = opts.fill  || [ 53, 132, 228];
+    // For fetch / instantiate we honour an explicit null override (so tests
+    // can force the "no fetch / no WebAssembly" error paths). `in opts` is the
+    // distinguishing test -- `opts.x || fallback` would silently fall back on
+    // null too.
+    const fetchFn = ("fetch" in opts)
+      ? opts.fetch
+      : (g.fetch || (typeof fetch !== "undefined" ? fetch : null));
+    const instantiateFn = ("instantiate" in opts)
+      ? opts.instantiate
+      : (typeof WebAssembly !== "undefined" ? WebAssembly.instantiate.bind(WebAssembly) : null);
+    // client === undefined  -> use the active client (set by start()).
+    // client === null       -> disable painting (quake-style).
+    // client === <obj>      -> paint into that client.
+    const client = (opts.client === undefined) ? activeClient : opts.client;
+
+    // ---- paint helpers (no-op when client is null) ----
+    function paintBar(progress) {
+      if (!client) return;
+      const w = client.w, h = client.h;
+      // Clamp track to surface; centre horizontally + vertically.
+      const trackW = Math.min(200, Math.max(40, w - 32));
+      const trackH = 6;
+      const trackX = ((w - trackW) >> 1);
+      const trackY = ((h - trackH) >> 1);
+      // Full window BG (cheap; small surfaces). For the dock-style "panel"
+      // role this overdraws the existing pre-paint, which is intentional --
+      // bootWasm OWNS the surface until the wasm starts committing.
+      client.fillRect(bg[0], bg[1], bg[2], 255);
+      // Track (unfilled).
+      client.fillRect(track[0], track[1], track[2], 255,
+        { x: trackX, y: trackY, w: trackW, h: trackH });
+      // Soften corners: erase the 1px outer pixels at each end so the bar
+      // doesn't look like a perfect rectangle (very subtle, but matches the
+      // rounded-rect look of GTK / Aqua).
+      client.fillRect(bg[0], bg[1], bg[2], 255,
+        { x: trackX, y: trackY, w: 1, h: 1 });
+      client.fillRect(bg[0], bg[1], bg[2], 255,
+        { x: trackX + trackW - 1, y: trackY, w: 1, h: 1 });
+      client.fillRect(bg[0], bg[1], bg[2], 255,
+        { x: trackX, y: trackY + trackH - 1, w: 1, h: 1 });
+      client.fillRect(bg[0], bg[1], bg[2], 255,
+        { x: trackX + trackW - 1, y: trackY + trackH - 1, w: 1, h: 1 });
+      // Fill (left-to-right). progress in [0,1].
+      const p = Math.max(0, Math.min(1, progress));
+      const fillW = Math.round(trackW * p);
+      if (fillW > 0) {
+        client.fillRect(fill[0], fill[1], fill[2], 255,
+          { x: trackX, y: trackY, w: fillW, h: trackH });
+      }
+      client.commit();
+    }
+
+    if (!fetchFn) throw new Error("bootWasm: no fetch available");
+    if (!instantiateFn) throw new Error("bootWasm: no WebAssembly.instantiate available");
+
+    // Frame 0: empty track (0% progress) so the user sees the loader within
+    // microseconds of the worker spawning.
+    paintBar(0);
+
+    const resp = await fetchFn(url);
+    if (!resp || !resp.ok && resp.ok !== undefined) {
+      // resp.ok is undefined for stub responses without a status field; we
+      // accept those for tests + only reject real-fetch failures.
+      if (resp && resp.status && (resp.status < 200 || resp.status >= 300)) {
+        throw new Error("bootWasm: HTTP " + resp.status + " for " + url);
+      }
+    }
+    const cl = resp.headers && resp.headers.get ? +resp.headers.get("content-length") : 0;
+    const total = (Number.isFinite(cl) && cl > 0) ? cl : 0;
+
+    const chunks = [];
+    let received = 0;
+
+    // resp.body may be absent in node-fetch / mock environments; fall back to
+    // arrayBuffer() in that case (no progress, just snap to 100% at the end).
+    if (resp.body && resp.body.getReader) {
+      const reader = resp.body.getReader();
+      for (;;) {
+        const { value, done } = await reader.read();
+        if (done) break;
+        if (value && value.length) {
+          chunks.push(value);
+          received += value.length;
+          if (total > 0) {
+            paintBar(received / total);
+          } else {
+            // Indeterminate mode: paint a steady 50% indicator so the user
+            // still sees motion (the bar redraws every chunk).
+            paintBar(0.5);
+          }
+        }
+      }
+    } else {
+      const buf = await resp.arrayBuffer();
+      chunks.push(new Uint8Array(buf));
+      received = chunks[0].length;
+    }
+
+    // Concat into a single Uint8Array.
+    const bytes = new Uint8Array(received || chunks.reduce((n, c) => n + c.length, 0));
+    let off = 0;
+    for (const c of chunks) { bytes.set(c, off); off += c.length; }
+
+    // Final paint: 100% (covers the case where Content-Length under-reported
+    // and we never hit 1.0 during streaming).
+    paintBar(1);
+
+    const result = await instantiateFn(bytes, importObject);
+    // WebAssembly.instantiate(BufferSource, ...) returns {module, instance};
+    // some stubs may return just the instance. Normalise.
+    return (result && result.instance) ? result.instance : result;
+  };
+
   // OCI assets accessor. Returns a Promise that resolves to the envelope
   // the compositor sent via wasmboxSpawnFromOCI ({wasm_exec_url, wasm_url,
   // wasm_name, files, ref}), or to `null` when the spawn was static. The
