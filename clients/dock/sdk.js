@@ -152,6 +152,15 @@
       send({ type: "launch", app: String(app) });
     }
 
+    // restore asks the compositor to un-minimize a window the user clicked on
+    // a task button. The compositor's WindowManager.handle_client_message
+    // routes the message to its `:restore` arm; an unknown id (or a window
+    // that is not currently minimized) is dropped — restore is idempotent.
+    // Fire-and-forget like `launch`.
+    restore(id) {
+      send({ type: "restore", window_id: id | 0 });
+    }
+
     // putPixel + fillRect: minimal SAB scribblers used by bootWasm's loading
     // progress bar (kept in lockstep with clients/sdk/sdk.js).
     putPixel(x, y, r, gr, b, a) {

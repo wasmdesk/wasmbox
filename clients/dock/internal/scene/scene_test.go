@@ -488,3 +488,120 @@ func TestRenderZeroWidthIconbar(t *testing.T) {
 	buf := newBuf(s)
 	Render(s, buf) // must not panic
 }
+
+// SetTasks stores the snapshot verbatim so the next render picks it up.
+func TestSetTasksStores(t *testing.T) {
+	s := New(tW, tH)
+	if len(s.Tasks) != 0 {
+		t.Fatalf("fresh state should have 0 tasks, got %d", len(s.Tasks))
+	}
+	s.SetTasks([]Task{{Id: 7, Title: "xterm"}, {Id: 12, Title: "editor"}})
+	if got, want := len(s.Tasks), 2; got != want {
+		t.Fatalf("SetTasks length = %d, want %d", got, want)
+	}
+	if s.Tasks[0].Id != 7 || s.Tasks[0].Title != "xterm" {
+		t.Fatalf("Tasks[0] = %+v, want {7 xterm}", s.Tasks[0])
+	}
+	s.SetTasks(nil)
+	if len(s.Tasks) != 0 {
+		t.Fatalf("SetTasks(nil) should clear, got %d", len(s.Tasks))
+	}
+}
+
+// TaskButtonRect places the i-th task button at the slot immediately after
+// the last launcher (continuous row).
+func TestTaskButtonRectFollowsLaunchers(t *testing.T) {
+	s := New(tW, tH)
+	s.SetTasks([]Task{{Id: 1, Title: "a"}, {Id: 2, Title: "b"}})
+	n := len(s.Apps)
+	for i := range s.Tasks {
+		tx, ty, tw, th := s.TaskButtonRect(i)
+		lx, ly, lw, lh := s.IconbarButtonRect(n + i)
+		if tx != lx || ty != ly || tw != lw || th != lh {
+			t.Fatalf("task[%d] rect = (%d,%d,%d,%d), want launcher-slot[%d] (%d,%d,%d,%d)",
+				i, tx, ty, tw, th, n+i, lx, ly, lw, lh)
+		}
+	}
+}
+
+// HitTestTask returns the task index for clicks inside a task button and -1
+// for clicks outside (workspace, clock, launcher row, above/below row).
+func TestHitTestTask(t *testing.T) {
+	s := New(tW, tH)
+	s.SetTasks([]Task{{Id: 10, Title: "win10"}, {Id: 20, Title: "win20"}})
+	for i := range s.Tasks {
+		bx, by, bw, bh := s.TaskButtonRect(i)
+		px := bx + bw/2
+		py := by + bh/2
+		if got := s.HitTestTask(px, py); got != i {
+			t.Fatalf("HitTestTask center of task %d = %d, want %d", i, got, i)
+		}
+		// HitTest (launchers) must NOT match a task click.
+		if got := s.HitTest(px, py); got != -1 {
+			t.Fatalf("HitTest center of task %d = %d, want -1 (launcher hit-test)", i, got)
+		}
+	}
+	// A click on the workspace label / clock is inert for tasks too.
+	if got := s.HitTestTask(WorkspaceW/2, tH/2); got != -1 {
+		t.Fatalf("workspace HitTestTask = %d, want -1", got)
+	}
+	if got := s.HitTestTask(tW-ClockW/2, tH/2); got != -1 {
+		t.Fatalf("clock HitTestTask = %d, want -1", got)
+	}
+	// A click on a launcher button is NOT a task hit.
+	bx, by, bw, bh := s.IconbarButtonRect(0)
+	if got := s.HitTestTask(bx+bw/2, by+bh/2); got != -1 {
+		t.Fatalf("launcher click HitTestTask = %d, want -1", got)
+	}
+}
+
+// HitTestTask returns -1 when a task's anchor falls past the iconbar's
+// right edge (very narrow surface fallback).
+func TestHitTestTaskOverflow(t *testing.T) {
+	// 400-px surface: iconbar width = 400 - 100 - 80 = 220 -> fits 1 button +
+	// part of a second. Add 4 launchers (default) + a task -> the task's
+	// anchor is past the iconbar's right edge.
+	s := New(400, BarHeight)
+	s.SetTasks([]Task{{Id: 99, Title: "off-screen"}})
+	bx, _, _, _ := s.TaskButtonRect(0)
+	ix, _, iw, _ := s.IconbarRect()
+	if bx < ix+iw {
+		t.Fatalf("test setup wrong: expected task button anchor past iconbar end (bx=%d, ix+iw=%d)", bx, ix+iw)
+	}
+	if got := s.HitTestTask(bx+1, IconbarVPad+1); got != -1 {
+		t.Fatalf("HitTestTask past iconbar end = %d, want -1", got)
+	}
+}
+
+// A task button paints ink for its title in the slot just past the
+// launchers. The "[*]" accent prefix is part of the painted label.
+func TestRenderTaskInked(t *testing.T) {
+	s := New(tW, tH)
+	s.SetTasks([]Task{{Id: 7, Title: "alpha"}})
+	buf := newBuf(s)
+	Render(s, buf)
+	bx, by, bw, bh := s.TaskButtonRect(0)
+	found := false
+	for y := by; y < by+bh && !found; y++ {
+		for x := bx; x < bx+bw && !found; x++ {
+			off := (y*tW + x) * 4
+			// Ink for the task label is dark (active label colour); the bevel
+			// face is mid-gray. A pixel under 0x40 on R+G+B is an ink hit.
+			if buf[off] < 0x40 && buf[off+1] < 0x40 && buf[off+2] < 0x40 {
+				found = true
+			}
+		}
+	}
+	if !found {
+		t.Fatalf("task button never inked any pixels")
+	}
+}
+
+// Render does not panic when a task's anchor falls past the iconbar's right
+// edge (matches the launcher break-on-overflow path).
+func TestRenderTaskOverflow(t *testing.T) {
+	s := New(400, BarHeight) // narrow iconbar; default 4 apps + tasks won't all fit
+	s.SetTasks([]Task{{Id: 1, Title: "off"}, {Id: 2, Title: "off2"}})
+	buf := newBuf(s)
+	Render(s, buf) // must not panic, must break out of the task loop
+}

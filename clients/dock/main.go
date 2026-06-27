@@ -19,6 +19,7 @@
 package main
 
 import (
+	"encoding/json"
 	"syscall/js"
 
 	"github.com/wasmdesk/wasmbox/clients/dock/internal/scene"
@@ -67,6 +68,16 @@ func main() {
 		client.Call("launch", app)
 	}
 
+	// restore asks the compositor to un-minimize a folded window the user
+	// clicked on its task button. Travels over the SDK's MessagePort just
+	// like `launch`; the compositor's WindowManager.handle_client_message
+	// routes the message to its `:restore` arm and pushes a refreshed
+	// tasks list back through `tasks_changed`.
+	restore := func(id int) {
+		println("wasmdock: restore", id)
+		client.Call("restore", id)
+	}
+
 	// Initial paint so the compositor has something to blit immediately.
 	render()
 
@@ -89,7 +100,28 @@ func main() {
 			y := ev.Get("y").Int()
 			if i := state.HitTest(x, y); i >= 0 {
 				launch(state.Apps[i].Id)
+				break
 			}
+			if i := state.HitTestTask(x, y); i >= 0 {
+				restore(state.Tasks[i].Id)
+			}
+		case "tasks_changed":
+			// Compositor pushes the current minimized-window list as a
+			// JSON-encoded array string under `tasks_json`. We parse it
+			// into a fresh []scene.Task and re-render so the iconbar
+			// reflects the new state.
+			raw := ev.Get("tasks_json")
+			if raw.IsUndefined() || raw.IsNull() {
+				state.SetTasks(nil)
+			} else {
+				var parsed []scene.Task
+				if err := json.Unmarshal([]byte(raw.String()), &parsed); err != nil {
+					println("wasmdock: tasks_changed parse error:", err.Error())
+					parsed = nil
+				}
+				state.SetTasks(parsed)
+			}
+			render()
 		case "tick":
 			// Clock tick posted by worker.js. The payload field "clock"
 			// carries the latest "HH:MM" string; the optional "workspace"
