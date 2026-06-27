@@ -1,92 +1,121 @@
-// Package scene paints the wasmdock surface: a macOS-style dock — a
-// horizontally-centered, bottom-anchored translucent rounded bar carrying a
-// row of app icons, with cursor-driven hover magnification.
+// SPDX-License-Identifier: BSD-3-Clause
 //
-// It is pure Go (no syscall/js, no cgo) so it builds for any architecture and
-// is unit-tested natively. The wasm main only hands it a byte slice to fill
-// plus mouse coordinates; all layout, magnification math, hit-testing and RGBA
-// painting live here.
+// Package scene paints the wasmdock surface as a Fluxbox-style bottom
+// toolbar: a full-width, 28-pixel-tall bevelled gray bar split into three
+// sections that read left-to-right —
 //
-// Coordinate system matches the wasmbox surface contract: origin top-left,
-// RGBA32 row-major, alpha 0xFF = opaque. The dock paints onto a transparent
-// surface (alpha 0 outside the bar) so the compositor can show it as a panel.
+//   - a fixed-width workspace label on the left ("1" by default),
+//   - an iconbar in the middle carrying one launcher button per known app
+//     (terminal / editor / files / hello), each painted as a bevelled
+//     button with a tiny built-in glyph + truncated text label, and
+//   - a fixed-width clock ("HH:MM") on the right, kept in sync by a `tick`
+//     event posted by the JS worker every 30 seconds.
+//
+// All section backgrounds + ink colours come from a theme.Theme value (see
+// the sibling internal/theme package) so the toolbar honours the Openbox
+// attribute hierarchy and a future themerc file could repaint it without
+// touching this package.
+//
+// scene is pure Go (no syscall/js, no cgo) so it builds for any architecture
+// and is unit-tested natively. The wasm main only hands it a byte slice to
+// fill plus mouse coordinates + clock-tick strings; all layout, hit-testing
+// and RGBA painting live here.
 package scene
 
-// App identifies one launchable application the dock offers. Id is the string
-// sent to the compositor in a {type:"launch", app:Id} message; Glyph selects
-// the built-in drawn icon (no external assets, no trademarked logos).
+import "github.com/wasmdesk/wasmbox/clients/dock/internal/theme"
+
+// App identifies one launchable application the iconbar offers. Id is the
+// string sent to the compositor in a {type:"launch", app:Id} message; Glyph
+// selects the built-in drawn icon (no external assets); Label is the short
+// human-readable text painted to the right of the glyph inside the button.
 type App struct {
 	Id    string
 	Glyph Glyph
+	Label string
 }
 
 // Glyph enumerates the built-in icon drawings.
 type Glyph int
 
 const (
-	// GlyphTerminal draws a command prompt: a dark panel with a ">" caret and
-	// an underscore cursor.
+	// GlyphTerminal draws a command prompt: ">" caret + underscore cursor.
 	GlyphTerminal Glyph = iota
 	// GlyphEditor draws a document with horizontal "text" lines.
 	GlyphEditor
 	// GlyphFiles draws a folder shape.
 	GlyphFiles
+	// GlyphHello draws a smile arc — the hello stub client's mark.
+	GlyphHello
 )
 
-// Geometry constants, in surface pixels. These describe the resting (un-
-// magnified) dock; magnification scales individual icons up to MaxScale.
+// Geometry constants, in surface pixels. The toolbar hugs the bottom of the
+// surface; the surface itself is sized 1280 x BarHeight by the worker.
 const (
-	// IconBase is the resting side length of an icon tile.
-	IconBase = 48
-	// IconGap is the horizontal spacing between adjacent icon centers'
-	// tiles at rest (edge to edge).
-	IconGap = 16
-	// BarPadX is the horizontal padding inside the bar, left of the first
-	// icon and right of the last.
-	BarPadX = 16
-	// BarPadY is the vertical padding inside the bar, above and below the
-	// resting icons.
-	BarPadY = 10
-	// BarMarginBottom is the gap between the bar and the bottom surface edge.
-	BarMarginBottom = 8
-	// CornerRadius rounds the bar's corners.
-	CornerRadius = 18
-	// MaxScale is the magnification applied to the icon directly under the
-	// cursor; neighbours scale down toward 1.0 with distance.
-	MaxScale = 1.8
-	// Influence is the falloff radius (in resting icon-pitch units) over
-	// which magnification decays back to 1.0.
-	Influence = 2.5
+	// BarHeight is the toolbar's vertical extent (and the surface height).
+	BarHeight = 28
+	// WorkspaceW is the fixed pixel width of the workspace section on the
+	// left edge of the toolbar.
+	WorkspaceW = 100
+	// ClockW is the fixed pixel width of the clock section on the right
+	// edge of the toolbar.
+	ClockW = 80
+	// IconbarButtonW is the resting pixel width of one iconbar button.
+	IconbarButtonW = 120
+	// IconbarButtonH is the inner height of an iconbar button (the toolbar
+	// reserves 2px of vertical breathing room above + below).
+	IconbarButtonH = 24
+	// IconbarButtonGap is the horizontal spacing between adjacent buttons.
+	IconbarButtonGap = 2
+	// IconbarVPad is the vertical padding between the toolbar top/bottom
+	// and the iconbar button row.
+	IconbarVPad = 2
+	// IconGlyphPx is the side length of the icon drawn inside a button.
+	IconGlyphPx = 16
+	// IconGlyphLeftPad is the gap between the button's left bevel and the
+	// glyph.
+	IconGlyphLeftPad = 4
+	// IconLabelGap is the gap between the glyph and the start of the label
+	// text.
+	IconLabelGap = 4
 )
 
-// State is the dock's mutable model: its surface size, the app row, and the
-// current cursor position used to drive magnification. CursorX/Y are surface-
-// local; CursorInside reports whether the pointer is currently over the
-// surface (when false, the dock rests flat).
+// State is the toolbar's mutable model: surface size, the launcher row, the
+// active workspace label, the current clock string, the cursor position
+// (recorded for a future hover highlight; unused by the v0 paint pass) and
+// the active Openbox-compatible Theme.
 type State struct {
-	W, H        int
-	Apps        []App
-	CursorX     int
-	CursorY     int
+	W, H         int
+	Apps         []App
+	Workspace    string
+	Clock        string
+	CursorX      int
+	CursorY      int
 	CursorInside bool
+	Theme        theme.Theme
 }
 
-// DefaultApps is the built-in set the dock ships with.
+// DefaultApps is the built-in launcher set the iconbar ships with.
 func DefaultApps() []App {
 	return []App{
-		{Id: "terminal", Glyph: GlyphTerminal},
-		{Id: "editor", Glyph: GlyphEditor},
-		{Id: "files", Glyph: GlyphFiles},
+		{Id: "terminal", Glyph: GlyphTerminal, Label: "Terminal"},
+		{Id: "editor", Glyph: GlyphEditor, Label: "Editor"},
+		{Id: "files", Glyph: GlyphFiles, Label: "Files"},
+		{Id: "hello", Glyph: GlyphHello, Label: "Hello"},
 	}
 }
 
-// New makes a dock State for a surface of width × height pixels carrying the
-// default app set, with the cursor parked outside the surface (flat rest).
+// New makes a toolbar State for a surface of width × height pixels carrying
+// the default launcher set + the default workspace label "1" + an empty
+// clock string (the worker posts a tick on boot to fill it in) + the default
+// Fluxbox-light theme. The cursor is parked outside the surface.
 func New(width, height int) *State {
 	return &State{
-		W:    width,
-		H:    height,
-		Apps: DefaultApps(),
+		W:         width,
+		H:         height,
+		Apps:      DefaultApps(),
+		Workspace: "1",
+		Clock:     "",
+		Theme:     theme.DefaultFluxboxLight(),
 	}
 }
 
@@ -97,134 +126,391 @@ func (s *State) SetCursor(x, y int, inside bool) {
 	s.CursorInside = inside
 }
 
-// pitch is the resting center-to-center distance between adjacent icons.
-func pitch() float64 { return float64(IconBase + IconGap) }
+// SetClock records the latest "HH:MM" clock string posted by the worker.
+func (s *State) SetClock(t string) { s.Clock = t }
 
-// restRowWidth is the total width of the resting icon row (icon centers span
-// (n-1)*pitch, plus a half icon on each end).
-func (s *State) restRowWidth() float64 {
-	n := len(s.Apps)
-	if n == 0 {
-		return 0
+// SetWorkspace records the active workspace label ("1", "2", ...).
+func (s *State) SetWorkspace(w string) { s.Workspace = w }
+
+// ---- section geometry ----------------------------------------------------
+
+// WorkspaceRect returns the workspace section rectangle.
+func (s *State) WorkspaceRect() (x, y, w, h int) {
+	return 0, 0, WorkspaceW, s.H
+}
+
+// ClockRect returns the clock section rectangle.
+func (s *State) ClockRect() (x, y, w, h int) {
+	return s.W - ClockW, 0, ClockW, s.H
+}
+
+// IconbarRect returns the iconbar (middle) section rectangle, expanding to
+// fill the gap between the workspace label and the clock.
+func (s *State) IconbarRect() (x, y, w, h int) {
+	x = WorkspaceW
+	w = s.W - WorkspaceW - ClockW
+	if w < 0 {
+		w = 0
 	}
-	return float64(n-1)*pitch() + float64(IconBase)
+	return x, 0, w, s.H
 }
 
-// rowLeft is the surface-x of the left edge of the resting row (the row is
-// horizontally centered in the surface).
-func (s *State) rowLeft() float64 {
-	return (float64(s.W) - s.restRowWidth()) / 2
-}
-
-// iconCenterX returns the resting center-x of icon i.
-func (s *State) iconCenterX(i int) float64 {
-	return s.rowLeft() + float64(IconBase)/2 + float64(i)*pitch()
-}
-
-// barTop / barBottom give the vertical extent of the bar (it hugs the bottom
-// of the surface above BarMarginBottom). The bar is sized for the resting
-// icons plus padding; magnified icons grow upward out of the bar (macOS-like).
-func (s *State) barBottom() float64 { return float64(s.H - BarMarginBottom) }
-func (s *State) barTop() float64    { return s.barBottom() - float64(IconBase+2*BarPadY) }
-
-// BarRect returns the bar rectangle (x, y, w, h) in surface pixels. Exposed
-// for tests and for the wasm glue to size damage rectangles.
-func (s *State) BarRect() (x, y, w, h int) {
-	left := s.rowLeft() - float64(BarPadX)
-	right := s.rowLeft() + s.restRowWidth() + float64(BarPadX)
-	top := s.barTop()
-	bottom := s.barBottom()
-	return int(left), int(top), int(right - left), int(bottom - top)
-}
-
-// scaleFor computes the magnification of icon i given the cursor. The falloff
-// is a smooth cosine bump centered on the cursor, scaled by distance in pitch
-// units and clamped to [1, MaxScale]. When the cursor is outside the surface
-// every icon rests at 1.0.
-func (s *State) scaleFor(i int) float64 {
-	if !s.CursorInside {
-		return 1.0
+// IconbarButtonRect returns the rectangle (in surface coordinates) of the
+// i-th iconbar button. Buttons sit one after another, left-to-right,
+// separated by IconbarButtonGap. The button height scales to fill the
+// toolbar (s.H - 2*IconbarVPad) so the toolbar reads cleanly at any
+// granted surface height (the compositor floors panel heights at
+// Theme::MIN_H = 60).
+func (s *State) IconbarButtonRect(i int) (x, y, w, h int) {
+	bx, _, _, _ := s.IconbarRect()
+	x = bx + i*(IconbarButtonW+IconbarButtonGap)
+	y = IconbarVPad
+	w = IconbarButtonW
+	h = s.H - 2*IconbarVPad
+	if h < 1 {
+		h = 1
 	}
-	dx := (float64(s.CursorX) - s.iconCenterX(i)) / pitch()
-	if dx < 0 {
-		dx = -dx
-	}
-	if dx >= Influence {
-		return 1.0
-	}
-	// Cosine bump: 1 at dx=0, 0 at dx=Influence.
-	bump := 0.5 * (1.0 + cosApprox(pi*dx/Influence))
-	return 1.0 + (MaxScale-1.0)*bump
+	return
 }
 
-// IconRect returns the on-screen rectangle (x, y, w, h) of icon i after
-// magnification. Magnified icons are anchored at the bar's bottom inner edge
-// and grow upward, and stay centered on their resting center-x.
-func (s *State) IconRect(i int) (x, y, w, h int) {
-	scale := s.scaleFor(i)
-	size := float64(IconBase) * scale
-	cx := s.iconCenterX(i)
-	left := cx - size/2
-	// Bottom-anchor: the icon's bottom sits BarPadY above the bar bottom.
-	bottom := s.barBottom() - float64(BarPadY)
-	top := bottom - size
-	return int(left), int(top), int(size), int(size)
-}
-
-// HitTest returns the index of the icon under (x, y) in surface coordinates,
-// or -1 if none. It tests against the magnified rectangles, topmost-feeling
-// (it simply checks each icon's current rect). Returns the first match.
+// HitTest returns the iconbar-button index under (x, y) in surface
+// coordinates, or -1 if (x, y) does not fall inside any iconbar button.
+// Clicks on the workspace label or the clock are intentionally inert in v0.
 func (s *State) HitTest(x, y int) int {
+	// Reject anything outside the iconbar's horizontal range up front so a
+	// click on the workspace label / clock never matches.
+	ix, _, iw, _ := s.IconbarRect()
+	if x < ix || x >= ix+iw {
+		return -1
+	}
 	for i := range s.Apps {
-		ix, iy, iw, ih := s.IconRect(i)
-		if x >= ix && x < ix+iw && y >= iy && y < iy+ih {
-			return i
+		bx, by, bw, bh := s.IconbarButtonRect(i)
+		if x >= bx && x < bx+bw && y >= by && y < by+bh {
+			// The button might overflow the iconbar's right edge when the
+			// surface is narrow; only count the click if the button start
+			// is still inside the iconbar.
+			if bx >= ix && bx < ix+iw {
+				return i
+			}
 		}
 	}
 	return -1
 }
 
-// ---- painting -------------------------------------------------------------
+// ---- painting ------------------------------------------------------------
 
-// RGBA tints used by the dock.
-var (
-	colTransparent = [4]uint8{0, 0, 0, 0}
-	colBar         = [4]uint8{0x1c, 0x1c, 0x22, 0xCC} // translucent dark glass
-	colBarEdge     = [4]uint8{0xFF, 0xFF, 0xFF, 0x33} // faint inner highlight
-)
-
-// Render fills buf (a 4*W*H byte slice, RGBA32 row-major) with the dock at the
-// current cursor/magnification. buf must be exactly the right size or Render
-// panics (a size mismatch in the caller is a bug). The area outside the bar is
-// left fully transparent so the compositor can treat the surface as a panel.
+// Render fills buf (a 4*W*H byte slice, RGBA32 row-major) with the toolbar
+// at the current state. buf must be exactly the right size or Render panics
+// (a size mismatch in the caller is a bug). The whole surface is opaque —
+// the toolbar paints every pixel from edge to edge.
 func Render(s *State, buf []byte) {
 	need := 4 * s.W * s.H
 	if len(buf) != need {
 		panic("scene: buffer size mismatch")
 	}
-	// Clear to transparent.
-	for i := 0; i+3 < len(buf); i += 4 {
-		buf[i] = colTransparent[0]
-		buf[i+1] = colTransparent[1]
-		buf[i+2] = colTransparent[2]
-		buf[i+3] = colTransparent[3]
+	// Workspace section — inactive-title look.
+	wx, _, ww, _ := s.WorkspaceRect()
+	bg := s.Theme.Window.Inactive.Title.Bg
+	theme.PaintGradient(buf, s.W, s.H, wx, 0, ww, s.H, bg.Gradient, bg.Color, bg.ColorTo)
+	drawBevel(s, buf, wx, 0, ww, s.H)
+	drawText(s, buf, s.Workspace, wx+(ww-textWidth(s.Workspace))/2, (s.H-glyphHeight)/2, s.Theme.Window.Inactive.Title.Label.Color)
+
+	// Iconbar section background — fill the gap behind the buttons with the
+	// active-title look (then the buttons are painted on top).
+	ix, _, iw, _ := s.IconbarRect()
+	abg := s.Theme.Window.Active.Title.Bg
+	theme.PaintGradient(buf, s.W, s.H, ix, 0, iw, s.H, abg.Gradient, abg.Color, abg.ColorTo)
+	drawBevel(s, buf, ix, 0, iw, s.H)
+
+	for i, app := range s.Apps {
+		bx, by, bw, bh := s.IconbarButtonRect(i)
+		// Skip buttons whose anchor falls outside the iconbar (very narrow
+		// surface fallback).
+		if bx >= ix+iw {
+			break
+		}
+		// Clip the right edge of the last button to the iconbar's right
+		// (bx < ix+iw is guaranteed by the break above, so cw stays > 0).
+		cw := bw
+		if bx+cw > ix+iw {
+			cw = ix + iw - bx
+		}
+		drawIconbarButton(s, buf, bx, by, cw, bh, app)
 	}
-	// Draw the rounded translucent bar.
-	bx, by, bw, bh := s.BarRect()
-	fillRoundRect(s, buf, bx, by, bw, bh, CornerRadius, colBar)
-	// Faint top highlight line just inside the bar's top edge.
-	for x := bx + CornerRadius; x < bx+bw-CornerRadius; x++ {
-		blend(s, buf, x, by+1, colBarEdge)
+
+	// Clock section — OSD look.
+	cx, _, cw, _ := s.ClockRect()
+	obg := s.Theme.Osd.Bg
+	theme.PaintGradient(buf, s.W, s.H, cx, 0, cw, s.H, obg.Gradient, obg.Color, obg.ColorTo)
+	drawBevel(s, buf, cx, 0, cw, s.H)
+	clock := s.Clock
+	if clock == "" {
+		clock = "--:--"
 	}
-	// Draw each icon (magnified).
-	for i := range s.Apps {
-		ix, iy, iw, ih := s.IconRect(i)
-		drawIcon(s, buf, s.Apps[i].Glyph, ix, iy, iw, ih)
+	drawText(s, buf, clock, cx+(cw-textWidth(clock))/2, (s.H-glyphHeight)/2, s.Theme.Osd.Label.Color)
+
+	// Outer border on the very top edge of the toolbar (the bottom edge sits
+	// at the bottom of the canvas, so a bottom border is not visible). One
+	// pixel of theme.Border.Color spanning the full surface width.
+	if s.Theme.Border.Width > 0 {
+		for x := 0; x < s.W; x++ {
+			setPixel(s, buf, x, 0, [3]uint8(s.Theme.Border.Color))
+		}
 	}
 }
 
-// setPixel writes an opaque-or-given RGBA at (x,y) if in bounds.
-func setPixel(s *State, buf []byte, x, y int, c [4]uint8) {
+// drawBevel paints a 1-pixel raised bevel around the (x, y, w, h) section: a
+// bright top + left, a dark bottom + right. The bevel highlights are drawn
+// in pure white / pure black so they read clearly against any gradient face.
+func drawBevel(s *State, buf []byte, x, y, w, h int) {
+	if w <= 0 || h <= 0 {
+		return
+	}
+	hi := [3]uint8{0xFF, 0xFF, 0xFF}
+	lo := [3]uint8{0x40, 0x40, 0x40}
+	for i := 0; i < w; i++ {
+		setPixel(s, buf, x+i, y, hi)
+		setPixel(s, buf, x+i, y+h-1, lo)
+	}
+	for j := 0; j < h; j++ {
+		setPixel(s, buf, x, y+j, hi)
+		setPixel(s, buf, x+w-1, y+j, lo)
+	}
+}
+
+// drawIconbarButton paints a single iconbar button (bevelled face + glyph +
+// truncated label).
+func drawIconbarButton(s *State, buf []byte, x, y, w, h int, app App) {
+	bg := s.Theme.Window.Inactive.Title.Bg
+	theme.PaintGradient(buf, s.W, s.H, x, y, w, h, bg.Gradient, bg.Color, bg.ColorTo)
+	drawBevel(s, buf, x, y, w, h)
+	// Glyph at the left.
+	gy := y + (h-IconGlyphPx)/2
+	gx := x + IconGlyphLeftPad
+	drawGlyph(s, buf, app.Glyph, gx, gy, IconGlyphPx, IconGlyphPx)
+	// Label to the right of the glyph, truncated to the remaining width.
+	tx := gx + IconGlyphPx + IconLabelGap
+	ty := y + (h-glyphHeight)/2
+	max := x + w - tx - 2
+	drawTextClipped(s, buf, app.Label, tx, ty, s.Theme.Window.Active.Title.Label.Color, max)
+}
+
+// ---- glyph drawing ------------------------------------------------------
+
+// drawGlyph paints one of the built-in icon marks into (x, y, w, h).
+func drawGlyph(s *State, buf []byte, g Glyph, x, y, w, h int) {
+	if w <= 0 || h <= 0 {
+		return
+	}
+	ink := [3]uint8{0x1a, 0x1a, 0x1a}
+	switch g {
+	case GlyphTerminal:
+		drawGlyphTerminal(s, buf, x, y, w, h, ink)
+	case GlyphEditor:
+		drawGlyphEditor(s, buf, x, y, w, h, ink)
+	case GlyphFiles:
+		drawGlyphFiles(s, buf, x, y, w, h, ink)
+	case GlyphHello:
+		drawGlyphHello(s, buf, x, y, w, h, ink)
+	default:
+		// Unknown glyph: paint a solid square so the slot is still visible.
+		for j := 0; j < h; j++ {
+			for i := 0; i < w; i++ {
+				setPixel(s, buf, x+i, y+j, ink)
+			}
+		}
+	}
+}
+
+func drawGlyphTerminal(s *State, buf []byte, x, y, w, h int, ink [3]uint8) {
+	// ">" caret + underscore cursor inside the (w x h) box.
+	cx := x + w*2/5
+	cy := y + h/2
+	arm := h / 4
+	for t := 0; t <= arm; t++ {
+		setPixel(s, buf, cx-arm+t, cy-arm+t, ink)
+		setPixel(s, buf, cx-arm+t, cy+arm-t, ink)
+	}
+	uy := y + h*3/4
+	for ux := x + 2; ux < x+w-2; ux++ {
+		setPixel(s, buf, ux, uy, ink)
+	}
+}
+
+func drawGlyphEditor(s *State, buf []byte, x, y, w, h int, ink [3]uint8) {
+	for i := 0; i < 3; i++ {
+		ly := y + 3 + i*((h-6)/3+1)
+		end := x + w - 2
+		if i == 2 {
+			end = x + w*3/4
+		}
+		for lx := x + 2; lx < end; lx++ {
+			setPixel(s, buf, lx, ly, ink)
+		}
+	}
+}
+
+func drawGlyphFiles(s *State, buf []byte, x, y, w, h int, ink [3]uint8) {
+	fx0 := x + 1
+	fx1 := x + w - 2
+	fy0 := y + h/2
+	fy1 := y + h - 2
+	for fy := fy0; fy <= fy1; fy++ {
+		for fx := fx0; fx <= fx1; fx++ {
+			if fy == fy0 || fy == fy1 || fx == fx0 || fx == fx1 {
+				setPixel(s, buf, fx, fy, ink)
+			}
+		}
+	}
+	// Folder tab.
+	for fx := fx0; fx < fx0+w/3; fx++ {
+		setPixel(s, buf, fx, fy0-1, ink)
+	}
+}
+
+func drawGlyphHello(s *State, buf []byte, x, y, w, h int, ink [3]uint8) {
+	// Smile arc: bottom half of a "circle" inside the box.
+	cx := x + w/2
+	cy := y + h/2
+	r := w / 2
+	if h/2 < r {
+		r = h / 2
+	}
+	for i := -r; i <= r; i++ {
+		setPixel(s, buf, cx+i, cy+(r-abs(i))/2, ink)
+	}
+	// Two eyes.
+	setPixel(s, buf, cx-r/2, cy-r/2, ink)
+	setPixel(s, buf, cx+r/2, cy-r/2, ink)
+}
+
+func abs(i int) int {
+	if i < 0 {
+		return -i
+	}
+	return i
+}
+
+// ---- bitmap font --------------------------------------------------------
+
+// glyphHeight is the per-character vertical extent of the bitmap font. The
+// font is intentionally tiny so the labels fit inside a 24-px-tall iconbar
+// button (a bitmap line-height matches IconGlyphPx).
+const glyphHeight = 7
+
+// font5x7 is a sparse 5-column x 7-row bitmap font. Each glyph is one row of
+// 5 bytes whose low 5 bits encode one column from top to bottom — bit 0 =
+// top row, bit 6 = bottom row. Only the characters used by the toolbar
+// labels + clock + workspace name are populated; an unknown char prints as
+// a blank.
+var font5x7 = map[byte][5]byte{
+	'0': {0x3E, 0x51, 0x49, 0x45, 0x3E},
+	'1': {0x00, 0x42, 0x7F, 0x40, 0x00},
+	'2': {0x42, 0x61, 0x51, 0x49, 0x46},
+	'3': {0x21, 0x41, 0x45, 0x4B, 0x31},
+	'4': {0x18, 0x14, 0x12, 0x7F, 0x10},
+	'5': {0x27, 0x45, 0x45, 0x45, 0x39},
+	'6': {0x3C, 0x4A, 0x49, 0x49, 0x30},
+	'7': {0x01, 0x71, 0x09, 0x05, 0x03},
+	'8': {0x36, 0x49, 0x49, 0x49, 0x36},
+	'9': {0x06, 0x49, 0x49, 0x29, 0x1E},
+	':': {0x00, 0x36, 0x36, 0x00, 0x00},
+	'-': {0x08, 0x08, 0x08, 0x08, 0x08},
+	' ': {0x00, 0x00, 0x00, 0x00, 0x00},
+	'.': {0x00, 0x60, 0x60, 0x00, 0x00},
+	'A': {0x7E, 0x11, 0x11, 0x11, 0x7E},
+	'B': {0x7F, 0x49, 0x49, 0x49, 0x36},
+	'C': {0x3E, 0x41, 0x41, 0x41, 0x22},
+	'D': {0x7F, 0x41, 0x41, 0x22, 0x1C},
+	'E': {0x7F, 0x49, 0x49, 0x49, 0x41},
+	'F': {0x7F, 0x09, 0x09, 0x09, 0x01},
+	'G': {0x3E, 0x41, 0x49, 0x49, 0x7A},
+	'H': {0x7F, 0x08, 0x08, 0x08, 0x7F},
+	'I': {0x00, 0x41, 0x7F, 0x41, 0x00},
+	'L': {0x7F, 0x40, 0x40, 0x40, 0x40},
+	'M': {0x7F, 0x02, 0x0C, 0x02, 0x7F},
+	'N': {0x7F, 0x04, 0x08, 0x10, 0x7F},
+	'O': {0x3E, 0x41, 0x41, 0x41, 0x3E},
+	'P': {0x7F, 0x09, 0x09, 0x09, 0x06},
+	'R': {0x7F, 0x09, 0x19, 0x29, 0x46},
+	'S': {0x46, 0x49, 0x49, 0x49, 0x31},
+	'T': {0x01, 0x01, 0x7F, 0x01, 0x01},
+	'U': {0x3F, 0x40, 0x40, 0x40, 0x3F},
+	'V': {0x1F, 0x20, 0x40, 0x20, 0x1F},
+	'W': {0x7F, 0x20, 0x18, 0x20, 0x7F},
+	'X': {0x63, 0x14, 0x08, 0x14, 0x63},
+	'Y': {0x07, 0x08, 0x70, 0x08, 0x07},
+	'a': {0x20, 0x54, 0x54, 0x54, 0x78},
+	'b': {0x7F, 0x48, 0x44, 0x44, 0x38},
+	'c': {0x38, 0x44, 0x44, 0x44, 0x20},
+	'd': {0x38, 0x44, 0x44, 0x48, 0x7F},
+	'e': {0x38, 0x54, 0x54, 0x54, 0x18},
+	'f': {0x08, 0x7E, 0x09, 0x01, 0x02},
+	'g': {0x0C, 0x52, 0x52, 0x52, 0x3E},
+	'h': {0x7F, 0x08, 0x04, 0x04, 0x78},
+	'i': {0x00, 0x44, 0x7D, 0x40, 0x00},
+	'l': {0x00, 0x41, 0x7F, 0x40, 0x00},
+	'm': {0x7C, 0x04, 0x18, 0x04, 0x78},
+	'n': {0x7C, 0x08, 0x04, 0x04, 0x78},
+	'o': {0x38, 0x44, 0x44, 0x44, 0x38},
+	'p': {0x7C, 0x14, 0x14, 0x14, 0x08},
+	'r': {0x7C, 0x08, 0x04, 0x04, 0x08},
+	's': {0x48, 0x54, 0x54, 0x54, 0x20},
+	't': {0x04, 0x3F, 0x44, 0x40, 0x20},
+	'u': {0x3C, 0x40, 0x40, 0x20, 0x7C},
+	'v': {0x1C, 0x20, 0x40, 0x20, 0x1C},
+	'w': {0x3C, 0x40, 0x30, 0x40, 0x3C},
+	'x': {0x44, 0x28, 0x10, 0x28, 0x44},
+	'y': {0x0C, 0x50, 0x50, 0x50, 0x3C},
+	'z': {0x44, 0x64, 0x54, 0x4C, 0x44},
+}
+
+// charWidth returns the width in pixels of a single character (5 columns
+// + 1 pixel inter-glyph gap). Unknown characters consume the same slot so
+// the layout stays stable.
+const charWidth = 6
+
+func textWidth(s string) int { return charWidth * len(s) }
+
+// drawText paints s into buf at (x, y) using the bitmap font, in ink colour
+// c. y is the top edge of the glyph row.
+func drawText(s *State, buf []byte, txt string, x, y int, c theme.Color) {
+	drawTextClipped(s, buf, txt, x, y, c, 1<<30)
+}
+
+// drawTextClipped paints s at (x, y) in ink c but stops as soon as the next
+// glyph would extend past maxRight (relative to x — so the call painted at
+// most maxRight pixels wide). Used by the iconbar to truncate long labels.
+func drawTextClipped(s *State, buf []byte, txt string, x, y int, c theme.Color, maxWidth int) {
+	if maxWidth <= 0 {
+		return
+	}
+	ink := [3]uint8{c[0], c[1], c[2]}
+	for k := 0; k < len(txt); k++ {
+		if (k+1)*charWidth > maxWidth {
+			return
+		}
+		ch := txt[k]
+		bits, ok := font5x7[ch]
+		if !ok {
+			continue
+		}
+		for col := 0; col < 5; col++ {
+			cb := bits[col]
+			for row := 0; row < glyphHeight; row++ {
+				if cb&(1<<row) != 0 {
+					setPixel(s, buf, x+k*charWidth+col, y+row, ink)
+				}
+			}
+		}
+	}
+}
+
+// ---- pixel I/O ----------------------------------------------------------
+
+// setPixel writes an opaque RGB at (x, y) if in bounds. Alpha is forced to
+// 0xFF (the toolbar is fully opaque).
+func setPixel(s *State, buf []byte, x, y int, c [3]uint8) {
 	if x < 0 || y < 0 || x >= s.W || y >= s.H {
 		return
 	}
@@ -232,183 +518,5 @@ func setPixel(s *State, buf []byte, x, y int, c [4]uint8) {
 	buf[off] = c[0]
 	buf[off+1] = c[1]
 	buf[off+2] = c[2]
-	buf[off+3] = c[3]
-}
-
-// blend alpha-composites c over the existing pixel at (x,y) (src-over).
-func blend(s *State, buf []byte, x, y int, c [4]uint8) {
-	if x < 0 || y < 0 || x >= s.W || y >= s.H {
-		return
-	}
-	off := (y*s.W + x) * 4
-	sa := uint32(c[3])
-	if sa == 0 {
-		return
-	}
-	if sa == 255 {
-		buf[off] = c[0]
-		buf[off+1] = c[1]
-		buf[off+2] = c[2]
-		buf[off+3] = 0xFF
-		return
-	}
-	ia := 255 - sa
-	for k := 0; k < 3; k++ {
-		buf[off+k] = uint8((uint32(c[k])*sa + uint32(buf[off+k])*ia) / 255)
-	}
-	da := uint32(buf[off+3])
-	buf[off+3] = uint8(sa + da*ia/255)
-}
-
-// fillRoundRect blends a rounded rectangle of color c into buf.
-func fillRoundRect(s *State, buf []byte, x, y, w, h, r int, c [4]uint8) {
-	if w <= 0 || h <= 0 {
-		return
-	}
-	if r*2 > w {
-		r = w / 2
-	}
-	if r*2 > h {
-		r = h / 2
-	}
-	for yy := 0; yy < h; yy++ {
-		for xx := 0; xx < w; xx++ {
-			if inRoundRect(xx, yy, w, h, r) {
-				blend(s, buf, x+xx, y+yy, c)
-			}
-		}
-	}
-}
-
-// inRoundRect reports whether (xx,yy) is inside a w×h rounded rect of radius r.
-func inRoundRect(xx, yy, w, h, r int) bool {
-	// Corner centers.
-	if xx >= r && xx < w-r {
-		return true
-	}
-	if yy >= r && yy < h-r {
-		return true
-	}
-	var cx, cy int
-	switch {
-	case xx < r && yy < r:
-		cx, cy = r, r
-	case xx >= w-r && yy < r:
-		cx, cy = w-r-1, r
-	case xx < r && yy >= h-r:
-		cx, cy = r, h-r-1
-	default:
-		cx, cy = w-r-1, h-r-1
-	}
-	dx := xx - cx
-	dy := yy - cy
-	return dx*dx+dy*dy <= r*r
-}
-
-// drawIcon renders a glyph filling the (x,y,w,h) tile. Each glyph is a rounded
-// tinted tile with a simple drawn mark on top, so icons read distinctly
-// without external assets.
-func drawIcon(s *State, buf []byte, g Glyph, x, y, w, h int) {
-	if w <= 0 || h <= 0 {
-		return
-	}
-	var tile [4]uint8
-	switch g {
-	case GlyphTerminal:
-		tile = [4]uint8{0x22, 0x26, 0x2e, 0xFF}
-	case GlyphEditor:
-		tile = [4]uint8{0x2b, 0x5c, 0xcc, 0xFF}
-	case GlyphFiles:
-		tile = [4]uint8{0xe0, 0xa8, 0x3c, 0xFF}
-	default:
-		tile = [4]uint8{0x88, 0x88, 0x88, 0xFF}
-	}
-	// Rounded tile background.
-	tr := w / 5
-	fillRoundRect(s, buf, x, y, w, h, tr, tile)
-	// Glyph mark in a contrasting ink.
-	ink := [4]uint8{0xFF, 0xFF, 0xFF, 0xFF}
-	switch g {
-	case GlyphTerminal:
-		drawTerminalMark(s, buf, x, y, w, h, ink)
-	case GlyphEditor:
-		drawEditorMark(s, buf, x, y, w, h, ink)
-	case GlyphFiles:
-		drawFilesMark(s, buf, x, y, w, h, [4]uint8{0x5a, 0x3e, 0x10, 0xFF})
-	}
-}
-
-// drawTerminalMark paints a ">" caret and a cursor underscore.
-func drawTerminalMark(s *State, buf []byte, x, y, w, h int, ink [4]uint8) {
-	// ">" chevron: two diagonal strokes meeting at the right.
-	cx := x + w*2/5
-	cy := y + h*2/5
-	arm := h / 6
-	for t := 0; t <= arm; t++ {
-		setPixel(s, buf, cx-arm+t, cy-arm+t, ink)
-		setPixel(s, buf, cx-arm+t, cy+arm-t, ink)
-		// thicken
-		setPixel(s, buf, cx-arm+t, cy-arm+t+1, ink)
-		setPixel(s, buf, cx-arm+t, cy+arm-t+1, ink)
-	}
-	// Underscore cursor near the bottom-left.
-	uy := y + h*2/3
-	for ux := x + w/4; ux < x+w*3/5; ux++ {
-		setPixel(s, buf, ux, uy, ink)
-		setPixel(s, buf, ux, uy+1, ink)
-	}
-}
-
-// drawEditorMark paints a document with text lines.
-func drawEditorMark(s *State, buf []byte, x, y, w, h int, ink [4]uint8) {
-	// Three horizontal "text" lines, indented.
-	x0 := x + w/4
-	x1 := x + w*3/4
-	for i := 0; i < 3; i++ {
-		ly := y + h/3 + i*h/6
-		end := x1
-		if i == 2 {
-			end = x + w*3/5 // last line shorter
-		}
-		for lx := x0; lx < end; lx++ {
-			setPixel(s, buf, lx, ly, ink)
-		}
-	}
-}
-
-// drawFilesMark paints a folder silhouette.
-func drawFilesMark(s *State, buf []byte, x, y, w, h int, ink [4]uint8) {
-	// Folder body.
-	fx0 := x + w/5
-	fx1 := x + w*4/5
-	fy0 := y + h*2/5
-	fy1 := y + h*7/10
-	for fy := fy0; fy <= fy1; fy++ {
-		for fx := fx0; fx <= fx1; fx++ {
-			setPixel(s, buf, fx, fy, ink)
-		}
-	}
-	// Tab on the top-left.
-	for fy := fy0 - h/8; fy < fy0; fy++ {
-		for fx := fx0; fx <= fx0+(fx1-fx0)/2; fx++ {
-			setPixel(s, buf, fx, fy, ink)
-		}
-	}
-}
-
-// ---- small math helpers (no math import, to keep the package dependency-free
-// and trivially portable) -------------------------------------------------
-
-const pi = 3.14159265358979323846
-
-// cosApprox returns cos(x) for x in [0, pi] using a stable polynomial. The
-// dock only ever feeds it values in that range (pi*dx/Influence with
-// 0 <= dx < Influence). Accuracy here is purely cosmetic.
-func cosApprox(x float64) float64 {
-	// Reduce to [0, pi] is guaranteed by the caller; use the Bhaskara I
-	// sine approximation via cos(x) = sin(pi/2 - x), kept simple.
-	// Use a 4-term Taylor-ish series adequate for [0, pi].
-	x2 := x * x
-	// cos(x) ≈ 1 - x^2/2 + x^4/24 - x^6/720 + x^8/40320
-	return 1 - x2/2 + x2*x2/24 - x2*x2*x2/720 + x2*x2*x2*x2/40320
+	buf[off+3] = 0xFF
 }
