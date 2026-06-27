@@ -28,8 +28,8 @@ func TestNewHasDefaults(t *testing.T) {
 			t.Fatalf("app[%d].Id = %q, want %q", i, a.Id, want[i])
 		}
 	}
-	if s.Workspace != "1" {
-		t.Fatalf("default workspace = %q, want %q", s.Workspace, "1")
+	if s.Workspace != "1 of 4" {
+		t.Fatalf("default workspace = %q, want %q", s.Workspace, "1 of 4")
 	}
 	if s.Clock != "" {
 		t.Fatalf("default clock = %q, want empty (worker will tick)", s.Clock)
@@ -761,4 +761,159 @@ func TestRenderSeparatorSkippedWhenEmptyApps(t *testing.T) {
 	s.Apps = nil
 	buf := newBuf(s)
 	Render(s, buf) // must not panic
+}
+
+// ---- workspaces -----------------------------------------------------------
+
+// New defaults: ActiveWorkspace=1, WorkspaceCount=4, label="1 of 4".
+func TestNewWorkspaceDefaults(t *testing.T) {
+	s := New(tW, tH)
+	if s.ActiveWorkspace != 1 {
+		t.Fatalf("default ActiveWorkspace = %d, want 1", s.ActiveWorkspace)
+	}
+	if s.WorkspaceCount != 4 {
+		t.Fatalf("default WorkspaceCount = %d, want 4", s.WorkspaceCount)
+	}
+	if s.Workspace != "1 of 4" {
+		t.Fatalf("default Workspace label = %q, want %q", s.Workspace, "1 of 4")
+	}
+}
+
+// SetActiveWorkspace clamps below + above the legal range, refreshes label.
+func TestSetActiveWorkspaceClampsAndUpdatesLabel(t *testing.T) {
+	s := New(tW, tH)
+	s.SetActiveWorkspace(3)
+	if s.ActiveWorkspace != 3 || s.Workspace != "3 of 4" {
+		t.Fatalf("SetActiveWorkspace(3) = (%d,%q), want (3,%q)", s.ActiveWorkspace, s.Workspace, "3 of 4")
+	}
+	s.SetActiveWorkspace(0) // below range -> clamp to 1
+	if s.ActiveWorkspace != 1 {
+		t.Fatalf("SetActiveWorkspace(0) ActiveWorkspace = %d, want 1", s.ActiveWorkspace)
+	}
+	s.SetActiveWorkspace(99) // above range -> clamp to WorkspaceCount
+	if s.ActiveWorkspace != s.WorkspaceCount {
+		t.Fatalf("SetActiveWorkspace(99) ActiveWorkspace = %d, want %d", s.ActiveWorkspace, s.WorkspaceCount)
+	}
+}
+
+// SetWorkspaceCount keeps ActiveWorkspace coherent and re-renders the label.
+func TestSetWorkspaceCountRecomputesLabel(t *testing.T) {
+	s := New(tW, tH)
+	s.SetActiveWorkspace(4)
+	s.SetWorkspaceCount(2) // active was 4 -> clamp down to 2
+	if s.ActiveWorkspace != 2 || s.Workspace != "2 of 2" {
+		t.Fatalf("after SetWorkspaceCount(2): (%d,%q), want (2,%q)", s.ActiveWorkspace, s.Workspace, "2 of 2")
+	}
+	// Non-positive count -> label reduces to bare digit
+	s.SetWorkspaceCount(0)
+	if s.Workspace != "2" {
+		t.Fatalf("WorkspaceCount=0 label = %q, want %q", s.Workspace, "2")
+	}
+	// Negative input clamps to 0.
+	s.SetWorkspaceCount(-1)
+	if s.WorkspaceCount != 0 {
+		t.Fatalf("WorkspaceCount after -1 = %d, want 0", s.WorkspaceCount)
+	}
+}
+
+// NextWorkspace + PrevWorkspace wrap at the boundaries.
+func TestCycleWorkspaceWraps(t *testing.T) {
+	s := New(tW, tH)
+	if got := s.NextWorkspace(); got != 2 {
+		t.Fatalf("NextWorkspace from 1/4 = %d, want 2", got)
+	}
+	s.SetActiveWorkspace(4)
+	if got := s.NextWorkspace(); got != 1 {
+		t.Fatalf("NextWorkspace from 4/4 = %d, want 1 (wrap)", got)
+	}
+	s.SetActiveWorkspace(1)
+	if got := s.PrevWorkspace(); got != 4 {
+		t.Fatalf("PrevWorkspace from 1/4 = %d, want 4 (wrap)", got)
+	}
+	s.SetActiveWorkspace(3)
+	if got := s.PrevWorkspace(); got != 2 {
+		t.Fatalf("PrevWorkspace from 3/4 = %d, want 2", got)
+	}
+}
+
+// Non-positive count makes Next/Prev no-op (returns the current active).
+func TestCycleWorkspaceNoCountIsNoop(t *testing.T) {
+	s := New(tW, tH)
+	s.SetWorkspaceCount(0)
+	s.ActiveWorkspace = 7 // direct set; SetActiveWorkspace would not clamp w/ count=0
+	if got := s.NextWorkspace(); got != 7 {
+		t.Fatalf("NextWorkspace with count=0 = %d, want 7", got)
+	}
+	if got := s.PrevWorkspace(); got != 7 {
+		t.Fatalf("PrevWorkspace with count=0 = %d, want 7", got)
+	}
+}
+
+// HitTestWorkspace identifies clicks on the left section.
+func TestHitTestWorkspace(t *testing.T) {
+	s := New(tW, tH)
+	if !s.HitTestWorkspace(WorkspaceW/2, tH/2) {
+		t.Fatalf("center of workspace section not detected")
+	}
+	if s.HitTestWorkspace(WorkspaceW+10, tH/2) {
+		t.Fatalf("iconbar click reported as workspace hit")
+	}
+	if s.HitTestWorkspace(tW-1, tH/2) {
+		t.Fatalf("clock click reported as workspace hit")
+	}
+	if s.HitTestWorkspace(-5, tH/2) {
+		t.Fatalf("negative-x click reported as workspace hit")
+	}
+}
+
+// Render must paint the workspace label distinctly when ActiveWorkspace
+// changes — the rendered ink count for "3 of 4" differs from "1 of 4".
+func TestRenderWorkspaceLabelChanges(t *testing.T) {
+	s := New(tW, tH)
+	buf1 := newBuf(s)
+	Render(s, buf1)
+	s.SetActiveWorkspace(3)
+	buf2 := newBuf(s)
+	Render(s, buf2)
+	if bytesEqual(buf1, buf2) {
+		t.Fatalf("workspace label did not change between workspace 1 and 3")
+	}
+}
+
+// itoa exercises the zero, negative and multi-digit branches that the other
+// tests do not naturally hit.
+func TestItoa(t *testing.T) {
+	cases := []struct {
+		in   int
+		want string
+	}{{0, "0"}, {1, "1"}, {9, "9"}, {10, "10"}, {1234, "1234"}, {-1, "-1"}, {-42, "-42"}}
+	for _, c := range cases {
+		if got := itoa(c.in); got != c.want {
+			t.Fatalf("itoa(%d) = %q, want %q", c.in, got, c.want)
+		}
+	}
+}
+
+// Window.Workspace round-trips through SetWindows (the compositor sends it
+// in the windows_changed payload; the dock keeps it in the model).
+func TestWindowCarriesWorkspaceField(t *testing.T) {
+	s := New(tW, tH)
+	s.SetWindows([]Window{{Id: 1, Title: "x", Workspace: 2}})
+	if got := s.Windows[0].Workspace; got != 2 {
+		t.Fatalf("Window.Workspace = %d, want 2", got)
+	}
+}
+
+// bytesEqual is a tiny []byte compare so the workspace render-change test
+// does not pull in reflect.DeepEqual.
+func bytesEqual(a, b []byte) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for i := range a {
+		if a[i] != b[i] {
+			return false
+		}
+	}
+	return true
 }

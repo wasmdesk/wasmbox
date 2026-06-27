@@ -194,6 +194,15 @@
       send({ type: "close", window_id: id | 0 });
     }
 
+    // setWorkspace asks the compositor to switch the active workspace to
+    // `index` (1..workspaceCount, currently 4). The compositor drops
+    // out-of-range or already-active indices and broadcasts a
+    // `workspace_changed` input event back to every panel on success.
+    // Fire-and-forget.
+    setWorkspace(index) {
+      send({ type: "set_workspace", index: index | 0 });
+    }
+
     // putPixel + fillRect: minimal SAB scribblers used by bootWasm's loading
     // progress bar (kept in lockstep with clients/sdk/sdk.js).
     putPixel(x, y, r, gr, b, a) {

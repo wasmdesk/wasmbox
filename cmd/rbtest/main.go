@@ -414,5 +414,125 @@ wms.register_external("dock", 480, 28, "panel")
 snap = wms.windows_snapshot
 assert_eq(snap.length, 3, "panels excluded from windows_snapshot")
 
+# ---- workspaces: defaults + WORKSPACE_COUNT ---------------------------
+wmw = WindowManager.new
+assert_eq(wmw.active_workspace, 1, "default active workspace = 1")
+assert_eq(wmw.workspace_count, 4, "workspace_count = 4 (Fluxbox default)")
+assert_eq(WindowManager::WORKSPACE_COUNT, 4, "WORKSPACE_COUNT constant = 4")
+
+# ---- workspaces: spawned window inherits active workspace ------------
+wmw2 = WindowManager.new
+sw1 = wmw2.spawn("on-1")
+assert_eq(sw1.workspace, 1, "spawn on workspace 1 by default")
+wmw2.set_workspace(2)
+sw2 = wmw2.spawn("on-2")
+assert_eq(sw2.workspace, 2, "spawn inherits active workspace after switch")
+assert_eq(sw1.workspace, 1, "previously-spawned window stays on workspace 1")
+# A panel is workspace-agnostic (sentinel 0): it must always be visible.
+wmw2.register_external("dock-ws", 480, 28, "panel")
+panx = wmw2.last_registered
+assert_eq(panx.workspace, 0, "panel uses workspace 0 sentinel (always visible)")
+# A normal external window inherits the active workspace at register time.
+exwx = wmw2.register_external("ext-on-2", 200, 150)
+assert_eq(exwx.workspace, 2, "external normal window inherits active workspace")
+
+# ---- workspaces: set_workspace state transitions ---------------------
+wmw3 = WindowManager.new
+assert_eq(wmw3.set_workspace(1), nil, "set_workspace to current is a no-op (nil)")
+assert_eq(wmw3.set_workspace(0), nil, "set_workspace below range is rejected")
+assert_eq(wmw3.set_workspace(5), nil, "set_workspace above WORKSPACE_COUNT is rejected")
+assert_eq(wmw3.set_workspace("2"), nil, "set_workspace requires Integer (string rejected)")
+assert_eq(wmw3.set_workspace(3), 3, "set_workspace to 3 succeeds")
+assert_eq(wmw3.active_workspace, 3, "active_workspace == 3 after switch")
+assert_eq(wmw3.set_workspace(1), 1, "set_workspace back to 1 succeeds")
+
+# ---- workspaces: focused tracks active workspace ----------------------
+wmw4 = WindowManager.new
+fa = wmw4.spawn("a-on-1") # workspace 1, focused
+wmw4.set_workspace(2)
+# After switching to an empty workspace 2, focus is nil (no window there).
+assert(wmw4.focused.nil?, "focused is nil on empty workspace")
+assert(!fa.focused?, "previously-focused window loses focus on workspace switch")
+fb = wmw4.spawn("b-on-2") # spawn on workspace 2, focused
+assert(wmw4.focused.equal?(fb), "focus is b on workspace 2")
+assert(fb.focused?, "b carries focused? = true")
+wmw4.set_workspace(1)
+assert(wmw4.focused.equal?(fa), "focus returns to a when switching back to workspace 1")
+assert(fa.focused?, "a re-acquires focus on workspace 1")
+assert(!fb.focused?, "b loses focus on workspace 2 (out of view)")
+
+# ---- workspaces: windows_snapshot filters to active workspace --------
+wmw5 = WindowManager.new
+s1 = wmw5.spawn("ws1-a")
+s2 = wmw5.spawn("ws1-b")
+wmw5.set_workspace(2)
+s3 = wmw5.spawn("ws2-a")
+# active = 2: snapshot must show s3 only.
+snap = wmw5.windows_snapshot
+assert_eq(snap.length, 1, "snapshot on workspace 2 has 1 entry")
+assert_eq(snap[0][:id], s3.id, "snapshot[0] is s3")
+assert_eq(snap[0][:workspace], 2, "snapshot[0].workspace = 2")
+# Switch back: snapshot must show s1 + s2 only.
+wmw5.set_workspace(1)
+snap = wmw5.windows_snapshot
+assert_eq(snap.length, 2, "snapshot on workspace 1 has 2 entries")
+assert_eq(snap[0][:workspace], 1, "snapshot[0].workspace = 1")
+assert_eq(snap[1][:workspace], 1, "snapshot[1].workspace = 1")
+# windows_on_workspace helper
+assert_eq(wmw5.windows_on_workspace(1).length, 2, "windows_on_workspace(1) = 2")
+assert_eq(wmw5.windows_on_workspace(2).length, 1, "windows_on_workspace(2) = 1")
+assert_eq(wmw5.windows_on_workspace(3).length, 0, "windows_on_workspace(3) = 0 (empty)")
+
+# ---- workspaces: set_workspace wire arm -------------------------------
+wmw6 = WindowManager.new
+res = wmw6.handle_client_message({ type: "set_workspace", index: 2 })
+assert_eq(res, :workspace_changed, "set_workspace wire yields :workspace_changed")
+assert_eq(wmw6.active_workspace, 2, "active_workspace updated via wire")
+res = wmw6.handle_client_message({ type: "set_workspace", index: 2 })
+assert_eq(res, :ignored, "re-setting current workspace is :ignored")
+res = wmw6.handle_client_message({ type: "set_workspace", index: 99 })
+assert_eq(res, :ignored, "out-of-range workspace is :ignored")
+res = wmw6.handle_client_message({ type: "set_workspace", index: 0 })
+assert_eq(res, :ignored, "workspace 0 is :ignored (1-indexed)")
+res = wmw6.handle_client_message({ type: "set_workspace" })
+assert_eq(res, :ignored, "missing index is :ignored")
+res = wmw6.handle_client_message({ type: "move_window", window_id: 1, workspace: 2 })
+assert_eq(res, :ignored, "move_window reserved -> :ignored")
+
+# ---- workspaces: window_at filters by workspace -----------------------
+wmw7 = WindowManager.new
+wa = wmw7.spawn("wa", 200, 120)
+cx = wa.x + wa.w/2
+cy = wa.y + wa.h/2
+assert(wmw7.window_at(cx, cy).equal?(wa), "window_at finds wa on workspace 1")
+wmw7.set_workspace(2)
+assert(wmw7.window_at(cx, cy).nil?, "window_at skips wa when on workspace 2 (wa lives on 1)")
+wmw7.set_workspace(1)
+assert(wmw7.window_at(cx, cy).equal?(wa), "window_at finds wa again on workspace 1")
+
+# ---- workspaces: cycle stays within active workspace ------------------
+wmw8 = WindowManager.new
+ca1 = wmw8.spawn("ca1") # ws 1
+cb1 = wmw8.spawn("cb1") # ws 1
+wmw8.set_workspace(2)
+cc2 = wmw8.spawn("cc2") # ws 2 (single window, cycle no-op)
+assert_eq(wmw8.cycle, nil, "cycle with <2 windows on active workspace is a no-op")
+wmw8.set_workspace(1)
+wmw8.cycle
+assert(wmw8.focused.equal?(ca1), "cycle moves focus among workspace-1 windows only")
+
+# ---- workspaces: minimize re-focuses within active workspace ---------
+wmw9 = WindowManager.new
+ma = wmw9.spawn("ma") # ws 1
+mb = wmw9.spawn("mb") # ws 1, focused
+wmw9.set_workspace(2)
+mc = wmw9.spawn("mc") # ws 2, focused
+wmw9.minimize(mc)
+# On workspace 2 there is no other normal non-minimized window — focused is nil.
+assert(wmw9.focused.nil?, "minimize on a workspace with only one window leaves no focus")
+# Switching back to ws 1 brings mb's focus back.
+wmw9.set_workspace(1)
+assert(wmw9.focused.equal?(mb), "ws 1 still has mb focused after the round trip")
+
 puts "rbtest: ran all pure-WM assertions"
 `

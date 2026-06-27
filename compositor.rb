@@ -50,7 +50,7 @@ end
 # Pure data + math; no JS here.
 # ---------------------------------------------------------------------------
 class Window
-  attr_accessor :id, :title, :x, :y, :w, :h, :fill, :focused, :role, :minimized
+  attr_accessor :id, :title, :x, :y, :w, :h, :fill, :focused, :role, :minimized, :workspace
 
   def initialize(id, title, x, y, w, h, fill, role = "window")
     @id = id
@@ -70,6 +70,14 @@ class Window
     # pipeline (decoration + body) but kept in the stack so a click on its
     # entry in the dock's iconbar can restore it. Panels are never minimized.
     @minimized = false
+    # Fluxbox-style workspaces: every normal window belongs to exactly one
+    # workspace (1..WorkspaceCount). Only the active workspace's windows
+    # render and appear in the iconbar. Panels ignore the workspace field —
+    # they are always visible (workspace = 0 sentinel, set by spawn paths).
+    # WindowManager.register_external / WindowManager.spawn fill this in at
+    # creation time so the default here only matters for direct Window.new
+    # callers in tests.
+    @workspace = 1
   end
 
   def focused? = @focused
@@ -272,6 +280,14 @@ class WindowManager
 
   LAYOUT_SEP = "\t"
 
+  # Fluxbox-style virtual workspaces. WORKSPACE_COUNT is fixed at 4 (numbered
+  # 1..4); the active workspace defaults to 1 at boot. Every normal window
+  # belongs to exactly one workspace and only the active workspace's windows
+  # render + appear in the iconbar. Panels (the dock) ignore the workspace
+  # field and are always visible — the dock IS the UI that switches
+  # workspaces, so hiding it with the windows would be a usability bug.
+  WORKSPACE_COUNT = 4
+
   def initialize
     @stack = []
     @next_id = 0
@@ -291,6 +307,46 @@ class WindowManager
     # Records the most recent commit/lifecycle messages we have processed, for
     # introspection from tests. (Bounded to the last 16 — pure data.)
     @last_messages = []
+    # Currently active workspace (1..WORKSPACE_COUNT). New windows land here;
+    # render + windows_snapshot filter to this number.
+    @active_workspace = 1
+    @workspace_count = WORKSPACE_COUNT
+  end
+
+  # Active workspace accessor; the dock reads it via the `workspace_changed`
+  # event payload, tests read it directly.
+  def active_workspace = @active_workspace
+  def workspace_count  = @workspace_count
+
+  # Switch the active workspace to n (1..workspace_count). Returns the new
+  # active workspace on a real change, nil when n is out of range or already
+  # active (so the Compositor can skip a redundant broadcast). Pure state —
+  # the render loop reads @active_workspace on its next frame.
+  def set_workspace(n)
+    return nil unless n.is_a?(Integer)
+    return nil if n < 1 || n > @workspace_count
+    return nil if n == @active_workspace
+    @active_workspace = n
+    # Focus must follow the active workspace: the previously-focused window
+    # may live on a different workspace now (and so must not advertise itself
+    # as focused). Re-pick the top normal non-minimized window on the new
+    # workspace. We clear ALL focus first to keep the "exactly one focused
+    # window" invariant; if no window exists on the new workspace, focus
+    # legitimately becomes nil until one is spawned.
+    @stack.each { |o| o.focused = false unless o.panel? }
+    next_top = nil
+    @stack.each do |w|
+      next_top = w if !w.panel? && !w.minimized? && w.workspace == @active_workspace
+    end
+    next_top.focused = true if next_top
+    @active_workspace
+  end
+
+  # Windows on workspace n (bottom-to-top, panels excluded). Public so callers
+  # (and tests) can introspect per-workspace contents without rebuilding the
+  # filter inline.
+  def windows_on_workspace(n)
+    @stack.select { |w| !w.panel? && w.workspace == n }
   end
 
   # Consume + clear the most recent peer-close stash. The route layer reads
@@ -344,15 +400,19 @@ class WindowManager
 
   def windows = @stack
 
-  # The keyboard-focused window: the top-most NORMAL non-minimized window.
-  # Panels (the dock) are excluded from the focus ring, so a panel is never
-  # "focused" even though it sits on top visually. A minimized window has been
-  # folded into the dock's iconbar and is not visible on the canvas; it must
-  # not receive synthetic focus traffic either. Returns nil when no normal
-  # non-minimized window exists.
+  # The keyboard-focused window: the top-most NORMAL non-minimized window
+  # ON THE ACTIVE WORKSPACE. Panels (the dock) are excluded from the focus
+  # ring, so a panel is never "focused" even though it sits on top visually.
+  # A minimized window has been folded into the dock's iconbar and is not
+  # visible on the canvas; it must not receive synthetic focus traffic
+  # either. A window on a different workspace is hidden + cannot receive
+  # focus traffic on the active one. Returns nil when no normal non-minimized
+  # window exists on the active workspace.
   def focused
     top = nil
-    @stack.each { |w| top = w if !w.panel? && !w.minimized? }
+    @stack.each do |w|
+      top = w if !w.panel? && !w.minimized? && w.workspace == @active_workspace
+    end
     top
   end
 
@@ -424,7 +484,9 @@ class WindowManager
   attr_reader :last_messages
 
   # Cascade placement, Openbox-style: each new window steps down-and-right and
-  # wraps once it would run off a notional screen.
+  # wraps once it would run off a notional screen. Spawned onto the active
+  # workspace — the user spawned it from there, so that is where they want to
+  # see it.
   def spawn(title, w = 240, h = 150)
     @next_id += 1
     step = 28
@@ -435,6 +497,7 @@ class WindowManager
     @cascade += 1
     fill = PALETTE[(@next_id - 1) % PALETTE.length]
     win = Window.new(@next_id, title, x, y, w, h, fill)
+    win.workspace = @active_workspace
     @stack.push(win)
     focus(win)
     apply_saved(win)
@@ -482,10 +545,14 @@ class WindowManager
     return nil if win.minimized?
     win.minimized = true
     # Clear focus so on-screen state matches: a minimized window cannot be
-    # the focused one. The top normal non-minimized window takes focus.
+    # the focused one. The top normal non-minimized window ON THE ACTIVE
+    # WORKSPACE takes focus (workspace-foreign windows are not visible and
+    # cannot capture focus).
     @stack.each { |o| o.focused = false unless o.panel? }
     next_top = nil
-    @stack.each { |w| next_top = w if !w.panel? && !w.minimized? }
+    @stack.each do |w|
+      next_top = w if !w.panel? && !w.minimized? && w.workspace == @active_workspace
+    end
     next_top.focused = true if next_top
     win
   end
@@ -507,19 +574,24 @@ class WindowManager
     @stack.select { |w| w.minimized? && !w.panel? }
   end
 
-  # Snapshot EVERY non-panel window (open + minimized), bottom-to-top, as plain
-  # Hashes the Compositor can serialize and post to the dock as a
-  # `windows_changed` event. Each entry carries:
+  # Snapshot every non-panel window ON THE ACTIVE WORKSPACE (open + minimized),
+  # bottom-to-top, as plain Hashes the Compositor can serialize and post to
+  # the dock as a `windows_changed` event. Each entry carries:
   #   :id         compositor window id (echoed back in focus/close/restore wires)
   #   :title      current title (verbatim)
   #   :minimized  true iff the window is currently folded into the iconbar
   #   :focused    true iff this is the keyboard-focused window
   #   :role       "window" (always non-panel here — panels are filtered out)
+  #   :workspace  workspace number this window lives on (always == active
+  #               workspace in the current snapshot, since the filter drops
+  #               foreign ones — but the field is sent so a future "show all"
+  #               panel view can read it without a schema change)
   # The order mirrors the stack so first-spawned windows sit leftmost in the
   # iconbar even when later windows are raised on top. Pure data — no JS.
   def windows_snapshot
-    @stack.reject { |w| w.panel? }.map do |w|
-      { id: w.id, title: w.title.to_s, minimized: w.minimized?, focused: w.focused?, role: w.role.to_s }
+    @stack.select { |w| !w.panel? && w.workspace == @active_workspace }.map do |w|
+      { id: w.id, title: w.title.to_s, minimized: w.minimized?,
+        focused: w.focused?, role: w.role.to_s, workspace: w.workspace }
     end
   end
 
@@ -527,23 +599,26 @@ class WindowManager
   # window has been folded into the dock's iconbar — it leaves no pixels on the
   # canvas, so a click at its former coordinates must NOT hit it. The
   # compositor's render loop skips minimized windows for the same reason; this
-  # keeps input + paint in lockstep.
+  # keeps input + paint in lockstep. Windows on inactive workspaces are
+  # likewise invisible and unhittable.
   def window_at(px, py)
     hit = nil
     @stack.each do |w|
       next if w.minimized?
+      next if !w.panel? && w.workspace != @active_workspace
       hit = w if w.contains?(px, py) # last (topmost) wins
     end
     hit
   end
 
-  # Alt+Tab-ish cycle over the NORMAL non-minimized windows only — panels (the
-  # dock) and minimized windows are excluded from the focus ring so Tab never
-  # lands on the dock or on a folded window. Sends the current focused window
-  # to the bottom of the normal pool and focuses the next normal window down,
-  # so repeated presses walk the whole visible app stack.
+  # Alt+Tab-ish cycle over the NORMAL non-minimized windows ON THE ACTIVE
+  # WORKSPACE only — panels (the dock), minimized windows, and windows on
+  # other workspaces are excluded from the focus ring so Tab never lands on
+  # any of them. Sends the current focused window to the bottom of the normal
+  # pool and focuses the next normal window down, so repeated presses walk
+  # the visible-on-this-workspace app stack.
   def cycle
-    normals = normal_windows.reject(&:minimized?)
+    normals = normal_windows.reject(&:minimized?).select { |w| w.workspace == @active_workspace }
     return nil if normals.length < 2
     top = normals.last
     next_win = normals[-2]
@@ -587,6 +662,11 @@ class WindowManager
       @cascade += 1
     end
     win = ExternalWindow.new(@next_id, title, x, y, granted_w, granted_h, role)
+    # A panel is always visible (never workspace-filtered), encoded by the 0
+    # sentinel so workspace_filtered renders + snapshots can skip it cleanly.
+    # A normal external window lands on the active workspace at register time
+    # — the user opened it from there, so that is where it appears.
+    win.workspace = panel ? 0 : @active_workspace
     @stack.push(win)
     @last_registered = win
     if panel
@@ -664,6 +744,23 @@ class WindowManager
         focus(win)
       end
       :focused
+    when "set_workspace"
+      # The dock asks to switch the active workspace (Fluxbox: click or scroll
+      # on the workspace section of the toolbar). An out-of-range or already-
+      # active index is dropped — the compositor's caller skips a redundant
+      # broadcast based on the :ignored result so the dock does not spin.
+      idx = msg[:index]
+      idx = idx.to_i if !idx.is_a?(Integer) && !idx.nil?
+      changed = set_workspace(idx)
+      changed.nil? ? :ignored : :workspace_changed
+    when "move_window"
+      # Reserved for v1: drag a window to another workspace via the dock. The
+      # wire shape `{type:"move_window", window_id:, workspace:}` updates
+      # win.workspace and refreshes the snapshot. The dock UI for it (click +
+      # hold a window-iconbar entry, drag onto a workspace number) is not in
+      # v0 — only the message arm is reserved so the wire protocol stays
+      # forward-compatible.
+      :ignored
     when "close"
       # The dock asks to close a window the user right-clicked on its iconbar.
       # Same effect as clicking the window's close box. Unknown id or panel id
@@ -905,16 +1002,24 @@ class Compositor
     when :title
       # A client renamed itself — refresh the iconbar so the new title shows.
       notify_windows_changed
+    when :workspace_changed
+      # The dock switched the active workspace. Two pushes back-to-back: first
+      # the workspace_changed pulse so the workspace section repaints, then
+      # the windows_changed snapshot — its content is now filtered to the new
+      # workspace, so the iconbar updates as a side-effect of the same wire
+      # call.
+      notify_workspace_changed
+      notify_windows_changed
     end
   end
 
   # Encode the wm.windows_snapshot array as a tiny JSON string so the dock can
   # decode it through encoding/json without any new JS bridge helpers. The
   # snapshot is always [{id:<int>, title:<string>, minimized:<bool>,
-  # focused:<bool>, role:<string>}, ...]; titles are escaped for backslash,
-  # double-quote, newline, carriage return and tab — every other ASCII
-  # character is passed through verbatim. Pure string concatenation; no JSON
-  # library required (rbgo has none).
+  # focused:<bool>, role:<string>, workspace:<int>}, ...]; titles are escaped
+  # for backslash, double-quote, newline, carriage return and tab — every
+  # other ASCII character is passed through verbatim. Pure string
+  # concatenation; no JSON library required (rbgo has none).
   def windows_json(wins)
     parts = []
     wins.each do |w|
@@ -924,7 +1029,8 @@ class Compositor
       s += ',"title":"' + json_escape(w[:title].to_s) + '"'
       s += ',"minimized":' + mflag
       s += ',"focused":' + fflag
-      s += ',"role":"' + json_escape(w[:role].to_s) + '"}'
+      s += ',"role":"' + json_escape(w[:role].to_s) + '"'
+      s += ',"workspace":' + w[:workspace].to_s + '}'
       parts << s
     end
     "[" + parts.join(",") + "]"
@@ -953,9 +1059,11 @@ class Compositor
   # "windows_changed" carrying a JSON-encoded array — this reuses the existing
   # input-event channel the dock's SDK already dispatches, so no new SDK
   # message type is needed. Fires from EVERY site that changes the windows
-  # list, the focus, or the minimized flag: registration, close, minimize,
-  # restore, focus, cycle, set_title. No-op when no dock panel is registered
-  # or it lacks a worker ref.
+  # list, the focus, the minimized flag, OR the active workspace (the
+  # filtered snapshot changes whenever the active workspace switches):
+  # registration, close, minimize, restore, focus, cycle, set_title,
+  # set_workspace. No-op when no dock panel is registered or it lacks a
+  # worker ref.
   def notify_windows_changed
     panel = @wm.panels.first
     return nil unless panel
@@ -971,6 +1079,28 @@ class Compositor
     JS.global.call("wasmboxPostMessage", panel.worker, payload)
   end
 
+  # Push the current active workspace + total workspace count to the dock as
+  # an `input` event of kind "workspace_changed". Fires on every successful
+  # set_workspace transition so the dock's workspace section can repaint
+  # immediately, without waiting for the next windows_changed (which arrives
+  # immediately after, but conceptually the workspace UI is independent of
+  # the iconbar UI). No-op when no dock panel is registered or it lacks a
+  # worker ref.
+  def notify_workspace_changed
+    panel = @wm.panels.first
+    return nil unless panel
+    return nil unless panel.external?
+    return nil if panel.worker.nil?
+    payload = JS.global.call("wasmboxMakeObject",
+      "type", "input",
+      "window_id", panel.id,
+      "event", JS.global.call("wasmboxMakeObject",
+        "kind", "workspace_changed",
+        "active", @wm.active_workspace,
+        "count", @wm.workspace_count))
+    JS.global.call("wasmboxPostMessage", panel.worker, payload)
+  end
+
   # Pull the protocol fields out of the JS message object. We hand a plain
   # Ruby Hash to handle_client_message so the dispatcher logic stays portable
   # and unit-testable off-wasm.
@@ -979,7 +1109,7 @@ class Compositor
     type = data.get("type")
     return nil if type.nil?
     h = { type: type.to_s }
-    %w[window_id w h stride title role app].each do |k|
+    %w[window_id w h stride title role app index workspace].each do |k|
       v = data.get(k)
       h[k.to_sym] = v unless v.nil?
     end
@@ -1030,8 +1160,36 @@ class Compositor
     @canvas.on("mousemove")   { |e| on_mousemove(e) }
     @canvas.on("mouseup")     { |e| on_mouseup(e) }
     @canvas.on("contextmenu") { |e| on_contextmenu(e) }
+    @canvas.on("wheel")       { |e| on_wheel(e) }
     JS.window.on("keydown")   { |e| on_keydown(e) }
     JS.window.on("keyup")     { |e| on_keyup(e) }
+  end
+
+  # Scroll-wheel input. Forwarded to the panel under the pointer (the dock —
+  # which uses wheel events on its workspace section to cycle workspaces) or
+  # to the focused external window. The compositor itself does not consume
+  # the wheel, so the page never scrolls in response (preventDefault keeps
+  # the browser from scrolling underneath us).
+  def on_wheel(e)
+    e.call("preventDefault")
+    mx = e.get("offsetX")
+    my = e.get("offsetY")
+    dy = e.get("deltaY")
+    dx = e.get("deltaX")
+    panel = panel_at(mx, my)
+    target = panel || @wm.focused
+    return nil unless target&.external?
+    return nil unless target.worker
+    payload = JS.global.call("wasmboxMakeObject",
+      "type", "input",
+      "window_id", target.id,
+      "event", JS.global.call("wasmboxMakeObject",
+        "kind", "wheel",
+        "x", mx - target.x,
+        "y", my - target.y,
+        "deltaX", dx.nil? ? 0 : dx,
+        "deltaY", dy.nil? ? 0 : dy))
+    JS.global.call("wasmboxPostMessage", target.worker, payload)
   end
 
   def on_mouseup(e)
@@ -1255,7 +1413,16 @@ class Compositor
     # Draw normal windows first, then panels on top (always-on-top stratum).
     # Minimized windows have been folded into the dock's iconbar; the
     # compositor skips them entirely so they leave no pixels on the canvas.
-    @wm.ordered_windows.each { |win| draw_window(win) unless win.minimized? }
+    # Windows on inactive workspaces are likewise skipped — only the active
+    # workspace's windows render. Panels (the dock) IGNORE the workspace
+    # filter and always render, because the dock is the UI that switches
+    # workspaces in the first place.
+    active = @wm.active_workspace
+    @wm.ordered_windows.each do |win|
+      next if win.minimized?
+      next if !win.panel? && win.workspace != active
+      draw_window(win)
+    end
     draw_menu if @menu
     draw_hud
   end

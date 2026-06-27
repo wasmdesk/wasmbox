@@ -4,7 +4,12 @@
 // toolbar: a full-width, 28-pixel-tall bevelled gray bar split into three
 // sections that read left-to-right —
 //
-//   - a fixed-width workspace label on the left ("1" by default),
+//   - a fixed-width workspace section on the left rendering the active
+//     workspace as "<active> of <count>" (default "1 of 4"). Left-clicking
+//     the section cycles to the next workspace; scroll-wheel up/down
+//     cycles backward/forward. The active workspace is reported by the
+//     compositor through the `workspace_changed` input event (kind:
+//     "workspace_changed", payload {active:int, count:int});
 //   - an iconbar in the middle. Reading left-to-right inside the iconbar:
 //     first the static LAUNCHERS (one button per known app —
 //     terminal / editor / files / hello), then a 1-pixel separator, then
@@ -64,6 +69,13 @@ type Window struct {
 	Minimized bool   `json:"minimized"`
 	Focused   bool   `json:"focused"`
 	Role      string `json:"role"`
+	// Workspace mirrors the compositor's per-window workspace assignment
+	// (1..WORKSPACE_COUNT). The compositor's windows_snapshot already
+	// filters to the active workspace, so in v0 every entry sent over the
+	// wire has Workspace == State.ActiveWorkspace — but the field is here
+	// so a future "show all workspaces" view (e.g. a pager) needs no
+	// schema change.
+	Workspace int `json:"workspace"`
 }
 
 // Glyph enumerates the built-in icon drawings.
@@ -119,19 +131,27 @@ const (
 // State is the toolbar's mutable model: surface size, the static launcher
 // row, the active open-window row (one button per non-panel window the
 // compositor has open, including folded ones — flagged via Window.Minimized),
-// the active workspace label, the current clock string, the cursor position
-// (recorded for a future hover highlight; unused by the v0 paint pass) and
-// the active Openbox-compatible Theme.
+// the active workspace + workspace count (numeric model — Workspace string
+// derives from them in Render), the current clock string, the cursor
+// position (recorded for a future hover highlight; unused by the v0 paint
+// pass) and the active Openbox-compatible Theme.
+//
+// ActiveWorkspace defaults to 1 and WorkspaceCount to 4 (matches the
+// compositor's WORKSPACE_COUNT constant). The compositor pushes a
+// `workspace_changed` input event on every switch carrying both fields, so
+// the dock can render the bar without ever holding a stale value.
 type State struct {
-	W, H         int
-	Apps         []App
-	Windows      []Window
-	Workspace    string
-	Clock        string
-	CursorX      int
-	CursorY      int
-	CursorInside bool
-	Theme        theme.Theme
+	W, H            int
+	Apps            []App
+	Windows         []Window
+	ActiveWorkspace int
+	WorkspaceCount  int
+	Workspace       string // legacy display-only label; SetWorkspace fills it
+	Clock           string
+	CursorX         int
+	CursorY         int
+	CursorInside    bool
+	Theme           theme.Theme
 }
 
 // DefaultApps is the built-in launcher set the iconbar ships with.
@@ -145,18 +165,56 @@ func DefaultApps() []App {
 }
 
 // New makes a toolbar State for a surface of width × height pixels carrying
-// the default launcher set + the default workspace label "1" + an empty
-// clock string (the worker posts a tick on boot to fill it in) + the default
-// Fluxbox-light theme. The cursor is parked outside the surface.
+// the default launcher set + the default active workspace (1 of 4) + an
+// empty clock string (the worker posts a tick on boot to fill it in) + the
+// default Fluxbox-light theme. The cursor is parked outside the surface.
 func New(width, height int) *State {
-	return &State{
-		W:         width,
-		H:         height,
-		Apps:      DefaultApps(),
-		Workspace: "1",
-		Clock:     "",
-		Theme:     theme.DefaultFluxboxLight(),
+	s := &State{
+		W:               width,
+		H:               height,
+		Apps:            DefaultApps(),
+		ActiveWorkspace: 1,
+		WorkspaceCount:  4,
+		Clock:           "",
+		Theme:           theme.DefaultFluxboxLight(),
 	}
+	s.Workspace = workspaceLabel(s.ActiveWorkspace, s.WorkspaceCount)
+	return s
+}
+
+// workspaceLabel formats the active/count pair as the text the bar renders.
+// "1 of 4" is the chosen form: it reads like Fluxbox's "Workspace 1" but
+// also surfaces the total count so the user knows how many slots cycle.
+func workspaceLabel(active, count int) string {
+	if count <= 0 {
+		return itoa(active)
+	}
+	return itoa(active) + " of " + itoa(count)
+}
+
+// itoa is a tiny base-10 formatter for small non-negative ints. The bitmap
+// font only carries digits + a few punctuation glyphs, so strconv.Itoa would
+// pull in unneeded printing machinery; this keeps the wasm payload lean.
+func itoa(n int) string {
+	if n == 0 {
+		return "0"
+	}
+	neg := n < 0
+	if neg {
+		n = -n
+	}
+	var buf [20]byte
+	i := len(buf)
+	for n > 0 {
+		i--
+		buf[i] = byte('0' + n%10)
+		n /= 10
+	}
+	if neg {
+		i--
+		buf[i] = '-'
+	}
+	return string(buf[i:])
 }
 
 // SetCursor records the cursor position and whether it is over the surface.
@@ -169,8 +227,73 @@ func (s *State) SetCursor(x, y int, inside bool) {
 // SetClock records the latest "HH:MM" clock string posted by the worker.
 func (s *State) SetClock(t string) { s.Clock = t }
 
-// SetWorkspace records the active workspace label ("1", "2", ...).
+// SetWorkspace records the active workspace label ("1", "2", ...). Kept as
+// a legacy entry point for the `tick` event payload (worker.js may post
+// a `workspace` field opportunistically). The numeric model is the
+// authoritative source — SetActiveWorkspace / SetWorkspaceCount overwrite
+// the label whenever they change so the two stay coherent.
 func (s *State) SetWorkspace(w string) { s.Workspace = w }
+
+// SetActiveWorkspace records the active workspace number (1..WorkspaceCount)
+// and refreshes the rendered Workspace label. Clamped silently to the legal
+// range so a malformed compositor payload cannot poison the model.
+func (s *State) SetActiveWorkspace(n int) {
+	if s.WorkspaceCount > 0 {
+		if n < 1 {
+			n = 1
+		}
+		if n > s.WorkspaceCount {
+			n = s.WorkspaceCount
+		}
+	}
+	s.ActiveWorkspace = n
+	s.Workspace = workspaceLabel(s.ActiveWorkspace, s.WorkspaceCount)
+}
+
+// SetWorkspaceCount records the total workspace count (typically 4) and
+// refreshes the rendered Workspace label. A non-positive count is treated
+// as "unknown" and the label reduces to the active number only.
+func (s *State) SetWorkspaceCount(n int) {
+	if n < 0 {
+		n = 0
+	}
+	s.WorkspaceCount = n
+	if s.ActiveWorkspace < 1 {
+		s.ActiveWorkspace = 1
+	}
+	if s.WorkspaceCount > 0 && s.ActiveWorkspace > s.WorkspaceCount {
+		s.ActiveWorkspace = s.WorkspaceCount
+	}
+	s.Workspace = workspaceLabel(s.ActiveWorkspace, s.WorkspaceCount)
+}
+
+// NextWorkspace returns the index the bar should cycle to on a forward
+// step (left-click on the workspace section, scroll-wheel down). Wraps
+// from WorkspaceCount back to 1. Returns the current active workspace if
+// the count is non-positive so the dock cannot dispatch a bogus index.
+func (s *State) NextWorkspace() int {
+	if s.WorkspaceCount <= 0 {
+		return s.ActiveWorkspace
+	}
+	n := s.ActiveWorkspace + 1
+	if n > s.WorkspaceCount {
+		n = 1
+	}
+	return n
+}
+
+// PrevWorkspace returns the index the bar should cycle to on a backward
+// step (scroll-wheel up). Wraps from 1 back to WorkspaceCount.
+func (s *State) PrevWorkspace() int {
+	if s.WorkspaceCount <= 0 {
+		return s.ActiveWorkspace
+	}
+	n := s.ActiveWorkspace - 1
+	if n < 1 {
+		n = s.WorkspaceCount
+	}
+	return n
+}
 
 // SetWindows replaces the open-window list (open + minimized, flagged via
 // Window.Minimized). The slice is stored directly (callers must not mutate
@@ -243,6 +366,15 @@ func (s *State) WindowButtonRect(i int) (x, y, w, h int) {
 		h = 1
 	}
 	return
+}
+
+// HitTestWorkspace reports whether (x, y) falls inside the workspace section
+// on the left edge of the toolbar. Used by the dock to recognize a
+// left-click (cycle to next workspace) or scroll-wheel event (cycle
+// back/forward) over the workspace UI.
+func (s *State) HitTestWorkspace(x, y int) bool {
+	wx, wy, ww, wh := s.WorkspaceRect()
+	return x >= wx && x < wx+ww && y >= wy && y < wy+wh
 }
 
 // HitTest returns the iconbar-button index under (x, y) in surface

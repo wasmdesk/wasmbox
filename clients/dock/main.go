@@ -89,6 +89,17 @@ func main() {
 		client.Call("closeWindow", id)
 	}
 
+	// setWorkspace asks the compositor to switch the active workspace to
+	// `index` (1..workspaceCount). Travels over the SDK's MessagePort just
+	// like `launch`; the compositor's WindowManager.handle_client_message
+	// routes the message to its `:set_workspace` arm and broadcasts a
+	// `workspace_changed` event back here on success (which updates the
+	// model + repaints).
+	setWorkspace := func(index int) {
+		println("wasmdock: setWorkspace", index)
+		client.Call("setWorkspace", index)
+	}
+
 	// Initial paint so the compositor has something to blit immediately.
 	render()
 
@@ -116,6 +127,15 @@ func main() {
 			if b := ev.Get("button"); !b.IsUndefined() && !b.IsNull() {
 				button = b.Int()
 			}
+			// Workspace section: left-click cycles to the next workspace.
+			// A right-click is reserved for a future "workspace menu" — in
+			// v0 it is a no-op (no popup yet, no per-workspace context).
+			if state.HitTestWorkspace(x, y) {
+				if button != 2 {
+					setWorkspace(state.NextWorkspace())
+				}
+				break
+			}
 			if i := state.HitTest(x, y); i >= 0 {
 				launch(state.Apps[i].Id)
 				break
@@ -131,6 +151,39 @@ func main() {
 					focusWin(id)
 				}
 			}
+		case "wheel":
+			// Scroll-wheel input: cycle workspaces when the wheel fires over
+			// the workspace section. deltaY > 0 = scroll DOWN = forward
+			// (next workspace); deltaY < 0 = scroll UP = backward (previous
+			// workspace). A wheel elsewhere on the toolbar is ignored.
+			x := ev.Get("x").Int()
+			y := ev.Get("y").Int()
+			if !state.HitTestWorkspace(x, y) {
+				break
+			}
+			dy := 0.0
+			if d := ev.Get("deltaY"); !d.IsUndefined() && !d.IsNull() {
+				dy = d.Float()
+			}
+			if dy > 0 {
+				setWorkspace(state.NextWorkspace())
+			} else if dy < 0 {
+				setWorkspace(state.PrevWorkspace())
+			}
+		case "workspace_changed":
+			// Compositor pushes the new active workspace + total count after
+			// a successful set_workspace. Update the model + repaint so the
+			// workspace section shows the new "<active> of <count>" label.
+			// The compositor sends a windows_changed immediately after this
+			// event, so the iconbar refresh is handled by that arm and we
+			// only need to re-render the workspace label here.
+			if c := ev.Get("count"); !c.IsUndefined() && !c.IsNull() {
+				state.SetWorkspaceCount(c.Int())
+			}
+			if a := ev.Get("active"); !a.IsUndefined() && !a.IsNull() {
+				state.SetActiveWorkspace(a.Int())
+			}
+			render()
 		case "windows_changed":
 			// Compositor pushes the current open-window list as a
 			// JSON-encoded array string under `windows_json`. We parse it
