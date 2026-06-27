@@ -108,18 +108,36 @@ jobs:
           echo "assembled $SITE: $(find "$SITE/v2" -type f | wc -l) /v2 files"
 
       # Publish the canonical app images to ghcr (the source of truth). The
-      # same-origin /v2 mirror above is the runtime source; ghcr is the
-      # registry. Only on push to main (GITHUB_TOKEN has packages:write there).
+      # same-origin /v2 mirror above is the runtime source; ghcr is the registry.
+      #
+      # Auth: prefer a PAT in secrets.GHCR_PAT (a token with write:packages) and
+      # fall back to GITHUB_TOKEN. The GITHUB_TOKEN path was observed to exit 0
+      # WITHOUT creating the packages (a silent no-op), so after each push we
+      # VERIFY the exact manifest digest is live on ghcr and fail loudly if not —
+      # no more green-lying. (No `set -x`: it would echo the token into the log.)
       - name: Publish app images to ghcr.io/wasmdesk
         if: github.event_name == 'push'
         env:
-          GHCR_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GHCR_TOKEN: ${{ secrets.GHCR_PAT || secrets.GITHUB_TOKEN }}
+          GHCR_USER: ${{ github.actor }}
         run: |
-          set -e
+          set -eu
           for app in hello dock terminal files; do
             ./bin/ociapps-push -in "/tmp/oci-$app" \
               -ref "ghcr.io/wasmdesk/$app:latest" -scheme https \
-              -username "${{ github.actor }}"
+              -username "$GHCR_USER"
+            # Verify the pushed manifest actually landed (by digest) on ghcr.
+            want=$(jq -r '.manifests[0].digest' "/tmp/oci-$app/index.json")
+            tok=$(curl -fsS -u "$GHCR_USER:$GHCR_TOKEN" \
+              "https://ghcr.io/token?scope=repository:wasmdesk/$app:pull&service=ghcr.io" \
+              | sed -E 's/.*"token":"([^"]+)".*/\1/')
+            got=$(curl -fsS -D - -o /dev/null \
+              -H "Authorization: Bearer $tok" \
+              -H "Accept: application/vnd.oci.image.manifest.v1+json" \
+              "https://ghcr.io/v2/wasmdesk/$app/manifests/latest" \
+              | tr -d '\r' | awk -F': ' 'tolower($1)=="docker-content-digest"{print $2}')
+            echo "verify ghcr/$app: want=$want got=${got:-none}"
+            [ "$want" = "$got" ] || { echo "::error::ghcr publish of $app did not land the expected manifest (want $want, got ${got:-none}) — check the GHCR_PAT/GITHUB_TOKEN packages:write auth"; exit 1; }
           done
 
       - name: Upload Pages artifact
