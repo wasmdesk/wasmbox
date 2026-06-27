@@ -93,6 +93,8 @@ The first message a client sends after `Worker` instantiation completes.
   stride: 4 * 200,            // bytes per row; canonical = 4*w
   role: "window",             // optional surface role (see below); default "window"
   ctl: SharedArrayBuffer,     // optional 1×Int32 seqlock control word (tear-free; see below)
+  parent: 7,                  // popups only: parent window_id to anchor to
+  rel_x: 20, rel_y: 30,       // popups only: offset inside the parent's body
 }
 ```
 
@@ -100,16 +102,22 @@ The SAB is transferred by reference (it is shared, not copied). The compositor
 keeps it for the lifetime of the window and reads `damage` rectangles out of
 it on every `commit`. `ctl` is optional — when present it enables the
 tear-free seqlock (see *Tear-free presentation*); a client that omits it gets
-the older "read whenever" behaviour.
+the older "read whenever" behaviour. `parent` + `rel_x` + `rel_y` apply only to
+`role: "popup"` (see *Popups* below).
 
-**Surface roles** (`hello.role`, validated by the compositor — anything not
-exactly `"panel"` is treated as `"window"`):
+**Surface roles** (`hello.role`, validated by the compositor — an unknown role
+is treated as `"window"`):
 
 * `"window"` — a normal, decorated, cascade-placed, focusable window.
 * `"panel"` — a dock-style surface (the wlr-layer-shell analog): no
   decoration, bottom-center anchored, always-on-top, never draggable /
   closable / resizable, and excluded from the Alt-Tab focus cycle. Used by
   `clients/dock`.
+* `"popup"` — a child surface anchored to a `parent` window (the xdg-popup /
+  menu / tooltip analog): undecorated, placed at `(rel_x, rel_y)` inside the
+  parent body, stacked directly above the parent, excluded from keyboard focus,
+  and **grab-dismissed** — a click outside the popup closes it (a `closed`
+  message). See *Popups* below.
 
 ### `welcome`  (S → C)
 
@@ -259,11 +267,38 @@ a skipped frame simply retries on the next raf once the client has committed —
 so no update is lost, and a half-painted surface is never shown. A client that
 sends no `ctl` keeps the older unsynchronised behaviour.
 
+## Popups (child surfaces)
+
+A popup is the xdg-popup / menu / tooltip primitive: a **child surface owned by
+the same client as its parent window**. One worker can therefore drive several
+surfaces — a window plus its popups — all multiplexed over the single
+client↔compositor port. The SDK routes that traffic by surface: a `welcome` is
+matched to the oldest surface still awaiting one (the compositor replies in
+`hello` order over the ordered port), and everything else routes by `window_id`.
+
+A client opens one with `parentClient.openPopup({ w, h, rel_x, rel_y })`, which
+mints a second `WasmboxClient` with `role: "popup"`, `parent` set to the parent
+window_id, and the relative offset. The compositor then:
+
+* **places** the popup at `(parent.x + rel_x, parent.y + rel_y)` and stacks it
+  directly above the parent (it owns its size — no MIN clamp);
+* draws **no decoration** and keeps it **out of the keyboard-focus ring** (it
+  still receives mouse input by hit-testing);
+* **grabs the pointer**: a click inside the popup is forwarded to it; a click
+  anywhere else dismisses every open popup (each gets a `closed`) and is
+  consumed;
+* **orphans** are cleaned up — closing a window also dismisses its popups.
+
+`clients/hello` demonstrates it: clicking the window opens a small menu popup.
+
 ## Implemented since step B
 
 * **Compositor in its own Worker** (step C) + **direct client↔compositor
   `MessageChannel`** (step C.1) — see *Threading + memory*.
-* **Surface roles** — `panel` (dock / layer-shell analog) alongside `window`.
+* **Surface roles** — `panel` (dock / layer-shell analog) and `popup`
+  (xdg-popup analog) alongside `window`.
+* **Popups / subsurfaces** — multi-surface clients with grab-dismissed,
+  parent-anchored child surfaces (see *Popups* above).
 * **`launch`** — id-gated client spawning through the `LAUNCHABLE` trust table.
 * **OCI client delivery** — clients pulled at runtime as OCI artifacts
   (`wasmboxSpawnFromOCI` / `OCIAppsLoader`).
@@ -271,7 +306,8 @@ sends no `ctl` keeps the older unsynchronised behaviour.
 
 ## Roadmap / not yet implemented
 
-* Subsurfaces / popups / nested windows.
+* Nested popups (a popup opening its own sub-popup) + keyboard-driven menu
+  navigation.
 * `request_resize` (would need a fresh SAB) + surface-size clamping negotiation.
 * GPU offload (everything blits through 2D `putImageData`; no dmabuf/WebGPU).
 * Client-side decorations (decorations are always compositor-drawn).

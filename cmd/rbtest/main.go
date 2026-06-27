@@ -209,6 +209,41 @@ assert_eq(fr, br, "panel frame_rect equals body_rect")
 wmp.cycle
 assert(wmp.focused.equal?(nrm), "cycle keeps the only normal window focused")
 
+# ---- popup role: hello "popup" + parent-relative placement + grab ----------
+wmpp = WindowManager.new
+parent = wmpp.register_external("editor", 300, 200)   # a normal, decorated window
+parent.move_to(100, 80)
+res = wmpp.handle_client_message({ type: "hello", title: "menu", role: "popup",
+                                   parent: parent.id, rel_x: 20, rel_y: 30,
+                                   w: 40, h: 24, sab: :psab, stride: 160 })
+assert_eq(res, :welcome, "popup hello yields :welcome")
+pop = wmpp.last_registered
+assert(pop.popup?, "popup window reports popup?")
+assert(!pop.decorated?, "popup is undecorated")
+assert(pop.external?, "popup is external")
+# Anchored at the parent body origin + (rel_x, rel_y), and NOT MIN-clamped (a
+# 40x24 menu would be clamped up for a normal window, but a popup keeps it).
+assert_eq(pop.x, 120, "popup x = parent.x + rel_x (100+20)")
+assert_eq(pop.y, 110, "popup y = parent.y + rel_y (80+30)")
+assert_eq(pop.w, 40, "popup keeps requested w (no MIN clamp)")
+assert_eq(pop.h, 24, "popup keeps requested h (no MIN clamp)")
+assert_eq(pop.parent_id, parent.id, "popup remembers its parent_id")
+# No decoration (same as a panel): every decoration hit-test is no-hit and the
+# frame equals the body.
+assert(!pop.on_titlebar?(pop.x + 5, pop.y + 2), "popup titlebar not hittable")
+assert(!pop.on_close?(pop.x + pop.w - 5, pop.y + 2), "popup close not hittable")
+assert_eq(pop.frame_rect, pop.body_rect, "popup frame_rect equals body_rect")
+# Excluded from the focus ring: the parent stays the focused window.
+assert(wmpp.focused.equal?(parent), "popup does not steal focus from its parent")
+assert_eq(wmpp.popups.length, 1, "one popup tracked")
+assert_eq(wmpp.child_popups(parent.id).length, 1, "child_popups finds it by parent_id")
+# Stacks above its parent (newest non-panel on top).
+assert(wmpp.ordered_windows.last.equal?(pop), "popup drawn last (above its parent)")
+# Closing the parent orphans + unmaps the popup.
+wmpp.close(parent)
+assert_eq(wmpp.popups.length, 0, "closing the parent unmaps its popup")
+assert_eq(wmpp.windows.length, 0, "no windows remain after parent close")
+
 # ---- launch registry: known id -> :launch, unknown id -> :ignored ---------
 wml = WindowManager.new
 assert_eq(wml.handle_client_message({ type: "launch", app: "terminal" }), :launch,
