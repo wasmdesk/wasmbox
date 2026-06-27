@@ -267,10 +267,24 @@ class WindowManager
   # surfaces); "editor" stays on the bundled hello client until a dedicated
   # editor client lands. A click on a dock icon thus opens a window whose
   # title matches the icon, completing the user-visible launch chain.
+  #
+  # The desktop root-menu (right-click an empty area of the desktop, see RootMenu
+  # below) reads this same table to populate its "Applications" submenu: an id
+  # listed here can be launched from the menu, anything else cannot. Keep the
+  # registry the SINGLE source of truth for the launch trust boundary so both
+  # surfaces (dock + root-menu) agree on what is launchable.
   LAUNCHABLE = {
     "terminal"  => "clients/terminal/worker.js",
     "editor"    => "clients/hello/worker.js",
     "files"     => "clients/files/worker.js",
+    # Bundled hello client (the wasm "Hello, wasmbox!" demo). Same descriptor
+    # shape as terminal/files; the root menu exposes it as "Hello (wasm)".
+    "hello"     => "clients/hello/worker.js",
+    # Bundled quake client (pure-Go Quake 1, from the sibling go-quake1 repo).
+    # The wasm is huge (~190 MB) and may not be built locally, but the worker.js
+    # is part of the wasmbox tree, so the descriptor is always safe — the worker
+    # surfaces an error window when the wasm is missing, never the compositor.
+    "quake"     => "clients/quake/worker.js",
     # OCI demo ids (resolved against WASMBOX_OCI_REGISTRIES or the default
     # http://127.0.0.1:5000 registry). The id "hello-oci" mirrors the bundled
     # hello client but pulls it from the registry instead of from disk; it
@@ -812,6 +826,180 @@ class WindowManager
 end
 
 # ---------------------------------------------------------------------------
+# Menu — a single hierarchical popup menu (Openbox-style). Each entry is a
+# plain Hash so the same structure can describe a regular leaf, a separator,
+# or a sub-menu opener:
+#
+#   { label: "Terminal",      action: [:launch, "terminal"]      }
+#   { label: "Applications",  submenu: <Menu> }
+#   { separator: true }
+#
+# Pure data + math: hit_test answers WHICH entry a (mx, my) pair falls in;
+# region answers the [x, y, w, h] rectangle the menu paints into. The
+# Compositor owns the canvas paint + the action dispatcher.
+# ---------------------------------------------------------------------------
+class Menu
+  ITEM_H = 24      # row height, per spec
+  WIDTH  = 170     # default menu width
+  SEP_H  = 6       # separator row height (a thin divider, not a full row)
+  PAD_X  = 8       # left/right text padding
+
+  attr_reader :entries
+
+  def initialize(entries)
+    @entries = entries
+  end
+
+  # The pixel height required to paint this menu, summed over every entry
+  # (separators are shorter than regular rows).
+  def height
+    h = 0
+    @entries.each { |e| h += e[:separator] ? SEP_H : ITEM_H }
+    h
+  end
+
+  # Bounding rectangle when popped up at (x, y), as [x, y, w, h].
+  def region(x, y)
+    [x, y, WIDTH, height]
+  end
+
+  # Index of the entry containing the point (mx, my) when the menu is popped
+  # up at (x, y), or -1 if the point falls outside the menu region (or on a
+  # separator, which is not selectable). Separators occupy SEP_H rather than
+  # the full ITEM_H, and they advance the cursor without being targetable.
+  #
+  # Implementation note: rbgo does NOT propagate a `return` from a block to
+  # the enclosing method (the block-local return only exits the block — see
+  # WindowManager#find for the same workaround). So we walk with a while-loop.
+  def hit_test(x, y, mx, my)
+    return -1 if mx < x || mx >= x + WIDTH
+    return -1 if my < y
+    cy = y
+    i = 0
+    n = @entries.length
+    while i < n
+      e = @entries[i]
+      row_h = e[:separator] ? SEP_H : ITEM_H
+      if my < cy + row_h
+        return -1 if e[:separator]
+        return i
+      end
+      cy += row_h
+      i += 1
+    end
+    -1
+  end
+
+  # Top-y of entry i when the menu starts at y. Needed by the Compositor to
+  # position a sub-menu flush with the parent entry it opens from. Walks with
+  # an indexed while-loop because rbgo block-return does not unwind the
+  # enclosing method.
+  def entry_top(y, idx)
+    cy = y
+    i = 0
+    n = @entries.length
+    while i < n
+      return cy if i == idx
+      cy += @entries[i][:separator] ? SEP_H : ITEM_H
+      i += 1
+    end
+    cy
+  end
+
+  # Convenience for the renderer: walk entries with their (y, h) row metrics.
+  # Yields [entry, row_y, row_h, index] for each entry.
+  def each_row(y)
+    cy = y
+    @entries.each_with_index do |e, i|
+      row_h = e[:separator] ? SEP_H : ITEM_H
+      yield e, cy, row_h, i
+      cy += row_h
+    end
+  end
+end
+
+# ---------------------------------------------------------------------------
+# RootMenu — builder for the desktop right-click menu (the Openbox "root
+# menu"). Hierarchy:
+#
+#   Applications →   (one entry per LAUNCHABLE id, label-formatted)
+#   Workspaces   →   (one entry per workspace 1..wm.workspace_count)
+#   ──────────       (separator)
+#   About wasmbox    (v0: dismiss-only)
+#   Reload           (v0: dismiss-only)
+#   Exit             (v0: dismiss-only)
+#
+# Pure: takes a WindowManager and returns a Menu. The Compositor pops it on
+# right-click of an empty desktop area and dispatches the selected entry.
+# ---------------------------------------------------------------------------
+module RootMenu
+  # Label overrides for the Applications submenu — every LAUNCHABLE id gets an
+  # entry, but the labels in the menu are human-friendly rather than the raw
+  # ids. An id missing from this map falls back to the capitalized id.
+  APP_LABELS = {
+    "terminal"  => "Terminal",
+    "editor"    => "Editor",
+    "files"     => "Files",
+    "hello"     => "Hello (wasm)",
+    "quake"     => "Quake",
+    "hello-oci" => "Hello (OCI)",
+  }.freeze
+
+  # IDs the root menu intentionally OMITS from the Applications submenu. The
+  # "editor" id currently aliases the hello worker (see LAUNCHABLE) so listing
+  # both would show two identical-looking entries. "hello-oci" is a probe-only
+  # demo, not a user-facing app.
+  HIDDEN = ["hello-oci"].freeze
+
+  # Compose the apps + workspaces submenus and the top-level menu.
+  def self.build(wm)
+    Menu.new([
+      { label: "Applications", submenu: build_apps(wm) },
+      { label: "Workspaces",   submenu: build_workspaces(wm) },
+      { separator: true },
+      { label: "About wasmbox", action: [:noop, "about"] },
+      { label: "Reload",        action: [:noop, "reload"] },
+      { label: "Exit",          action: [:noop, "exit"] },
+    ])
+  end
+
+  # Build the Applications submenu from the LAUNCHABLE registry. The order
+  # follows APP_LABELS insertion order so the listing is stable + readable
+  # (terminal/editor/files first, hello, then quake), with any LAUNCHABLE ids
+  # we did not pre-label appended at the end.
+  def self.build_apps(wm)
+    rows = []
+    seen = {}
+    APP_LABELS.each do |id, label|
+      next if HIDDEN.include?(id)
+      next unless wm.launchable?(id)
+      rows << { label: label, action: [:launch, id] }
+      seen[id] = true
+    end
+    # Hash#each_key is not implemented in rbgo — iterate with #each and the
+    # 2-arg destructure shape so we only need the key.
+    WindowManager::LAUNCHABLE.each do |id, _desc|
+      next if seen[id]
+      next if HIDDEN.include?(id)
+      rows << { label: id.to_s.capitalize, action: [:launch, id] }
+    end
+    Menu.new(rows)
+  end
+
+  # Build the Workspaces submenu. One entry per workspace, 1..wm.workspace_count.
+  def self.build_workspaces(wm)
+    rows = []
+    n = wm.workspace_count
+    i = 1
+    while i <= n
+      rows << { label: "Workspace #{i}", action: [:workspace, i] }
+      i += 1
+    end
+    Menu.new(rows)
+  end
+end
+
+# ---------------------------------------------------------------------------
 # Compositor — owns the WM, the canvas and the input/render loop. This is the
 # only part that talks to the JS bridge.
 # ---------------------------------------------------------------------------
@@ -819,7 +1007,14 @@ class Compositor
   def initialize(wm)
     @wm = wm
     @drag = nil      # {win:, mode: :move|:resize, dx:, dy:}
-    @menu = nil      # {x:, y:, items: [[label, action]]}
+    # @menu is either nil (no popup) or a Hash describing the active popup:
+    #   { x:, y:, menu: <Menu>, kind: :root|:window, win:?, hover:?,
+    #     submenu_idx:?, submenu:?, submenu_x:?, submenu_y:?, submenu_hover:? }
+    # The :root variant is the desktop right-click root menu (hierarchical,
+    # with one open submenu at a time). The :window variant is the per-window
+    # context menu (flat, with Raise/Close). Both share the Menu rendering /
+    # hit-test path; only the action dispatcher branches on :kind.
+    @menu = nil
     @frames = 0
     @last_t = 0.0
     @fps = 0.0
@@ -1296,6 +1491,13 @@ class Compositor
     end
     mx = e.get("offsetX")
     my = e.get("offsetY")
+    # An open menu captures hover so its highlight tracks the pointer and a
+    # slide-over onto a parent submenu opener auto-switches the open submenu.
+    # We do not forward to clients while a menu is up.
+    if @menu
+      handle_menu_hover(mx, my)
+      return
+    end
     # No drag in progress. A panel (the dock) receives pointer events on
     # geometric HOVER, not on focus — so its magnification tracks the cursor
     # without it ever being the keyboard-focused window. A hovered panel wins
@@ -1321,26 +1523,34 @@ class Compositor
     hit
   end
 
+  # Right-click context menu. Two shapes:
+  #   - over a window: a small per-window menu (Raise/Close), built directly
+  #     as a Menu instance so the same draw/hit-test path serves it.
+  #   - over the empty desktop: the Openbox-style hierarchical RootMenu
+  #     (Applications, Workspaces, About/Reload/Exit) built from the WM's
+  #     LAUNCHABLE registry + workspace count.
+  # Right-click over a panel (the dock) is swallowed — the dock's own client
+  # turns a right-click on an iconbar entry into a `close` wire message and
+  # we must not double-open a desktop menu underneath it.
   def on_contextmenu(e)
     e.call("preventDefault")
     mx = e.get("offsetX")
     my = e.get("offsetY")
-    # A right-click that hovers a panel (the dock) is handled by the panel's
-    # client — the dock turns a right-click on a window-iconbar entry into a
-    # `close` wire message. Swallow it here so we do NOT also open the
-    # desktop menu underneath the dock.
     return if panel_at(mx, my)
     win = @wm.window_at(mx, my)
-    @menu = if win
-      { x: mx, y: my, items: [
-        ["Raise",  -> { @wm.focus(win) }],
-        ["Close",  -> { @wm.close(win) }],
-      ] }
+    if win
+      menu = Menu.new([
+        { label: "Raise", action: [:focus, win.id] },
+        { label: "Close", action: [:close, win.id] },
+      ])
+      @menu = { kind: :window, x: mx, y: my, menu: menu, win: win, hover: -1,
+                submenu_idx: -1, submenu: nil, submenu_x: 0, submenu_y: 0,
+                submenu_hover: -1 }
     else
-      { x: mx, y: my, items: [
-        ["New window", -> { @wm.spawn("xterm ##{@wm.windows.length + 1}") }],
-        ["New window (wide)", -> { w = @wm.spawn("editor", 320, 200) }],
-      ] }
+      menu = RootMenu.build(@wm)
+      @menu = { kind: :root, x: mx, y: my, menu: menu, hover: -1,
+                submenu_idx: -1, submenu: nil, submenu_x: 0, submenu_y: 0,
+                submenu_hover: -1 }
     end
   end
 
@@ -1360,21 +1570,146 @@ class Compositor
     forward_key_to_client(win, "keydown", e) if win&.external?
   end
 
-  MENU_ITEM_H = 22
-  MENU_W = 150
+  # Resolve a (mx, my) click against the currently-open menu (parent + an
+  # optional open submenu). Returns a Hash:
+  #   { in_submenu: bool, idx: int (or -1) }
+  # When the open submenu is non-nil, its rectangle takes priority over the
+  # parent's rectangle (a stale click in the parent under a submenu must hit
+  # the submenu, not the parent).
+  def menu_resolve(mx, my)
+    state = @menu
+    if state[:submenu]
+      sub = state[:submenu]
+      sx = state[:submenu_x]
+      sy = state[:submenu_y]
+      sidx = sub.hit_test(sx, sy, mx, my)
+      return { in_submenu: true, idx: sidx } if sidx >= 0
+      # Outside the submenu? Fall through to the parent.
+    end
+    pidx = state[:menu].hit_test(state[:x], state[:y], mx, my)
+    { in_submenu: false, idx: pidx }
+  end
 
   def handle_menu_click(mx, my)
-    items = @menu[:items]
-    x = @menu[:x]
-    y = @menu[:y]
-    if mx >= x && mx < x + MENU_W && my >= y && my < y + items.length * MENU_ITEM_H
-      idx = (my - y) / MENU_ITEM_H
-      items[idx][1].call
-      # Menu actions (Raise/Close/New window) reshape the windows list — push a
-      # refreshed snapshot to the dock so its iconbar follows.
-      notify_windows_changed
+    state = @menu
+    res = menu_resolve(mx, my)
+    if res[:idx] < 0
+      # Clicked outside both menus: dismiss without firing anything.
+      @menu = nil
+      return
     end
+    if res[:in_submenu]
+      entry = state[:submenu].entries[res[:idx]]
+      dispatch_menu_action(entry[:action])
+      @menu = nil
+      return
+    end
+    entry = state[:menu].entries[res[:idx]]
+    if entry[:submenu]
+      # Parent entry with a submenu: ensure the matching submenu is open. We
+      # do NOT toggle on repeat click because the hover handler (on_mousemove)
+      # already opens the submenu when the pointer arrives on a parent row
+      # (sliding feel); a click that follows would otherwise close it. The
+      # action is idempotent: clicking a parent always leaves its submenu
+      # open, ready for the user to dive in.
+      if state[:submenu_idx] != res[:idx]
+        state[:submenu_idx] = res[:idx]
+        state[:submenu] = entry[:submenu]
+        state[:submenu_x] = state[:x] + Menu::WIDTH - 1
+        state[:submenu_y] = state[:menu].entry_top(state[:y], res[:idx])
+        state[:submenu_hover] = -1
+      end
+      return
+    end
+    dispatch_menu_action(entry[:action])
     @menu = nil
+  end
+
+  # Hover tracking: a mousemove inside the menu region highlights the entry
+  # under the pointer (Openbox-style) — both parent and any open submenu. Used
+  # only for the visual feedback; the actual action fires on click. Returns
+  # truthy when the event was consumed (no further forwarding to clients).
+  def handle_menu_hover(mx, my)
+    state = @menu
+    if state[:submenu]
+      sub = state[:submenu]
+      sidx = sub.hit_test(state[:submenu_x], state[:submenu_y], mx, my)
+      state[:submenu_hover] = sidx
+      if sidx >= 0
+        state[:hover] = state[:submenu_idx]
+        return true
+      end
+    end
+    pidx = state[:menu].hit_test(state[:x], state[:y], mx, my)
+    state[:hover] = pidx
+    # Sliding the pointer onto a different parent submenu opener swaps the
+    # open submenu so the menu feels live (matches every desktop env's UX).
+    if pidx >= 0
+      entry = state[:menu].entries[pidx]
+      if entry[:submenu] && state[:submenu_idx] != pidx
+        state[:submenu_idx] = pidx
+        state[:submenu] = entry[:submenu]
+        state[:submenu_x] = state[:x] + Menu::WIDTH - 1
+        state[:submenu_y] = state[:menu].entry_top(state[:y], pidx)
+        state[:submenu_hover] = -1
+      end
+    end
+    pidx >= 0 || state[:submenu] != nil
+  end
+
+  # Dispatch a [tag, arg] action tuple. Menu entries carry their effect as
+  # plain data (no Proc — Procs are awkward to reach from rbtest, and the
+  # WM is the source of truth for what an action actually does). The
+  # Compositor maps the tuple back onto its JS-touching helpers.
+  def dispatch_menu_action(act)
+    return nil unless act.is_a?(Array)
+    tag = act[0]
+    arg = act[1]
+    case tag
+    when :launch
+      do_launch(arg.to_s)
+    when :workspace
+      changed = @wm.set_workspace(arg.to_i)
+      if changed
+        notify_workspace_changed
+        notify_windows_changed
+      end
+    when :focus
+      win = @wm.find(arg.to_i)
+      if win
+        @wm.focus(win)
+        notify_windows_changed
+      end
+    when :close
+      win = @wm.find(arg.to_i)
+      if win
+        @wm.close(win)
+        notify_closed(win, "user")
+        notify_windows_changed
+      end
+    when :noop
+      # About / Reload / Exit are dismiss-only in v0: the click closes the
+      # menu (already done by the caller setting @menu = nil) and does
+      # nothing else. arg names which entry was clicked, for log
+      # introspection from Playwright.
+      nil
+    end
+  end
+
+  # Apply a validated launch by app id: route the LAUNCHABLE descriptor to
+  # the matching JS spawner, exactly mirroring the :launch arm of
+  # route_worker_message. Unknown ids are dropped (the menu's Applications
+  # submenu only lists wm.launchable? ids, so this is defence in depth).
+  def do_launch(app)
+    return nil unless @wm.launchable?(app)
+    url = @wm.launchable_url(app)
+    if !url.nil?
+      spawn_external(url)
+      return :launched
+    end
+    ref = @wm.launchable_oci(app)
+    spawn_external_oci(ref) unless ref.nil?
+    :launched
   end
 
   # --- rendering -----------------------------------------------------------
@@ -1548,16 +1883,50 @@ class Compositor
     win.clear_damage
   end
 
+  # Draw the open menu (and its open submenu, if any) onto the canvas. Both
+  # use the Theme::MENU_* palette: MENU_BG fill, MENU_BORDER 1-px frame,
+  # MENU_TEXT label ink, and MENU_HILITE band for the hovered row.
   def draw_menu
-    items = @menu[:items]
-    x = @menu[:x]
-    y = @menu[:y]
-    h = items.length * MENU_ITEM_H
-    fill_rect([x, y, MENU_W, h], Theme::MENU_BG)
-    stroke_rect([x, y, MENU_W, h], Theme::MENU_BORDER, 1)
-    items.each_with_index do |(label, _action), i|
-      iy = y + i * MENU_ITEM_H
-      text(label, x + 8, iy + 15, Theme::MENU_TEXT)
+    state = @menu
+    draw_menu_panel(state[:menu], state[:x], state[:y], state[:hover],
+                    state[:submenu_idx])
+    if state[:submenu]
+      draw_menu_panel(state[:submenu], state[:submenu_x], state[:submenu_y],
+                      state[:submenu_hover], -1)
+    end
+  end
+
+  # Render a single menu panel at (x, y) with `hover` highlighted (-1 = no
+  # highlight) and `open_sub_idx` showing the entry whose submenu is open
+  # (drawn highlighted too, so the user can read the parent path at a glance).
+  def draw_menu_panel(menu, x, y, hover, open_sub_idx)
+    h = menu.height
+    fill_rect([x, y, Menu::WIDTH, h], Theme::MENU_BG)
+    stroke_rect([x, y, Menu::WIDTH, h], Theme::MENU_BORDER, 1)
+    menu.each_row(y) do |entry, row_y, row_h, i|
+      if entry[:separator]
+        # A thin divider centered vertically in its SEP_H band — same colour
+        # as the frame so it reads as a hairline. We inset by Menu::PAD_X on
+        # each side so the line never touches the menu's vertical border.
+        mid = row_y + row_h / 2
+        @ctx.set("strokeStyle", Theme::MENU_BORDER)
+        @ctx.set("lineWidth", 1)
+        @ctx.call("beginPath")
+        @ctx.call("moveTo", x + Menu::PAD_X,                 mid + 0.5)
+        @ctx.call("lineTo", x + Menu::WIDTH - Menu::PAD_X,   mid + 0.5)
+        @ctx.call("stroke")
+        next
+      end
+      # Highlight the hovered row OR the row whose submenu is currently open.
+      if i == hover || i == open_sub_idx
+        fill_rect([x + 1, row_y, Menu::WIDTH - 2, row_h], Theme::MENU_HILITE)
+      end
+      text(entry[:label].to_s, x + Menu::PAD_X, row_y + row_h - 8, Theme::MENU_TEXT)
+      if entry[:submenu]
+        # Right-aligned chevron — render with the same MENU_TEXT colour as
+        # the label so it reads cleanly on both the bg and the hilite band.
+        text(">", x + Menu::WIDTH - Menu::PAD_X - 6, row_y + row_h - 8, Theme::MENU_TEXT)
+      end
     end
   end
 

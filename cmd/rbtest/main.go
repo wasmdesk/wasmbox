@@ -534,5 +534,126 @@ assert(wmw9.focused.nil?, "minimize on a workspace with only one window leaves n
 wmw9.set_workspace(1)
 assert(wmw9.focused.equal?(mb), "ws 1 still has mb focused after the round trip")
 
+# ---- Menu: shape + hit_test + entry_top ------------------------------
+flat = Menu.new([
+  { label: "Raise", action: [:focus, 42] },
+  { label: "Close", action: [:close, 42] },
+])
+assert_eq(flat.entries.length, 2, "flat menu has 2 entries")
+assert_eq(flat.height, 2 * Menu::ITEM_H, "flat menu height = 2 * ITEM_H")
+# hit_test inside / outside.
+assert_eq(flat.hit_test(0, 0, 10, 5), 0, "row 0 hit (inside first row)")
+assert_eq(flat.hit_test(0, 0, 10, Menu::ITEM_H + 5), 1, "row 1 hit (inside second row)")
+assert_eq(flat.hit_test(0, 0, 10, -1), -1, "above the menu is -1")
+assert_eq(flat.hit_test(0, 0, 10, 2 * Menu::ITEM_H + 1), -1, "below the menu is -1")
+assert_eq(flat.hit_test(0, 0, -1, 5), -1, "left of menu is -1")
+assert_eq(flat.hit_test(0, 0, Menu::WIDTH, 5), -1, "right of menu is -1 (half-open)")
+assert_eq(flat.hit_test(100, 200, 110, 200 + Menu::ITEM_H + 1), 1,
+          "hit_test honours pop-up origin")
+# entry_top tracks cumulative row offsets.
+assert_eq(flat.entry_top(0, 0), 0, "entry_top(0)")
+assert_eq(flat.entry_top(0, 1), Menu::ITEM_H, "entry_top(1) = ITEM_H")
+assert_eq(flat.entry_top(50, 1), 50 + Menu::ITEM_H, "entry_top honours y origin")
+
+# ---- Menu: separator ------------------------------------------------
+withsep = Menu.new([
+  { label: "A", action: [:noop, "a"] },
+  { separator: true },
+  { label: "B", action: [:noop, "b"] },
+])
+assert_eq(withsep.height, 2 * Menu::ITEM_H + Menu::SEP_H,
+          "separator counted as SEP_H not ITEM_H")
+# Hit_test on the separator returns -1 (not selectable); hit on the next row
+# correctly maps to entry index 2 (not 1) because separators consume index slots.
+assert_eq(withsep.hit_test(0, 0, 10, Menu::ITEM_H + 1), -1,
+          "hit on separator row is -1")
+assert_eq(withsep.hit_test(0, 0, 10, Menu::ITEM_H + Menu::SEP_H + 1), 2,
+          "row after separator is index 2")
+
+# ---- RootMenu.build: top-level shape --------------------------------
+wmr = WindowManager.new
+root = RootMenu.build(wmr)
+assert(root.is_a?(Menu), "RootMenu.build returns a Menu")
+labels = root.entries.map { |e| e[:label] }
+assert_eq(labels[0], "Applications", "top-level[0] = Applications")
+assert_eq(labels[1], "Workspaces",   "top-level[1] = Workspaces")
+# Top-level row 2 is the separator (no label).
+assert_eq(root.entries[2][:separator], true, "top-level[2] is a separator")
+assert_eq(labels[3], "About wasmbox", "top-level[3] = About wasmbox")
+assert_eq(labels[4], "Reload",        "top-level[4] = Reload")
+assert_eq(labels[5], "Exit",          "top-level[5] = Exit")
+# Applications + Workspaces carry a submenu.
+assert(root.entries[0][:submenu].is_a?(Menu), "Applications carries a submenu")
+assert(root.entries[1][:submenu].is_a?(Menu), "Workspaces carries a submenu")
+# About/Reload/Exit each carry a :noop action (dismiss-only in v0).
+assert_eq(root.entries[3][:action][0], :noop, "About is a :noop action")
+assert_eq(root.entries[4][:action][0], :noop, "Reload is a :noop action")
+assert_eq(root.entries[5][:action][0], :noop, "Exit is a :noop action")
+
+# ---- RootMenu.build: Applications submenu lists LAUNCHABLE -----------
+apps = root.entries[0][:submenu]
+app_actions = apps.entries.map { |e| e[:action] }
+# Every Applications entry is a [:launch, "<id>"] tuple — no separators here.
+apps.entries.each do |e|
+  assert(e.has_key?(:action), "every Applications entry has an action")
+  assert_eq(e[:action][0], :launch, "every Applications action is :launch")
+  assert(wmr.launchable?(e[:action][1]), "every Applications id is in LAUNCHABLE")
+end
+# Specific labels we curate are present.
+app_labels = apps.entries.map { |e| e[:label] }
+assert(app_labels.include?("Terminal"), "Applications includes Terminal")
+assert(app_labels.include?("Editor"),   "Applications includes Editor")
+assert(app_labels.include?("Files"),    "Applications includes Files")
+assert(app_labels.include?("Hello (wasm)"), "Applications includes Hello (wasm)")
+assert(app_labels.include?("Quake"),    "Applications includes Quake")
+# The hidden hello-oci id is NOT exposed (probe-only).
+assert(!app_labels.include?("Hello (OCI)"),
+       "Applications hides hello-oci (probe-only id)")
+# Cardinality matches LAUNCHABLE minus the HIDDEN set.
+expected_apps = 0
+WindowManager::LAUNCHABLE.each do |id, _desc|
+  expected_apps += 1 unless RootMenu::HIDDEN.include?(id)
+end
+assert_eq(apps.entries.length, expected_apps,
+          "Applications has one entry per non-hidden LAUNCHABLE id")
+
+# ---- RootMenu.build: Workspaces submenu --------------------------------
+ws = root.entries[1][:submenu]
+assert_eq(ws.entries.length, wmr.workspace_count,
+          "Workspaces has one entry per workspace")
+assert_eq(ws.entries.length, 4, "Workspaces has 4 entries (default WORKSPACE_COUNT)")
+ws.entries.each_with_index do |e, i|
+  assert_eq(e[:label], "Workspace #{i + 1}", "Workspaces[#{i}].label")
+  assert_eq(e[:action][0], :workspace, "Workspaces[#{i}].action[0] = :workspace")
+  assert_eq(e[:action][1], i + 1, "Workspaces[#{i}].action[1] = #{i + 1}")
+end
+
+# ---- RootMenu: workspaces submenu reflects wm.workspace_count ----------
+# RootMenu.build_workspaces is independent of build() so a future change to
+# workspace_count is honoured without rebuilding the top-level menu.
+ws_direct = RootMenu.build_workspaces(wmr)
+assert_eq(ws_direct.entries.length, 4, "build_workspaces honours workspace_count")
+
+# ---- RootMenu: known action tuples are well-formed ---------------------
+# Terminal must dispatch a launch of the "terminal" id (the click handler in
+# the Compositor reads action[1] and routes through launchable_url, so the
+# id MUST match a LAUNCHABLE key).
+term_entry = apps.entries.find { |e| e[:label] == "Terminal" }
+assert(!term_entry.nil?, "Terminal entry found")
+assert_eq(term_entry[:action][1], "terminal", "Terminal action id = 'terminal'")
+assert(wmr.launchable?(term_entry[:action][1]), "Terminal action id is launchable")
+# Workspace 3 entry: action tuple ends in 3.
+ws3_entry = ws.entries.find { |e| e[:label] == "Workspace 3" }
+assert(!ws3_entry.nil?, "Workspace 3 entry found")
+assert_eq(ws3_entry[:action][1], 3, "Workspace 3 action ws index = 3")
+
+# ---- LAUNCHABLE additions: hello + quake ---------------------------
+assert(wmr.launchable?("hello"), "hello is launchable (was added for the root menu)")
+assert(wmr.launchable?("quake"), "quake is launchable (was added for the root menu)")
+assert_eq(wmr.launchable_url("hello"), "clients/hello/worker.js",
+          "hello maps to the bundled hello worker")
+assert_eq(wmr.launchable_url("quake"), "clients/quake/worker.js",
+          "quake maps to the bundled quake worker")
+
 puts "rbtest: ran all pure-WM assertions"
 `
