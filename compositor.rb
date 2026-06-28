@@ -1852,6 +1852,13 @@ class Compositor
     return if panel_at(mx, my)
     win = @wm.window_at(mx, my)
     if win
+      # A right-click inside an external client's BODY belongs to the client: it
+      # already receives the forwarded button-2 mousedown and shows its OWN
+      # context menu (e.g. Files' New Folder / Rename). Opening a compositor menu
+      # here too would stack two menus on the same click — the reported bug. The
+      # compositor's window menu is offered only on the DECORATION (titlebar /
+      # frame), so the two never collide.
+      return if win.external? && win.hit?(win.body_rect, mx, my)
       menu = Menu.new([
         { label: "Raise", action: [:focus, win.id] },
         { label: "Close", action: [:close, win.id] },
