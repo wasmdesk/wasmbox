@@ -57,13 +57,22 @@ const B = globalThis.WASMBOX_BRIDGE;
 // is identical -- spawnFromOCI just builds the Worker differently.
 //
 // Registries:
-//   The default is a single registry at http://127.0.0.1:5000 (matching the
-//   Taskfile oci-registry-up demo). Override either by setting
-//     globalThis.WASMBOX_OCI_REGISTRIES = [{url:"https://r1"},{url:"https://r2"}]
-//   from index.html / the compositor bootstrap BEFORE the worker boots, or
-//   by passing the M2C_BOOT message a `registries` field. We refresh the
+//   The default is a SAME-ORIGIN static OCI registry served beside the
+//   desktop: the loader GETs <base>/v2/<repo>/manifests|blobs, where <base>
+//   is the directory this worker was loaded from. Same-origin means no CORS,
+//   no token and no proxy — which is the whole reason the artifacts are
+//   mirrored next to the page (GitHub Pages) instead of pulled from ghcr,
+//   which sends no CORS headers and so cannot be read cross-origin in a
+//   browser. The base resolves correctly both at http://localhost:8080/ and
+//   at https://<org>.github.io/<repo>/ with no configuration.
+//
+//   For the local live-registry dev flow (the Taskfile registry on :5000),
+//   override by setting, BEFORE the worker boots,
+//     globalThis.WASMBOX_OCI_REGISTRIES = [{url:"http://127.0.0.1:5000"}]
+//   or by passing the M2C_BOOT message a `registries` field. We refresh the
 //   loader lazily on first spawnFromOCI so a late assignment is honoured.
-const DEFAULT_OCI_REGISTRIES = [{ url: "http://127.0.0.1:5000" }];
+const SAME_ORIGIN_OCI_BASE = new URL(".", self.location.href).href.replace(/\/+$/, "");
+const DEFAULT_OCI_REGISTRIES = [{ url: SAME_ORIGIN_OCI_BASE }];
 
 let _ociLoader = null;
 function ociLoader() {
@@ -380,22 +389,39 @@ globalThis.wasmboxSpawnFromOCI = async function (ref) {
 // Build an ImageData of size w*h plus a non-shared backing copy that the blit
 // helper reads from. Identical to the step-A/B helper that used to live in
 // index.html -- moved here because the canvas now lives in the worker.
-globalThis.wasmboxNewImageData = function (sab, w, h) {
+globalThis.wasmboxNewImageData = function (sab, w, h, ctl) {
   return {
     image: new ImageData(w, h),
     src:   new Uint8ClampedArray(sab),
+    // Seqlock control word, if the client supplied one (older clients send no
+    // `ctl` -> seq null -> the fence is a no-op and we blit as before).
+    seq:   ctl ? new Int32Array(ctl) : null,
     w: w, h: h,
   };
 };
 
 globalThis.wasmboxBlitFromSAB = function (ctx, slot, dx, dy, sx, sy, sw, sh) {
   const stride = slot.w * 4;
+  // Seqlock read (when the client published a control word): an ODD seq means
+  // the client is mid-paint; a seq that changes across our copy means it wrote
+  // while we read (a torn copy). In either case skip this frame's blit — the
+  // canvas keeps the last complete frame, and the per-frame re-composite retries
+  // next raf once the client has committed (seq even, stable). Never show a
+  // half-painted surface.
+  let s1 = 0;
+  if (slot.seq) {
+    s1 = Atomics.load(slot.seq, 0);
+    if (s1 & 1) return;
+  }
   const dst = slot.image.data;
   for (let row = 0; row < sh; row++) {
     const srcOff = (sy + row) * stride + sx * 4;
     const dstOff = (sy + row) * stride + sx * 4;
     dst.set(slot.src.subarray(srcOff, srcOff + sw * 4), dstOff);
   }
+  // The copy landed in our private ImageData; only present it if the client did
+  // not write during the copy (so a torn copy is discarded, never blitted).
+  if (slot.seq && Atomics.load(slot.seq, 0) !== s1) return;
   // Per-slot OffscreenCanvas for the source-over composite (so the dock's
   // transparent corners do not paint black). Identical to the main-thread
   // version, just using OffscreenCanvas instead of an HTMLCanvasElement.
@@ -620,15 +646,23 @@ async function bootWasm() {
     // Auto-spawn the same demo clients as the old index.html did, so a page
     // load still ends with a populated desktop.
     globalThis.wasmboxSpawnExternal("clients/hello/worker.js");
-    autoSpawnIfPresent("clients/quake/worker.js");
+    // Quake is a heavy, build-time-only client (built by `task build:quake`
+    // from the go-quake1 sibling, not the default `task build`). Its worker.js
+    // is committed, so gate on the .wasm it loads — otherwise the worker boots
+    // and throws an uncaught WebAssembly compile error when quake.wasm 404s.
+    autoSpawnIfPresent("clients/quake/worker.js", "clients/quake/quake.wasm");
     autoSpawnIfPresent("clients/dock/worker.js");
   } catch (e) {
     self.postMessage({ type: B.C2M_ERROR, message: String(e && e.stack ? e.stack : e) });
   }
 }
 
-function autoSpawnIfPresent(workerUrl) {
-  fetch(workerUrl, { method: "HEAD" })
+// autoSpawnIfPresent spawns workerUrl only if probeUrl is fetchable. probeUrl
+// defaults to workerUrl, but pass the app's .wasm when worker.js is committed
+// yet its wasm is built on demand (e.g. quake) — worker.js being present does
+// not mean the client can actually boot.
+function autoSpawnIfPresent(workerUrl, probeUrl) {
+  fetch(probeUrl || workerUrl, { method: "HEAD" })
     .then((r) => { if (r.ok) globalThis.wasmboxSpawnExternal(workerUrl); })
     .catch(() => {});
 }

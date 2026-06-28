@@ -3,6 +3,12 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
+<!-- Establish cross-origin isolation (COOP/COEP) so SharedArrayBuffer is
+     available even on a static host that can't set headers (e.g. GitHub
+     Pages). Must run before anything that touches SharedArrayBuffer. On a
+     server that already sends the headers (cmd/serve) this is a harmless
+     no-op: crossOriginIsolated is already true, so it never registers. -->
+<script src="coi-serviceworker.js"></script>
 <title>rbgo compositor · a Ruby-written window manager in your browser</title>
 <style>
   html, body { margin: 0; height: 100%; background: #0b0d12; color: #e6e7ee;
