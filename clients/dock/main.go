@@ -20,9 +20,11 @@ package main
 
 import (
 	"encoding/json"
+	"strings"
 	"syscall/js"
 
 	"github.com/wasmdesk/wasmbox/clients/dock/internal/scene"
+	"github.com/wasmdesk/wasmbox/clients/dock/internal/theme"
 )
 
 func main() {
@@ -216,6 +218,26 @@ func main() {
 			if !ws.IsUndefined() && !ws.IsNull() {
 				state.SetWorkspace(ws.String())
 			}
+			render()
+		case "theme_changed":
+			// Compositor broadcasts the new active theme to every panel after
+			// a successful set_theme. The payload carries `name` (display
+			// label, for future "active theme" indicators) and `themerc`
+			// (the raw .themerc source — we re-parse it locally rather than
+			// reading individual fields off JS so a future theme attribute
+			// is one parser change here, not a wire-shape change). Unknown
+			// names + empty .themerc are dropped silently; the dock keeps
+			// its previous theme.
+			rc := ev.Get("themerc")
+			if rc.IsUndefined() || rc.IsNull() {
+				break
+			}
+			src := rc.String()
+			if strings.TrimSpace(src) == "" {
+				break
+			}
+			th, _ := theme.ParseRC(strings.NewReader(src))
+			state.SetTheme(th)
 			render()
 		}
 		return nil

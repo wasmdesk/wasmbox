@@ -1,0 +1,37 @@
+! fluxbox-dark — Fluxbox-classic palette inverted for a dark desktop.
+! Title backgrounds use a near-black vertical gradient (#2a2a2a → #1a1a1a),
+! light-gray ink (#e0e0e0), and a charcoal border (#505050). The OSD face
+! is a slightly lighter dark (#303030) to set the clock readout apart from
+! the iconbar.
+
+border.color:   #505050
+border.width:   1
+padding.width:  1
+padding.height: 1
+
+window.active.title.bg:           vertical flat
+window.active.title.bg.color:     #2a2a2a
+window.active.title.bg.colorTo:   #1a1a1a
+window.active.label.text.color:   #f0f0f0
+window.active.label.text.font:    sans 9
+
+window.inactive.title.bg:         vertical flat
+window.inactive.title.bg.color:   #1a1a1a
+window.inactive.title.bg.colorTo: #1a1a1a
+window.inactive.label.text.color: #b0b0b0
+window.inactive.label.text.font:  sans 9
+
+menu.title.bg:           flat
+menu.title.bg.color:     #2a2a2a
+menu.title.text.color:   #f0f0f0
+menu.title.text.font:    sans 9
+
+menu.items.bg:           flat
+menu.items.bg.color:     #1f1f1f
+menu.items.text.color:   #e0e0e0
+menu.items.text.font:    sans 9
+
+osd.bg:                  flat
+osd.bg.color:            #303030
+osd.label.text.color:    #f0f0f0
+osd.label.text.font:     sans 9

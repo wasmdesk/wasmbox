@@ -227,6 +227,11 @@ func (s *State) SetCursor(x, y int, inside bool) {
 // SetClock records the latest "HH:MM" clock string posted by the worker.
 func (s *State) SetClock(t string) { s.Clock = t }
 
+// SetTheme swaps in a new Openbox-compatible theme. The next Render call
+// repaints every section with the new colours / gradients. Pure data; the
+// caller (dock main.go) decides when to trigger a repaint.
+func (s *State) SetTheme(th theme.Theme) { s.Theme = th }
+
 // SetWorkspace records the active workspace label ("1", "2", ...). Kept as
 // a legacy entry point for the `tick` event payload (worker.js may post
 // a `workspace` field opportunistically). The numeric model is the

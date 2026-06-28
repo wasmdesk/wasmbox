@@ -312,6 +312,111 @@ class WindowManager
   # workspaces, so hiding it with the windows would be a usability bug.
   WORKSPACE_COUNT = 4
 
+  # THEMES is the trust boundary for the `set_theme` protocol message: a
+  # client can only switch to a name in this map. The value is the raw
+  # Openbox `.themerc` source the panel will re-parse Go-side. The same
+  # three names are mirrored by wasmdock/internal/theme.Builtin() so the
+  # dock can paint them locally (it never depends on the Ruby copy reaching
+  # it — the wire ships the full .themerc so the dock and compositor agree
+  # on the bytes). Keep insertion order: it defines the root-menu ordering.
+  #
+  # Adding a new theme here:
+  #   1. Ship the `.themerc` text in BOTH wasmdock/internal/theme/themes/ AND
+  #      wasmbox/clients/dock/internal/theme/themes/ (Go side builds the
+  #      bundle from there).
+  #   2. Add an entry here with the SAME text.
+  #   3. The root menu's Theme submenu picks it up automatically (build_themes
+  #      below iterates THEMES). NO compositor.rb code change beyond this map.
+  THEMES = {
+    "Fluxbox Light" => <<~RC,
+      border.color:   #4a4a4a
+      border.width:   1
+      padding.width:  1
+      padding.height: 1
+      window.active.title.bg:           vertical flat
+      window.active.title.bg.color:     #c8c8c8
+      window.active.title.bg.colorTo:   #909090
+      window.active.label.text.color:   #1a1a1a
+      window.active.label.text.font:    sans 9
+      window.inactive.title.bg:         vertical flat
+      window.inactive.title.bg.color:   #909090
+      window.inactive.title.bg.colorTo: #909090
+      window.inactive.label.text.color: #202020
+      window.inactive.label.text.font:  sans 9
+      menu.title.bg:           flat
+      menu.title.bg.color:     #c8c8c8
+      menu.title.text.color:   #1a1a1a
+      menu.title.text.font:    sans 9
+      menu.items.bg:           flat
+      menu.items.bg.color:     #d0d0d0
+      menu.items.text.color:   #1a1a1a
+      menu.items.text.font:    sans 9
+      osd.bg:                  flat
+      osd.bg.color:            #d0d0d0
+      osd.label.text.color:    #1a1a1a
+      osd.label.text.font:     sans 9
+    RC
+    "Fluxbox Dark" => <<~RC,
+      border.color:   #505050
+      border.width:   1
+      padding.width:  1
+      padding.height: 1
+      window.active.title.bg:           vertical flat
+      window.active.title.bg.color:     #2a2a2a
+      window.active.title.bg.colorTo:   #1a1a1a
+      window.active.label.text.color:   #f0f0f0
+      window.active.label.text.font:    sans 9
+      window.inactive.title.bg:         vertical flat
+      window.inactive.title.bg.color:   #1a1a1a
+      window.inactive.title.bg.colorTo: #1a1a1a
+      window.inactive.label.text.color: #b0b0b0
+      window.inactive.label.text.font:  sans 9
+      menu.title.bg:           flat
+      menu.title.bg.color:     #2a2a2a
+      menu.title.text.color:   #f0f0f0
+      menu.title.text.font:    sans 9
+      menu.items.bg:           flat
+      menu.items.bg.color:     #1f1f1f
+      menu.items.text.color:   #e0e0e0
+      menu.items.text.font:    sans 9
+      osd.bg:                  flat
+      osd.bg.color:            #303030
+      osd.label.text.color:    #f0f0f0
+      osd.label.text.font:     sans 9
+    RC
+    "GNOME Adwaita" => <<~RC,
+      border.color:   #c0c0c0
+      border.width:   1
+      padding.width:  1
+      padding.height: 1
+      window.active.title.bg:           vertical flat
+      window.active.title.bg.color:     #3584e4
+      window.active.title.bg.colorTo:   #1c71d8
+      window.active.label.text.color:   #ffffff
+      window.active.label.text.font:    sans 9
+      window.inactive.title.bg:         flat
+      window.inactive.title.bg.color:   #fafafa
+      window.inactive.title.bg.colorTo: #fafafa
+      window.inactive.label.text.color: #2e2e2e
+      window.inactive.label.text.font:  sans 9
+      menu.title.bg:           flat
+      menu.title.bg.color:     #3584e4
+      menu.title.text.color:   #ffffff
+      menu.title.text.font:    sans 9
+      menu.items.bg:           flat
+      menu.items.bg.color:     #fafafa
+      menu.items.text.color:   #2e2e2e
+      menu.items.text.font:    sans 9
+      osd.bg:                  flat
+      osd.bg.color:            #ffffff
+      osd.label.text.color:    #2e2e2e
+      osd.label.text.font:     sans 9
+    RC
+  }.freeze
+
+  # Default theme picked at boot. Must be a key in THEMES.
+  DEFAULT_THEME = "Fluxbox Light"
+
   def initialize
     @stack = []
     @next_id = 0
@@ -335,12 +440,48 @@ class WindowManager
     # render + windows_snapshot filter to this number.
     @active_workspace = 1
     @workspace_count = WORKSPACE_COUNT
+    # Currently active theme (a key in THEMES). The Ruby-side Theme module
+    # still owns the compositor's own decoration colours; this field tracks
+    # which Openbox theme the panel + future Ruby-side restyling honour. The
+    # root-menu Theme submenu mutates it via set_theme; the Compositor
+    # broadcasts the new theme back to panels via notify_theme_changed.
+    @active_theme = DEFAULT_THEME
   end
 
   # Active workspace accessor; the dock reads it via the `workspace_changed`
   # event payload, tests read it directly.
   def active_workspace = @active_workspace
   def workspace_count  = @workspace_count
+
+  # Active-theme accessor. Returns a key in THEMES (DEFAULT_THEME until
+  # set_theme has accepted a different name). Tests read it directly; the
+  # root menu reads it to render the `*` active-marker.
+  def active_theme = @active_theme
+
+  # Switch the active theme. Returns the new name on success, nil if `name`
+  # is not a known theme or is already active (caller skips notify on nil
+  # so the dock does not spin on no-ops). Pure data — the Compositor calls
+  # notify_theme_changed when this returns non-nil.
+  def set_theme(name)
+    return nil unless name.is_a?(String)
+    return nil unless THEMES.key?(name)
+    return nil if name == @active_theme
+    @active_theme = name
+  end
+
+  # Raw .themerc source for a known theme name, or nil for an unknown one.
+  # The Compositor's notify_theme_changed ships this verbatim so the panel
+  # re-parses it locally with the SAME bytes the bundled Go-side themes
+  # carry (which keeps the Go + Ruby views of "Fluxbox Light" in lockstep).
+  def theme_source(name)
+    THEMES[name]
+  end
+
+  # Known theme names in insertion order. The root menu reads this to build
+  # its Theme submenu. Returns a fresh array.
+  def theme_names
+    THEMES.keys
+  end
 
   # Switch the active workspace to n (1..workspace_count). Returns the new
   # active workspace on a real change, nil when n is out of range or already
@@ -488,6 +629,13 @@ class WindowManager
   # panels are always-on-top: a new normal window can never raise above a panel.
   def panels
     @stack.select { |w| w.panel? }
+  end
+
+  # Every external client (panel + normal) in the stack. Used by the
+  # Compositor to broadcast desktop-wide events (e.g. theme_changed) to any
+  # client that opted in to follow them. Bottom-to-top stack order.
+  def externals
+    @stack.select { |w| w.external? }
   end
 
   # Open popup surfaces (menus / tooltips), bottom-to-top. The pointer is
@@ -824,6 +972,13 @@ class WindowManager
       idx = idx.to_i if !idx.is_a?(Integer) && !idx.nil?
       changed = set_workspace(idx)
       changed.nil? ? :ignored : :workspace_changed
+    when "set_theme"
+      # The dock (or the root-menu Theme submenu via dispatch_menu_action)
+      # asks to switch the active Openbox theme. An unknown name or the
+      # already-active name is dropped (set_theme returns nil); the caller
+      # skips notify_theme_changed on :ignored so the panel does not spin.
+      changed = set_theme(msg[:name].to_s)
+      changed.nil? ? :ignored : :theme_changed
     when "move_window"
       # Reserved for v1: drag a window to another workspace via the dock. The
       # wire shape `{type:"move_window", window_id:, workspace:}` updates
@@ -1008,11 +1163,12 @@ module RootMenu
   # demo, not a user-facing app.
   HIDDEN = ["hello-oci"].freeze
 
-  # Compose the apps + workspaces submenus and the top-level menu.
+  # Compose the apps + workspaces + themes submenus and the top-level menu.
   def self.build(wm)
     Menu.new([
       { label: "Applications", submenu: build_apps(wm) },
       { label: "Workspaces",   submenu: build_workspaces(wm) },
+      { label: "Theme",        submenu: build_themes(wm) },
       { separator: true },
       { label: "About wasmbox", action: [:noop, "about"] },
       { label: "Reload",        action: [:noop, "reload"] },
@@ -1051,6 +1207,19 @@ module RootMenu
     while i <= n
       rows << { label: "Workspace #{i}", action: [:workspace, i] }
       i += 1
+    end
+    Menu.new(rows)
+  end
+
+  # Build the Theme submenu. One entry per WindowManager::THEMES key, in
+  # insertion order. The currently active theme is prefixed with "* " so
+  # the user can see which one is live. Click action is [:theme, "<name>"]
+  # — dispatch_menu_action routes that into wm.set_theme + notify_theme_changed.
+  def self.build_themes(wm)
+    rows = []
+    wm.theme_names.each do |name|
+      label = (name == wm.active_theme) ? "* #{name}" : name
+      rows << { label: label, action: [:theme, name] }
     end
     Menu.new(rows)
   end
@@ -1262,6 +1431,11 @@ class Compositor
       # call.
       notify_workspace_changed
       notify_windows_changed
+    when :theme_changed
+      # The dock asked to switch the active theme. Broadcast the new theme
+      # to EVERY external client (the panel repaints with the new colours;
+      # other clients may opt in via the SDK's onInput hook).
+      notify_theme_changed
     end
   end
 
@@ -1353,6 +1527,33 @@ class Compositor
     JS.global.call("wasmboxPostMessage", panel.worker, payload)
   end
 
+  # Push the active theme to every external client as a `theme_changed`
+  # input event carrying the name + the raw .themerc source. The dock
+  # parses the .themerc locally with its bundled go-embed of the same file,
+  # so the bytes the compositor ships are authoritative. Fires on every
+  # successful set_theme transition. No-op when no external client is
+  # connected.
+  #
+  # We broadcast to EVERY external client — not just the panel — so future
+  # clients that want to follow the desktop theme can subscribe by reading
+  # the same `theme_changed` event. Today only the dock honours it; other
+  # clients silently ignore an unknown event kind.
+  def notify_theme_changed
+    src = @wm.theme_source(@wm.active_theme)
+    return nil if src.nil?
+    @wm.externals.each do |w|
+      next if w.worker.nil?
+      payload = JS.global.call("wasmboxMakeObject",
+        "type", "input",
+        "window_id", w.id,
+        "event", JS.global.call("wasmboxMakeObject",
+          "kind", "theme_changed",
+          "name", @wm.active_theme,
+          "themerc", src))
+      JS.global.call("wasmboxPostMessage", w.worker, payload)
+    end
+  end
+
   # Pull the protocol fields out of the JS message object. We hand a plain
   # Ruby Hash to handle_client_message so the dispatcher logic stays portable
   # and unit-testable off-wasm.
@@ -1361,10 +1562,10 @@ class Compositor
     type = data.get("type")
     return nil if type.nil?
     h = { type: type.to_s }
-    # Scalar fields. `index`/`workspace` are dock + workspace controls; `parent`
-    # + `rel_x` + `rel_y` carry popup placement (without them a popup hello would
-    # lose its anchor and land at (0,0)).
-    %w[window_id w h stride title role app index workspace parent rel_x rel_y].each do |k|
+    # Scalar fields. `index`/`workspace` are dock + workspace controls; `name`
+    # is the theme name for theme switching; `parent` + `rel_x` + `rel_y` carry
+    # popup placement (without them a popup hello would land at (0,0)).
+    %w[window_id w h stride title role app index workspace name parent rel_x rel_y].each do |k|
       v = data.get(k)
       h[k.to_sym] = v unless v.nil?
     end
@@ -1800,6 +2001,13 @@ class Compositor
         notify_workspace_changed
         notify_windows_changed
       end
+    when :theme
+      # Root-menu Theme entry clicked. Same effect as a `set_theme` wire
+      # message from the dock: switch the active theme + broadcast the
+      # `theme_changed` event so every panel repaints. An unknown name or
+      # the already-active name is dropped (set_theme returns nil).
+      changed = @wm.set_theme(arg.to_s)
+      notify_theme_changed if changed
     when :focus
       win = @wm.find(arg.to_i)
       if win

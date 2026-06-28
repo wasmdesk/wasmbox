@@ -1,0 +1,39 @@
+! fluxbox-light — the bevel-gray Fluxbox-classic look the dock ships with.
+! This file is the .themerc equivalent of theme.DefaultFluxboxLight() and is
+! the round-trip baseline for the .themerc parser (parse → Theme → same).
+!
+! Colour signature: light-gray vertical-gradient title backgrounds
+! (#c8c8c8 → #909090), near-black ink (#1a1a1a), 1-px mid-gray border
+! (#4a4a4a), 1×1 padding.
+
+border.color:   #4a4a4a
+border.width:   1
+padding.width:  1
+padding.height: 1
+
+window.active.title.bg:           vertical flat
+window.active.title.bg.color:     #c8c8c8
+window.active.title.bg.colorTo:   #909090
+window.active.label.text.color:   #1a1a1a
+window.active.label.text.font:    sans 9
+
+window.inactive.title.bg:         vertical flat
+window.inactive.title.bg.color:   #909090
+window.inactive.title.bg.colorTo: #909090
+window.inactive.label.text.color: #202020
+window.inactive.label.text.font:  sans 9
+
+menu.title.bg:           flat
+menu.title.bg.color:     #c8c8c8
+menu.title.text.color:   #1a1a1a
+menu.title.text.font:    sans 9
+
+menu.items.bg:           flat
+menu.items.bg.color:     #d0d0d0
+menu.items.text.color:   #1a1a1a
+menu.items.text.font:    sans 9
+
+osd.bg:                  flat
+osd.bg.color:            #d0d0d0
+osd.label.text.color:    #1a1a1a
+osd.label.text.font:     sans 9
