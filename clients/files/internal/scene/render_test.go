@@ -4,9 +4,19 @@
 
 package scene
 
-import "testing"
+import (
+	"testing"
+
+	"github.com/wasmdesk/wasmbox/clients/sharedvfs"
+)
 
 func newRGBA(w, h int) []byte { return make([]byte, 4*w*h) }
+
+// newEmptyVFS returns a fresh, unseeded in-memory VFS for tests that want
+// to drive the renderer against a minimal tree. Wraps sharedvfs.NewInMemoryVFS
+// so the renderer test layer does not have to know which concrete type the
+// VFS interface comes from.
+func newEmptyVFS() VFS { return sharedvfs.NewInMemoryVFS() }
 
 // pixelAt reads the RGBA32 sample at (x,y) from a w-wide buffer.
 func pixelAt(buf []byte, w, x, y int) [4]uint8 {
@@ -761,15 +771,141 @@ func TestRenderPaintsForegroundInBothPanes(t *testing.T) {
 	}
 }
 
+// paintContextMenu paints a panel background + a 1px stroke around the menu
+// region + one labelled row per item. We open a menu programmatically at a
+// known offset, render the full scene, and assert that:
+//
+//   - the panel BG (ColorButtonFace) fills the menu interior,
+//   - the stroke (ColorDivider) sits along the menu's top edge,
+//   - at least one item label paints primary-ink pixels inside the menu.
+func TestPaintContextMenuRender(t *testing.T) {
+	w, h := 720, 440
+	s := New(w, h)
+	s.openEntryMenu(200, 120, Entry{Name: "Documents"})
+	buf := newRGBA(w, h)
+	Render(s, buf)
+	// Sample the panel interior away from any border or label glyph.
+	mx, my := s.Menu.X, s.Menu.Y
+	px := pixelAt(buf, w, mx+ContextMenuWidth-4, my+ContextMenuRowHeight*len(s.Menu.Items)-2)
+	if !eqRGB(px, ColorButtonFace) {
+		t.Errorf("menu panel BG at (%d,%d) = %v, want %v", mx+ContextMenuWidth-4, my+ContextMenuRowHeight*len(s.Menu.Items)-2, px, ColorButtonFace)
+	}
+	// Top stroke is one row of ColorDivider.
+	top := pixelAt(buf, w, mx+2, my)
+	if !eqRGB(top, ColorDivider) {
+		t.Errorf("menu top stroke at (%d,%d) = %v, want %v", mx+2, my, top, ColorDivider)
+	}
+	// At least one primary-ink (label) pixel must sit inside the menu region.
+	inkCount := countPixelsIn(buf, w, mx+4, my+2, ContextMenuWidth-8, ContextMenuRowHeight*len(s.Menu.Items)-4, ColorTextPrimary)
+	if inkCount < 6 {
+		t.Errorf("menu label ink = %d, want >= 6 (labels not painted)", inkCount)
+	}
+}
+
+// paintPreview paints a centred panel above the right pane carrying the
+// file name in the header band + up to PreviewMaxLines body lines. The panel
+// face is ColorWindowBG, the header band is ColorHeaderBarBG, and the body
+// text is primary ink. We seed a multi-line file, double-click it, render,
+// then sample each of the three regions.
+func TestPaintPreviewRender(t *testing.T) {
+	w, h := 720, 440
+	s := New(w, h)
+	// 25 lines of body so the "line cap" branch executes too (PreviewMaxLines=18).
+	body := ""
+	for i := 0; i < 25; i++ {
+		body += "line " + itoa(i) + "\n"
+	}
+	if err := s.VFS.Write("/preview.txt", []byte(body)); err != nil {
+		t.Fatalf("Write err = %v", err)
+	}
+	s.openPreview("/preview.txt")
+	if s.Preview == nil {
+		t.Fatalf("openPreview did not set Preview")
+	}
+	buf := newRGBA(w, h)
+	Render(s, buf)
+	// Compute the panel top-left the way paintPreview does.
+	px := SidebarWidth + (w-SidebarWidth-PreviewWidth)/2
+	py := HeaderBarHeight + ColumnHeaderHeight + 16
+	if px < SidebarWidth+8 {
+		px = SidebarWidth + 8
+	}
+	// Header band BG = ColorHeaderBarBG.
+	hdr := pixelAt(buf, w, px+PreviewWidth-4, py+4)
+	if !eqRGB(hdr, ColorHeaderBarBG) {
+		t.Errorf("preview header BG = %v, want %v", hdr, ColorHeaderBarBG)
+	}
+	// Body face = ColorWindowBG, well inside the body area.
+	bdy := pixelAt(buf, w, px+PreviewWidth-4, py+PreviewHeight-4)
+	if !eqRGB(bdy, ColorWindowBG) {
+		t.Errorf("preview body BG = %v, want %v", bdy, ColorWindowBG)
+	}
+	// At least some primary-ink pixels (file name + body lines).
+	ink := countPixelsIn(buf, w, px+4, py+4, PreviewWidth-8, PreviewHeight-8, ColorTextPrimary)
+	if ink < 20 {
+		t.Errorf("preview ink = %d, want >= 20 (file name + body lines invisible)", ink)
+	}
+}
+
+// paintPreview clamps `px` to SidebarWidth+8 when the right pane is narrower
+// than PreviewWidth + 16. We render on a 500-wide surface (right pane = 340,
+// narrower than the 360 preview) to exercise the clamp branch.
+func TestPaintPreviewNarrowSurface(t *testing.T) {
+	w, h := 500, 400
+	vfs := newEmptyVFS()
+	_ = vfs.Write("/narrow.txt", []byte("hi\n"))
+	bs := &BrowserState{CurrentPath: "/"}
+	bs.Refresh(vfs)
+	s := &State{W: w, H: h, VFS: vfs, Browser: bs, Sidebar: DefaultSidebar(), SidebarSelected: 0}
+	s.openPreview("/narrow.txt")
+	if s.Preview == nil {
+		t.Fatalf("openPreview did not set Preview")
+	}
+	buf := newRGBA(w, h)
+	Render(s, buf)
+	// The clamp pins px at SidebarWidth+8; sample the header band of the panel.
+	px := SidebarWidth + 8
+	py := HeaderBarHeight + ColumnHeaderHeight + 16
+	hdr := pixelAt(buf, w, px+PreviewWidth/2, py+4)
+	if !eqRGB(hdr, ColorHeaderBarBG) {
+		t.Errorf("clamped preview header BG = %v, want %v", hdr, ColorHeaderBarBG)
+	}
+}
+
+// menuHitIndex returns -1 for a y that falls below the last item row.
+// State has 3 items in the row menu, so y past 3*ContextMenuRowHeight is
+// outside the menu region.
+func TestMenuHitIndexBelowLastItem(t *testing.T) {
+	s := New(720, 440)
+	s.openEntryMenu(50, 50, Entry{Name: "x.txt"})
+	// One pixel below the last row.
+	below := s.Menu.Y + len(s.Menu.Items)*ContextMenuRowHeight + 2
+	if idx := s.menuHitIndex(s.Menu.X+4, below); idx != -1 {
+		t.Errorf("menuHitIndex(below last) = %d, want -1", idx)
+	}
+	// Above the menu top.
+	if idx := s.menuHitIndex(s.Menu.X+4, s.Menu.Y-2); idx != -1 {
+		t.Errorf("menuHitIndex(above top) = %d, want -1", idx)
+	}
+	// To the right of the menu region.
+	if idx := s.menuHitIndex(s.Menu.X+ContextMenuWidth+5, s.Menu.Y+2); idx != -1 {
+		t.Errorf("menuHitIndex(right of menu) = %d, want -1", idx)
+	}
+	// To the left of the menu region.
+	if idx := s.menuHitIndex(s.Menu.X-5, s.Menu.Y+2); idx != -1 {
+		t.Errorf("menuHitIndex(left of menu) = %d, want -1", idx)
+	}
+}
+
 // SmallSurfaceForegroundProbe -- as the prompt asked, paint a small 240x200
 // surface with one folder entry + DefaultSidebar and assert non-bg pixels
 // land inside the sidebar's first-entry icon band, the list area, AND the
 // text band. Smaller surface = fewer pixels to scan; same correctness signal.
 func TestRenderForegroundOnSmallSurface(t *testing.T) {
 	w, h := 240, 200
-	vfs := &InMemoryVFS{root: Entry{Name: "", IsDir: true, Children: []Entry{
-		{Name: "Folder0", IsDir: true, ModTime: DemoModTime},
-	}}}
+	// Single-folder VFS so the small surface only has one row to inspect.
+	vfs := newEmptyVFS()
+	_ = vfs.Mkdir("/Folder0")
 	bs := &BrowserState{CurrentPath: "/"}
 	bs.Refresh(vfs)
 	s := &State{W: w, H: h, VFS: vfs, Browser: bs, Sidebar: DefaultSidebar(), SidebarSelected: 0}

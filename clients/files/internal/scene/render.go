@@ -90,6 +90,22 @@ const (
 	// SizeColRight is the right edge of the right-aligned Size column.
 	NameColX     = SidebarWidth + 12
 	SizeColRight = 700
+
+	// ContextMenuWidth + ContextMenuRowHeight size the popup spawned by
+	// right-click on a row / empty area. Width is wider than a dock menu
+	// because action labels (Open / Rename / Delete / New Folder) are
+	// longer; the per-row height matches the dock so the popup feels
+	// consistent across the desktop.
+	ContextMenuWidth     = 140
+	ContextMenuRowHeight = 22
+
+	// Preview overlay geometry. The overlay is a panel centred in the
+	// right pane that holds the first PreviewMaxLines lines of a text
+	// file. Width is generous so 60+ char lines fit at scale=1.
+	PreviewWidth    = 360
+	PreviewHeight   = 220
+	PreviewPadding  = 12
+	PreviewMaxLines = 18
 )
 
 // Palette. Colours are uint8 RGB triples (alpha is forced to 0xFF on write).
@@ -155,6 +171,65 @@ func Paint(rgba []byte, w, h int, s *State) {
 	paintHeaderBar(rgba, w, h, s)
 	paintColumnHeaders(rgba, w, h)
 	paintListRows(rgba, w, h, s)
+	// Overlays on top of the navigation chrome.
+	if s.Preview != nil {
+		paintPreview(rgba, w, h, s)
+	}
+	if s.Menu != nil {
+		paintContextMenu(rgba, w, h, s)
+	}
+}
+
+// paintContextMenu paints the popup spawned by right-click. Single-column
+// list of labels, dark Adwaita-ish background, hover ink not implemented
+// (the menu dismisses on the next click so a hover state is moot).
+func paintContextMenu(rgba []byte, w, h int, s *State) {
+	m := s.Menu
+	rh := ContextMenuRowHeight
+	mh := rh * len(m.Items)
+	fillRect(rgba, w, h, m.X, m.Y, ContextMenuWidth, mh, ColorButtonFace)
+	// 1px stroke around the menu so it reads as a popped panel.
+	fillRect(rgba, w, h, m.X, m.Y, ContextMenuWidth, 1, ColorDivider)
+	fillRect(rgba, w, h, m.X, m.Y+mh-1, ContextMenuWidth, 1, ColorDivider)
+	fillRect(rgba, w, h, m.X, m.Y, 1, mh, ColorDivider)
+	fillRect(rgba, w, h, m.X+ContextMenuWidth-1, m.Y, 1, mh, ColorDivider)
+	for i, item := range m.Items {
+		ty := m.Y + i*rh + (rh-FontH)/2
+		drawText(rgba, w, h, m.X+8, ty, item.Label, 1, ColorTextPrimary)
+	}
+}
+
+// paintPreview paints the centred read-only preview overlay used by the
+// double-click-on-text-file path. A pale panel with the file name in the
+// header band and up to PreviewMaxLines lines of body below.
+func paintPreview(rgba []byte, w, h int, s *State) {
+	p := s.Preview
+	px := SidebarWidth + (w-SidebarWidth-PreviewWidth)/2
+	py := HeaderBarHeight + ColumnHeaderHeight + 16
+	if px < SidebarWidth+8 {
+		px = SidebarWidth + 8
+	}
+	// Drop-shadow row for depth.
+	fillRect(rgba, w, h, px+3, py+3, PreviewWidth, PreviewHeight, ColorDivider)
+	// Panel + stroke.
+	fillRect(rgba, w, h, px, py, PreviewWidth, PreviewHeight, ColorWindowBG)
+	fillRect(rgba, w, h, px, py, PreviewWidth, 1, ColorDivider)
+	fillRect(rgba, w, h, px, py+PreviewHeight-1, PreviewWidth, 1, ColorDivider)
+	fillRect(rgba, w, h, px, py, 1, PreviewHeight, ColorDivider)
+	fillRect(rgba, w, h, px+PreviewWidth-1, py, 1, PreviewHeight, ColorDivider)
+	// Header band with the file name.
+	fillRect(rgba, w, h, px, py, PreviewWidth, 24, ColorHeaderBarBG)
+	fillRect(rgba, w, h, px, py+23, PreviewWidth, 1, ColorDivider)
+	drawText(rgba, w, h, px+PreviewPadding, py+8, Basename(p.Path), 1, ColorTextPrimary)
+	// Body lines.
+	by := py + 32
+	for _, ln := range p.Lines {
+		if by+FontH > py+PreviewHeight-PreviewPadding {
+			break
+		}
+		drawText(rgba, w, h, px+PreviewPadding, by, ln, 1, ColorTextPrimary)
+		by += FontH + 4
+	}
 }
 
 // paintHeaderBar draws the top chrome: a flat gray bar with the hamburger

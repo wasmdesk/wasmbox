@@ -28,8 +28,8 @@ func TestNewHasDefaults(t *testing.T) {
 			t.Fatalf("app[%d].Id = %q, want %q", i, a.Id, want[i])
 		}
 	}
-	if s.Workspace != "1" {
-		t.Fatalf("default workspace = %q, want %q", s.Workspace, "1")
+	if s.Workspace != "1 of 4" {
+		t.Fatalf("default workspace = %q, want %q", s.Workspace, "1 of 4")
 	}
 	if s.Clock != "" {
 		t.Fatalf("default clock = %q, want empty (worker will tick)", s.Clock)
@@ -489,119 +489,431 @@ func TestRenderZeroWidthIconbar(t *testing.T) {
 	Render(s, buf) // must not panic
 }
 
-// SetTasks stores the snapshot verbatim so the next render picks it up.
-func TestSetTasksStores(t *testing.T) {
+// SetWindows stores the snapshot verbatim so the next render picks it up.
+func TestSetWindowsStores(t *testing.T) {
 	s := New(tW, tH)
-	if len(s.Tasks) != 0 {
-		t.Fatalf("fresh state should have 0 tasks, got %d", len(s.Tasks))
+	if len(s.Windows) != 0 {
+		t.Fatalf("fresh state should have 0 windows, got %d", len(s.Windows))
 	}
-	s.SetTasks([]Task{{Id: 7, Title: "xterm"}, {Id: 12, Title: "editor"}})
-	if got, want := len(s.Tasks), 2; got != want {
-		t.Fatalf("SetTasks length = %d, want %d", got, want)
+	s.SetWindows([]Window{
+		{Id: 7, Title: "xterm", Focused: true},
+		{Id: 12, Title: "editor", Minimized: true},
+	})
+	if got, want := len(s.Windows), 2; got != want {
+		t.Fatalf("SetWindows length = %d, want %d", got, want)
 	}
-	if s.Tasks[0].Id != 7 || s.Tasks[0].Title != "xterm" {
-		t.Fatalf("Tasks[0] = %+v, want {7 xterm}", s.Tasks[0])
+	if s.Windows[0].Id != 7 || s.Windows[0].Title != "xterm" || !s.Windows[0].Focused {
+		t.Fatalf("Windows[0] = %+v, want {7 xterm focused}", s.Windows[0])
 	}
-	s.SetTasks(nil)
-	if len(s.Tasks) != 0 {
-		t.Fatalf("SetTasks(nil) should clear, got %d", len(s.Tasks))
+	if !s.Windows[1].Minimized {
+		t.Fatalf("Windows[1].Minimized = false, want true")
+	}
+	s.SetWindows(nil)
+	if len(s.Windows) != 0 {
+		t.Fatalf("SetWindows(nil) should clear, got %d", len(s.Windows))
 	}
 }
 
-// TaskButtonRect places the i-th task button at the slot immediately after
-// the last launcher (continuous row).
-func TestTaskButtonRectFollowsLaunchers(t *testing.T) {
+// WindowButtonRect places the i-th window button past the launcher row + the
+// SeparatorW gap.
+func TestWindowButtonRectFollowsLaunchersPastSeparator(t *testing.T) {
 	s := New(tW, tH)
-	s.SetTasks([]Task{{Id: 1, Title: "a"}, {Id: 2, Title: "b"}})
-	n := len(s.Apps)
-	for i := range s.Tasks {
-		tx, ty, tw, th := s.TaskButtonRect(i)
-		lx, ly, lw, lh := s.IconbarButtonRect(n + i)
-		if tx != lx || ty != ly || tw != lw || th != lh {
-			t.Fatalf("task[%d] rect = (%d,%d,%d,%d), want launcher-slot[%d] (%d,%d,%d,%d)",
-				i, tx, ty, tw, th, n+i, lx, ly, lw, lh)
+	s.SetWindows([]Window{{Id: 1, Title: "a"}, {Id: 2, Title: "b"}})
+	ix, _, _, _ := s.IconbarRect()
+	wantBaseX := ix + len(s.Apps)*(IconbarButtonW+IconbarButtonGap) - IconbarButtonGap + SeparatorW
+	for i := range s.Windows {
+		wx, wy, ww, wh := s.WindowButtonRect(i)
+		expX := wantBaseX + i*(IconbarButtonW+IconbarButtonGap)
+		if wx != expX {
+			t.Fatalf("window[%d].x = %d, want %d (past SeparatorW gap)", i, wx, expX)
+		}
+		if wy != IconbarVPad {
+			t.Fatalf("window[%d].y = %d, want %d", i, wy, IconbarVPad)
+		}
+		if ww != IconbarButtonW || wh != tH-2*IconbarVPad {
+			t.Fatalf("window[%d] size = %dx%d, want %dx%d", i, ww, wh, IconbarButtonW, tH-2*IconbarVPad)
 		}
 	}
 }
 
-// HitTestTask returns the task index for clicks inside a task button and -1
-// for clicks outside (workspace, clock, launcher row, above/below row).
-func TestHitTestTask(t *testing.T) {
+// WindowButtonRect with zero launchers anchors at the iconbar's left edge
+// (the empty-Apps fallback).
+func TestWindowButtonRectWithNoLaunchers(t *testing.T) {
 	s := New(tW, tH)
-	s.SetTasks([]Task{{Id: 10, Title: "win10"}, {Id: 20, Title: "win20"}})
-	for i := range s.Tasks {
-		bx, by, bw, bh := s.TaskButtonRect(i)
+	s.Apps = nil
+	s.SetWindows([]Window{{Id: 1, Title: "solo"}})
+	wx, _, _, _ := s.WindowButtonRect(0)
+	ix, _, _, _ := s.IconbarRect()
+	if wx != ix {
+		t.Fatalf("zero-launcher window[0].x = %d, want %d (iconbar left)", wx, ix)
+	}
+}
+
+// WindowButtonRect with degenerate surface clamps height to 1.
+func TestWindowButtonRectClampsHeight(t *testing.T) {
+	s := New(tW, 1)
+	s.SetWindows([]Window{{Id: 1, Title: "a"}})
+	_, _, _, wh := s.WindowButtonRect(0)
+	if wh != 1 {
+		t.Fatalf("window button.h on 1-px surface = %d, want 1", wh)
+	}
+}
+
+// HitTestWindow returns the window index for clicks inside a window button
+// and -1 for clicks outside (workspace, clock, launcher row, above/below row).
+func TestHitTestWindow(t *testing.T) {
+	s := New(tW, tH)
+	s.SetWindows([]Window{{Id: 10, Title: "win10"}, {Id: 20, Title: "win20", Focused: true}})
+	for i := range s.Windows {
+		bx, by, bw, bh := s.WindowButtonRect(i)
 		px := bx + bw/2
 		py := by + bh/2
-		if got := s.HitTestTask(px, py); got != i {
-			t.Fatalf("HitTestTask center of task %d = %d, want %d", i, got, i)
+		if got := s.HitTestWindow(px, py); got != i {
+			t.Fatalf("HitTestWindow center of window %d = %d, want %d", i, got, i)
 		}
-		// HitTest (launchers) must NOT match a task click.
+		// HitTest (launchers) must NOT match a window click.
 		if got := s.HitTest(px, py); got != -1 {
-			t.Fatalf("HitTest center of task %d = %d, want -1 (launcher hit-test)", i, got)
+			t.Fatalf("HitTest center of window %d = %d, want -1 (launcher hit-test)", i, got)
 		}
 	}
-	// A click on the workspace label / clock is inert for tasks too.
-	if got := s.HitTestTask(WorkspaceW/2, tH/2); got != -1 {
-		t.Fatalf("workspace HitTestTask = %d, want -1", got)
+	// A click on the workspace label / clock is inert for windows too.
+	if got := s.HitTestWindow(WorkspaceW/2, tH/2); got != -1 {
+		t.Fatalf("workspace HitTestWindow = %d, want -1", got)
 	}
-	if got := s.HitTestTask(tW-ClockW/2, tH/2); got != -1 {
-		t.Fatalf("clock HitTestTask = %d, want -1", got)
+	if got := s.HitTestWindow(tW-ClockW/2, tH/2); got != -1 {
+		t.Fatalf("clock HitTestWindow = %d, want -1", got)
 	}
-	// A click on a launcher button is NOT a task hit.
+	// A click on a launcher button is NOT a window hit.
 	bx, by, bw, bh := s.IconbarButtonRect(0)
-	if got := s.HitTestTask(bx+bw/2, by+bh/2); got != -1 {
-		t.Fatalf("launcher click HitTestTask = %d, want -1", got)
+	if got := s.HitTestWindow(bx+bw/2, by+bh/2); got != -1 {
+		t.Fatalf("launcher click HitTestWindow = %d, want -1", got)
 	}
 }
 
-// HitTestTask returns -1 when a task's anchor falls past the iconbar's
-// right edge (very narrow surface fallback).
-func TestHitTestTaskOverflow(t *testing.T) {
+// HitTestWindow returns -1 when a window's anchor falls past the iconbar's
+// right edge (very narrow surface fallback). Covers both the outer "click
+// outside iconbar" early return and the inner per-window "this window's
+// anchor is past the iconbar" early return.
+func TestHitTestWindowOverflow(t *testing.T) {
 	// 400-px surface: iconbar width = 400 - 100 - 80 = 220 -> fits 1 button +
-	// part of a second. Add 4 launchers (default) + a task -> the task's
+	// part of a second. Add 4 launchers (default) + a window -> the window's
 	// anchor is past the iconbar's right edge.
 	s := New(400, BarHeight)
-	s.SetTasks([]Task{{Id: 99, Title: "off-screen"}})
-	bx, _, _, _ := s.TaskButtonRect(0)
+	s.SetWindows([]Window{{Id: 99, Title: "off-screen"}})
+	bx, _, _, _ := s.WindowButtonRect(0)
 	ix, _, iw, _ := s.IconbarRect()
 	if bx < ix+iw {
-		t.Fatalf("test setup wrong: expected task button anchor past iconbar end (bx=%d, ix+iw=%d)", bx, ix+iw)
+		t.Fatalf("test setup wrong: expected window button anchor past iconbar end (bx=%d, ix+iw=%d)", bx, ix+iw)
 	}
-	if got := s.HitTestTask(bx+1, IconbarVPad+1); got != -1 {
-		t.Fatalf("HitTestTask past iconbar end = %d, want -1", got)
+	// Outer check: click past iconbar right edge — returns -1 up front.
+	if got := s.HitTestWindow(bx+1, IconbarVPad+1); got != -1 {
+		t.Fatalf("HitTestWindow past iconbar end = %d, want -1", got)
+	}
+	// Inner check: click INSIDE iconbar but the window's anchor is still
+	// past the iconbar — the loop's `bx >= ix+iw` early return fires.
+	if got := s.HitTestWindow(ix+iw-1, IconbarVPad+1); got != -1 {
+		t.Fatalf("HitTestWindow inside iconbar but window-anchor past = %d, want -1", got)
 	}
 }
 
-// A task button paints ink for its title in the slot just past the
-// launchers. The "[*]" accent prefix is part of the painted label.
-func TestRenderTaskInked(t *testing.T) {
+// A window button paints ink for its title in the slot just past the
+// launcher row + the SeparatorW gap.
+func TestRenderWindowInked(t *testing.T) {
 	s := New(tW, tH)
-	s.SetTasks([]Task{{Id: 7, Title: "alpha"}})
+	s.SetWindows([]Window{{Id: 7, Title: "alpha"}})
 	buf := newBuf(s)
 	Render(s, buf)
-	bx, by, bw, bh := s.TaskButtonRect(0)
+	bx, by, bw, bh := s.WindowButtonRect(0)
 	found := false
 	for y := by; y < by+bh && !found; y++ {
 		for x := bx; x < bx+bw && !found; x++ {
 			off := (y*tW + x) * 4
-			// Ink for the task label is dark (active label colour); the bevel
-			// face is mid-gray. A pixel under 0x40 on R+G+B is an ink hit.
 			if buf[off] < 0x40 && buf[off+1] < 0x40 && buf[off+2] < 0x40 {
 				found = true
 			}
 		}
 	}
 	if !found {
-		t.Fatalf("task button never inked any pixels")
+		t.Fatalf("window button never inked any pixels")
 	}
 }
 
-// Render does not panic when a task's anchor falls past the iconbar's right
+// Render does not panic when a window's anchor falls past the iconbar's right
 // edge (matches the launcher break-on-overflow path).
-func TestRenderTaskOverflow(t *testing.T) {
-	s := New(400, BarHeight) // narrow iconbar; default 4 apps + tasks won't all fit
-	s.SetTasks([]Task{{Id: 1, Title: "off"}, {Id: 2, Title: "off2"}})
+func TestRenderWindowOverflow(t *testing.T) {
+	s := New(400, BarHeight) // narrow iconbar; default 4 apps + windows won't all fit
+	s.SetWindows([]Window{{Id: 1, Title: "off"}, {Id: 2, Title: "off2"}})
 	buf := newBuf(s)
-	Render(s, buf) // must not panic, must break out of the task loop
+	Render(s, buf) // must not panic, must break out of the window loop
+}
+
+// Render clips the right edge of a window button whose right side extends
+// past the iconbar's right edge (the `bx+cw > ix+iw` branch). Reproduced by
+// dropping the launcher row so a window button anchored at the iconbar's
+// left can extend to the right while the iconbar is too narrow to fit it.
+func TestRenderWindowClipsRightEdge(t *testing.T) {
+	// Narrow iconbar (iconbar width = 230 - 100 - 80 = 50) + no launchers so a
+	// single window button anchors INSIDE the iconbar (bx < ix+iw) but its
+	// right edge sticks out (bx + IconbarButtonW=120 > ix+iw=50).
+	s := New(230, BarHeight)
+	s.Apps = nil
+	s.SetWindows([]Window{{Id: 1, Title: "clipme"}})
+	bx, _, _, _ := s.WindowButtonRect(0)
+	ix, _, iw, _ := s.IconbarRect()
+	if !(bx < ix+iw && bx+IconbarButtonW > ix+iw) {
+		t.Fatalf("test setup wrong: need bx<ix+iw<bx+W (bx=%d, ix+iw=%d, W=%d)", bx, ix+iw, IconbarButtonW)
+	}
+	buf := newBuf(s)
+	Render(s, buf) // must not panic, must clip the button
+}
+
+// A focused window button must paint with a sunken bevel: the top-left
+// corner pixel of the button rect carries the SUNKEN highlight (dark) while
+// an unfocused button carries the RAISED highlight (bright). Probing pixel
+// (bx+1, by+1) sidesteps the corner exactly and lands on the bevel stroke.
+func TestRenderFocusedSunkenBevel(t *testing.T) {
+	s := New(tW, tH)
+	// Two windows: idx 0 focused, idx 1 unfocused.
+	s.SetWindows([]Window{
+		{Id: 1, Title: "f", Focused: true},
+		{Id: 2, Title: "u"},
+	})
+	buf := newBuf(s)
+	Render(s, buf)
+	// The very top row of a button carries the bevel stroke (white when raised,
+	// dark when sunken). Sample x=bx+bw/2 (mid-button, where the stroke is not
+	// at a corner) y=by.
+	bx0, by0, bw0, _ := s.WindowButtonRect(0) // focused
+	bx1, by1, bw1, _ := s.WindowButtonRect(1) // unfocused
+	off0 := (by0*tW + bx0 + bw0/2) * 4
+	off1 := (by1*tW + bx1 + bw1/2) * 4
+	// Focused: top stroke is the sunken dark stroke.
+	if !(buf[off0] < 0x80 && buf[off0+1] < 0x80 && buf[off0+2] < 0x80) {
+		t.Fatalf("focused window top-stroke not dark: rgb=(%d,%d,%d)", buf[off0], buf[off0+1], buf[off0+2])
+	}
+	// Unfocused: top stroke is the raised bright stroke.
+	if !(buf[off1] > 0xC0 && buf[off1+1] > 0xC0 && buf[off1+2] > 0xC0) {
+		t.Fatalf("unfocused window top-stroke not bright: rgb=(%d,%d,%d)", buf[off1], buf[off1+1], buf[off1+2])
+	}
+}
+
+// A minimized window button must paint with the "[*] " accent prefix on its
+// label and use the dim inactive-label ink.
+func TestRenderMinimizedStylesDim(t *testing.T) {
+	s := New(tW, tH)
+	s.SetWindows([]Window{{Id: 1, Title: "alpha", Minimized: true}})
+	buf := newBuf(s)
+	Render(s, buf)
+	// Just confirm the button paints SOME ink (the "[*] alpha" label).
+	bx, by, bw, bh := s.WindowButtonRect(0)
+	found := false
+	for y := by; y < by+bh && !found; y++ {
+		for x := bx; x < bx+bw && !found; x++ {
+			off := (y*tW + x) * 4
+			if buf[off] < 0x40 {
+				found = true
+			}
+		}
+	}
+	if !found {
+		t.Fatalf("minimized window button never inked any pixels")
+	}
+	// And the bevel must be raised (the minimized window is NOT focused, so
+	// the top stroke is bright).
+	off := (by*tW + bx + bw/2) * 4
+	if !(buf[off] > 0xC0 && buf[off+1] > 0xC0 && buf[off+2] > 0xC0) {
+		t.Fatalf("minimized window top-stroke not bright: rgb=(%d,%d,%d)", buf[off], buf[off+1], buf[off+2])
+	}
+}
+
+// drawSunkenBevel with a non-positive size is a no-op.
+func TestDrawSunkenBevelDegenerate(t *testing.T) {
+	s := New(40, BarHeight)
+	buf := newBuf(s)
+	drawSunkenBevel(s, buf, 0, 0, 0, 10)
+	drawSunkenBevel(s, buf, 0, 0, 10, 0)
+	for _, b := range buf {
+		if b != 0 {
+			t.Fatalf("degenerate drawSunkenBevel painted something: %d", b)
+		}
+	}
+}
+
+// The separator line is painted in the SeparatorW gap when launchers exist
+// (and skipped when they do not).
+func TestRenderSeparatorPainted(t *testing.T) {
+	s := New(tW, tH)
+	buf := newBuf(s)
+	Render(s, buf)
+	ix, _, _, _ := s.IconbarRect()
+	sepRight := ix + len(s.Apps)*(IconbarButtonW+IconbarButtonGap) - IconbarButtonGap + SeparatorW
+	sepX := sepRight - SeparatorW/2 - 1
+	// Probe at mid-height; expect dark ink.
+	off := ((tH/2)*tW + sepX) * 4
+	if !(buf[off] < 0x60 && buf[off+1] < 0x60 && buf[off+2] < 0x60) {
+		t.Fatalf("separator not painted dark at sepX=%d: rgb=(%d,%d,%d)", sepX, buf[off], buf[off+1], buf[off+2])
+	}
+}
+
+// The separator is skipped when the Apps slice is empty.
+func TestRenderSeparatorSkippedWhenEmptyApps(t *testing.T) {
+	s := New(tW, tH)
+	s.Apps = nil
+	buf := newBuf(s)
+	Render(s, buf) // must not panic
+}
+
+// ---- workspaces -----------------------------------------------------------
+
+// New defaults: ActiveWorkspace=1, WorkspaceCount=4, label="1 of 4".
+func TestNewWorkspaceDefaults(t *testing.T) {
+	s := New(tW, tH)
+	if s.ActiveWorkspace != 1 {
+		t.Fatalf("default ActiveWorkspace = %d, want 1", s.ActiveWorkspace)
+	}
+	if s.WorkspaceCount != 4 {
+		t.Fatalf("default WorkspaceCount = %d, want 4", s.WorkspaceCount)
+	}
+	if s.Workspace != "1 of 4" {
+		t.Fatalf("default Workspace label = %q, want %q", s.Workspace, "1 of 4")
+	}
+}
+
+// SetActiveWorkspace clamps below + above the legal range, refreshes label.
+func TestSetActiveWorkspaceClampsAndUpdatesLabel(t *testing.T) {
+	s := New(tW, tH)
+	s.SetActiveWorkspace(3)
+	if s.ActiveWorkspace != 3 || s.Workspace != "3 of 4" {
+		t.Fatalf("SetActiveWorkspace(3) = (%d,%q), want (3,%q)", s.ActiveWorkspace, s.Workspace, "3 of 4")
+	}
+	s.SetActiveWorkspace(0) // below range -> clamp to 1
+	if s.ActiveWorkspace != 1 {
+		t.Fatalf("SetActiveWorkspace(0) ActiveWorkspace = %d, want 1", s.ActiveWorkspace)
+	}
+	s.SetActiveWorkspace(99) // above range -> clamp to WorkspaceCount
+	if s.ActiveWorkspace != s.WorkspaceCount {
+		t.Fatalf("SetActiveWorkspace(99) ActiveWorkspace = %d, want %d", s.ActiveWorkspace, s.WorkspaceCount)
+	}
+}
+
+// SetWorkspaceCount keeps ActiveWorkspace coherent and re-renders the label.
+func TestSetWorkspaceCountRecomputesLabel(t *testing.T) {
+	s := New(tW, tH)
+	s.SetActiveWorkspace(4)
+	s.SetWorkspaceCount(2) // active was 4 -> clamp down to 2
+	if s.ActiveWorkspace != 2 || s.Workspace != "2 of 2" {
+		t.Fatalf("after SetWorkspaceCount(2): (%d,%q), want (2,%q)", s.ActiveWorkspace, s.Workspace, "2 of 2")
+	}
+	// Non-positive count -> label reduces to bare digit
+	s.SetWorkspaceCount(0)
+	if s.Workspace != "2" {
+		t.Fatalf("WorkspaceCount=0 label = %q, want %q", s.Workspace, "2")
+	}
+	// Negative input clamps to 0.
+	s.SetWorkspaceCount(-1)
+	if s.WorkspaceCount != 0 {
+		t.Fatalf("WorkspaceCount after -1 = %d, want 0", s.WorkspaceCount)
+	}
+}
+
+// NextWorkspace + PrevWorkspace wrap at the boundaries.
+func TestCycleWorkspaceWraps(t *testing.T) {
+	s := New(tW, tH)
+	if got := s.NextWorkspace(); got != 2 {
+		t.Fatalf("NextWorkspace from 1/4 = %d, want 2", got)
+	}
+	s.SetActiveWorkspace(4)
+	if got := s.NextWorkspace(); got != 1 {
+		t.Fatalf("NextWorkspace from 4/4 = %d, want 1 (wrap)", got)
+	}
+	s.SetActiveWorkspace(1)
+	if got := s.PrevWorkspace(); got != 4 {
+		t.Fatalf("PrevWorkspace from 1/4 = %d, want 4 (wrap)", got)
+	}
+	s.SetActiveWorkspace(3)
+	if got := s.PrevWorkspace(); got != 2 {
+		t.Fatalf("PrevWorkspace from 3/4 = %d, want 2", got)
+	}
+}
+
+// Non-positive count makes Next/Prev no-op (returns the current active).
+func TestCycleWorkspaceNoCountIsNoop(t *testing.T) {
+	s := New(tW, tH)
+	s.SetWorkspaceCount(0)
+	s.ActiveWorkspace = 7 // direct set; SetActiveWorkspace would not clamp w/ count=0
+	if got := s.NextWorkspace(); got != 7 {
+		t.Fatalf("NextWorkspace with count=0 = %d, want 7", got)
+	}
+	if got := s.PrevWorkspace(); got != 7 {
+		t.Fatalf("PrevWorkspace with count=0 = %d, want 7", got)
+	}
+}
+
+// HitTestWorkspace identifies clicks on the left section.
+func TestHitTestWorkspace(t *testing.T) {
+	s := New(tW, tH)
+	if !s.HitTestWorkspace(WorkspaceW/2, tH/2) {
+		t.Fatalf("center of workspace section not detected")
+	}
+	if s.HitTestWorkspace(WorkspaceW+10, tH/2) {
+		t.Fatalf("iconbar click reported as workspace hit")
+	}
+	if s.HitTestWorkspace(tW-1, tH/2) {
+		t.Fatalf("clock click reported as workspace hit")
+	}
+	if s.HitTestWorkspace(-5, tH/2) {
+		t.Fatalf("negative-x click reported as workspace hit")
+	}
+}
+
+// Render must paint the workspace label distinctly when ActiveWorkspace
+// changes — the rendered ink count for "3 of 4" differs from "1 of 4".
+func TestRenderWorkspaceLabelChanges(t *testing.T) {
+	s := New(tW, tH)
+	buf1 := newBuf(s)
+	Render(s, buf1)
+	s.SetActiveWorkspace(3)
+	buf2 := newBuf(s)
+	Render(s, buf2)
+	if bytesEqual(buf1, buf2) {
+		t.Fatalf("workspace label did not change between workspace 1 and 3")
+	}
+}
+
+// itoa exercises the zero, negative and multi-digit branches that the other
+// tests do not naturally hit.
+func TestItoa(t *testing.T) {
+	cases := []struct {
+		in   int
+		want string
+	}{{0, "0"}, {1, "1"}, {9, "9"}, {10, "10"}, {1234, "1234"}, {-1, "-1"}, {-42, "-42"}}
+	for _, c := range cases {
+		if got := itoa(c.in); got != c.want {
+			t.Fatalf("itoa(%d) = %q, want %q", c.in, got, c.want)
+		}
+	}
+}
+
+// Window.Workspace round-trips through SetWindows (the compositor sends it
+// in the windows_changed payload; the dock keeps it in the model).
+func TestWindowCarriesWorkspaceField(t *testing.T) {
+	s := New(tW, tH)
+	s.SetWindows([]Window{{Id: 1, Title: "x", Workspace: 2}})
+	if got := s.Windows[0].Workspace; got != 2 {
+		t.Fatalf("Window.Workspace = %d, want 2", got)
+	}
+}
+
+// bytesEqual is a tiny []byte compare so the workspace render-change test
+// does not pull in reflect.DeepEqual.
+func bytesEqual(a, b []byte) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for i := range a {
+		if a[i] != b[i] {
+			return false
+		}
+	}
+	return true
 }

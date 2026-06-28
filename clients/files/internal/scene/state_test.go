@@ -478,3 +478,314 @@ func TestBasename(t *testing.T) {
 		}
 	}
 }
+
+// rightClickRow exercises right-click on a list row: the context menu must
+// pop with Open / Rename / Delete and the target must be the row's path.
+func TestRightClickRowOpensMenu(t *testing.T) {
+	s := New(720, 440)
+	// Row 0 is /Documents.
+	x := SidebarWidth + 50
+	y := HeaderBarHeight + ColumnHeaderHeight + RowHeight/2
+	if !s.HandleMouseButton(x, y, 2, 1) {
+		t.Fatalf("right-click on row returned false")
+	}
+	if s.Menu == nil {
+		t.Fatalf("menu not open after right-click on row")
+	}
+	if s.Menu.Target != "/Documents" {
+		t.Errorf("menu target = %q, want /Documents", s.Menu.Target)
+	}
+	if len(s.Menu.Items) != 3 {
+		t.Errorf("menu items = %d, want 3", len(s.Menu.Items))
+	}
+	want := []string{"open", "rename", "delete"}
+	for i, w := range want {
+		if s.Menu.Items[i].ID != w {
+			t.Errorf("item[%d] = %q, want %q", i, s.Menu.Items[i].ID, w)
+		}
+	}
+}
+
+// rightClickEmpty: right-click below the last list row pops the
+// New Folder / New File menu.
+func TestRightClickEmptyAreaOpensCreateMenu(t *testing.T) {
+	s := New(720, 440)
+	// Land below the 4 entries -- row index 8 is empty.
+	x := SidebarWidth + 50
+	y := HeaderBarHeight + ColumnHeaderHeight + 8*RowHeight
+	if !s.HandleMouseButton(x, y, 2, 1) {
+		t.Fatalf("right-click on empty area returned false")
+	}
+	if s.Menu == nil {
+		t.Fatalf("menu not open after right-click on empty area")
+	}
+	if len(s.Menu.Items) != 2 || s.Menu.Items[0].ID != "newfolder" || s.Menu.Items[1].ID != "newfile" {
+		t.Errorf("create menu items = %+v", s.Menu.Items)
+	}
+}
+
+// Clicking inside an open menu activates the item; the Delete item removes
+// the target path.
+func TestMenuDeleteRemovesEntry(t *testing.T) {
+	s := New(720, 440)
+	// First create a fresh sibling we can delete safely.
+	if err := s.VFS.Write("/victim.txt", []byte("bye")); err != nil {
+		t.Fatalf("Write err = %v", err)
+	}
+	s.Browser.Refresh(s.VFS)
+	// Open the menu programmatically on /victim.txt.
+	s.openEntryMenu(50, 50, Entry{Name: "victim.txt"})
+	// Click the Delete row (index 2).
+	clickY := s.Menu.Y + 2*ContextMenuRowHeight + 1
+	clickX := s.Menu.X + 4
+	if !s.HandleMouseButton(clickX, clickY, 0, 1) {
+		t.Fatalf("click in menu returned false")
+	}
+	if s.Menu != nil {
+		t.Errorf("menu still open after click")
+	}
+	if _, err := s.VFS.Stat("/victim.txt"); err == nil {
+		t.Errorf("/victim.txt still exists after Delete")
+	}
+}
+
+// Clicking outside an open menu dismisses it without firing an action.
+func TestMenuDismissesOnOutsideClick(t *testing.T) {
+	s := New(720, 440)
+	s.openEntryMenu(50, 50, Entry{Name: "anything"})
+	// Click far away from the menu region.
+	if !s.HandleMouseButton(600, 400, 0, 1) {
+		t.Errorf("outside click returned false")
+	}
+	if s.Menu != nil {
+		t.Errorf("menu not dismissed")
+	}
+}
+
+// New File creates an untitled file in the current directory.
+func TestMenuNewFileCreates(t *testing.T) {
+	s := New(720, 440)
+	s.openEmptyAreaMenu(50, 50)
+	// New File is item index 1.
+	clickY := s.Menu.Y + 1*ContextMenuRowHeight + 1
+	clickX := s.Menu.X + 4
+	if !s.HandleMouseButton(clickX, clickY, 0, 1) {
+		t.Fatalf("click on New File returned false")
+	}
+	if _, err := s.VFS.Stat("/untitled.txt"); err != nil {
+		t.Errorf("New File did not create /untitled.txt: err = %v", err)
+	}
+}
+
+// New File at root that already has /untitled.txt picks /untitled-1.txt.
+func TestMenuNewFileDisambiguates(t *testing.T) {
+	s := New(720, 440)
+	_ = s.VFS.Write("/untitled.txt", nil)
+	s.openEmptyAreaMenu(50, 50)
+	clickY := s.Menu.Y + 1*ContextMenuRowHeight + 1
+	clickX := s.Menu.X + 4
+	_ = s.HandleMouseButton(clickX, clickY, 0, 1)
+	if _, err := s.VFS.Stat("/untitled-1.txt"); err != nil {
+		t.Errorf("disambiguation did not produce /untitled-1.txt: err = %v", err)
+	}
+}
+
+// New Folder creates an untitled folder.
+func TestMenuNewFolderCreates(t *testing.T) {
+	s := New(720, 440)
+	s.openEmptyAreaMenu(50, 50)
+	clickY := s.Menu.Y + 0*ContextMenuRowHeight + 1
+	clickX := s.Menu.X + 4
+	_ = s.HandleMouseButton(clickX, clickY, 0, 1)
+	if !s.VFS.IsDir("/untitled") {
+		t.Errorf("New Folder did not create /untitled")
+	}
+}
+
+// Menu Open on a directory descends into it.
+func TestMenuOpenFolderDescends(t *testing.T) {
+	s := New(720, 440)
+	s.openEntryMenu(50, 50, Entry{Name: "Documents"})
+	clickY := s.Menu.Y + 0*ContextMenuRowHeight + 1
+	clickX := s.Menu.X + 4
+	_ = s.HandleMouseButton(clickX, clickY, 0, 1)
+	if s.Browser.CurrentPath != "/Documents" {
+		t.Errorf("Open didn't descend: CurrentPath = %q", s.Browser.CurrentPath)
+	}
+}
+
+// Menu Open on a previewable text file shows the preview overlay.
+func TestMenuOpenTextShowsPreview(t *testing.T) {
+	s := New(720, 440)
+	_ = s.VFS.Write("/note.txt", []byte("hello\nworld\n"))
+	s.Browser.Refresh(s.VFS)
+	s.openEntryMenu(50, 50, Entry{Name: "note.txt"})
+	clickY := s.Menu.Y + 0*ContextMenuRowHeight + 1
+	clickX := s.Menu.X + 4
+	_ = s.HandleMouseButton(clickX, clickY, 0, 1)
+	if s.Preview == nil {
+		t.Fatalf("preview not opened")
+	}
+	if len(s.Preview.Lines) != 2 || s.Preview.Lines[0] != "hello" {
+		t.Errorf("preview lines = %+v", s.Preview.Lines)
+	}
+}
+
+// Menu Rename is a v0 stub: it dismisses the menu without changing the tree.
+func TestMenuRenameStub(t *testing.T) {
+	s := New(720, 440)
+	s.openEntryMenu(50, 50, Entry{Name: "about.txt"})
+	clickY := s.Menu.Y + 1*ContextMenuRowHeight + 1
+	clickX := s.Menu.X + 4
+	_ = s.HandleMouseButton(clickX, clickY, 0, 1)
+	if s.Menu != nil {
+		t.Errorf("Rename did not dismiss menu")
+	}
+	if _, err := s.VFS.Stat("/about.txt"); err != nil {
+		t.Errorf("Rename clobbered the file: %v", err)
+	}
+}
+
+// Double-click on a .txt file opens the preview overlay.
+func TestDoubleClickOpensPreview(t *testing.T) {
+	s := New(720, 440)
+	// Row 3 = about.txt.
+	x := SidebarWidth + 50
+	y := HeaderBarHeight + ColumnHeaderHeight + 3*RowHeight + RowHeight/2
+	if !s.HandleMouseButton(x, y, 0, 2) {
+		t.Fatalf("double-click returned false")
+	}
+	if s.Preview == nil {
+		t.Errorf("double-click did not open preview")
+	}
+}
+
+// Double-click on a folder still descends (not previewable).
+func TestDoubleClickFolderDescends(t *testing.T) {
+	s := New(720, 440)
+	x := SidebarWidth + 50
+	y := HeaderBarHeight + ColumnHeaderHeight + RowHeight/2
+	_ = s.HandleMouseButton(x, y, 0, 2)
+	if s.Browser.CurrentPath != "/Documents" {
+		t.Errorf("CurrentPath = %q, want /Documents", s.Browser.CurrentPath)
+	}
+}
+
+// An open preview is consumed by the next click.
+func TestPreviewConsumedByNextClick(t *testing.T) {
+	s := New(720, 440)
+	s.Preview = &PreviewOverlay{Path: "/x", Lines: []string{"x"}}
+	if !s.HandleMouseButton(SidebarWidth+5, HeaderBarHeight+ColumnHeaderHeight+5, 0, 1) {
+		// The fall-through click lands on row 0 and selects/descends, so a
+		// false return would be wrong unless it lands outside any row -- in
+		// this layout it lands on row 0 (a folder) so the descent reports
+		// true. Either way Preview must clear.
+	}
+	if s.Preview != nil {
+		t.Errorf("preview still set after next click")
+	}
+}
+
+// menuHitIndex on a nil menu returns -1 (defensive call).
+func TestMenuHitIndexNilMenu(t *testing.T) {
+	s := New(720, 440)
+	if idx := s.menuHitIndex(0, 0); idx != -1 {
+		t.Errorf("menuHitIndex on nil menu = %d, want -1", idx)
+	}
+}
+
+// applyMenuAction("delete", "") is a no-op.
+func TestApplyMenuActionEmptyDelete(t *testing.T) {
+	s := New(720, 440)
+	s.applyMenuAction("delete", "")
+	// VFS unchanged.
+	es, _ := s.VFS.List("/")
+	if len(es) != 4 {
+		t.Errorf("root after empty delete = %d entries, want 4", len(es))
+	}
+}
+
+// hasTextExt covers the previewable filename rule.
+func TestHasTextExt(t *testing.T) {
+	cases := []struct {
+		name string
+		want bool
+	}{
+		{"foo.txt", true},
+		{"foo.md", true},
+		{"foo.png", false},
+		{"a", false},
+		{"", false},
+	}
+	for _, c := range cases {
+		if got := hasTextExt(c.name); got != c.want {
+			t.Errorf("hasTextExt(%q) = %v, want %v", c.name, got, c.want)
+		}
+	}
+}
+
+// splitLines respects the maxLines cap.
+func TestSplitLines(t *testing.T) {
+	if out := splitLines("", 5); out != nil {
+		t.Errorf("splitLines empty = %v", out)
+	}
+	if out := splitLines("a\nb\nc", 2); len(out) != 2 || out[0] != "a" || out[1] != "b" {
+		t.Errorf("splitLines cap = %v", out)
+	}
+	if out := splitLines("a\nb\nc\n", 10); len(out) != 3 {
+		t.Errorf("splitLines trailing newline = %v", out)
+	}
+	if out := splitLines("noLF", 10); len(out) != 1 || out[0] != "noLF" {
+		t.Errorf("splitLines noLF = %v", out)
+	}
+}
+
+// itoa covers 0, positive, negative.
+func TestItoa(t *testing.T) {
+	cases := []struct {
+		in   int
+		want string
+	}{
+		{0, "0"}, {1, "1"}, {10, "10"}, {123, "123"}, {-7, "-7"},
+	}
+	for _, c := range cases {
+		if got := itoa(c.in); got != c.want {
+			t.Errorf("itoa(%d) = %q, want %q", c.in, got, c.want)
+		}
+	}
+}
+
+// openPreview on a missing file leaves Preview cleared.
+func TestOpenPreviewMissing(t *testing.T) {
+	s := New(720, 440)
+	s.openPreview("/does-not-exist")
+	if s.Preview != nil {
+		t.Errorf("Preview set on missing file: %+v", s.Preview)
+	}
+}
+
+// openPreview on an empty file shows the (empty file) sentinel line.
+func TestOpenPreviewEmptyFile(t *testing.T) {
+	s := New(720, 440)
+	_ = s.VFS.Write("/empty", nil)
+	s.openPreview("/empty")
+	if s.Preview == nil || len(s.Preview.Lines) != 1 || s.Preview.Lines[0] != "(empty file)" {
+		t.Errorf("empty-file preview = %+v", s.Preview)
+	}
+}
+
+// createSibling bails out of its retry loop after 1000 attempts.
+func TestCreateSiblingExhausts(t *testing.T) {
+	s := New(720, 440)
+	// Pre-fill all 1000 slots so the loop completes without creating
+	// anything. This exercises the "exit silently" tail of the loop.
+	_ = s.VFS.Write("/untitled.txt", nil)
+	for i := 1; i < 1000; i++ {
+		_ = s.VFS.Write("/untitled-"+itoa(i)+".txt", nil)
+	}
+	s.createSibling(false)
+	// untitled-1000 must NOT exist (loop exited at i<1000).
+	if _, err := s.VFS.Stat("/untitled-1000.txt"); err == nil {
+		t.Errorf("createSibling overshot the retry cap")
+	}
+}

@@ -68,14 +68,36 @@ func main() {
 		client.Call("launch", app)
 	}
 
-	// restore asks the compositor to un-minimize a folded window the user
-	// clicked on its task button. Travels over the SDK's MessagePort just
+	// focus asks the compositor to raise + focus a window the user
+	// left-clicked on its iconbar button. Travels over the SDK's MessagePort
+	// just like `launch`; the compositor's WindowManager.handle_client_message
+	// routes the message to its `:focus` arm — which also restores the window
+	// first if it was minimized, matching Fluxbox semantics (one click on an
+	// iconbar entry brings the window to the foreground). The compositor then
+	// pushes a refreshed window list back through `windows_changed`.
+	focusWin := func(id int) {
+		println("wasmdock: focus", id)
+		client.Call("focus", id)
+	}
+
+	// closeWin asks the compositor to close a window the user right-clicked
+	// on its iconbar button. Same effect as clicking the window's title-bar
+	// close box. Fire-and-forget; the compositor drops the message for an
+	// unknown or panel id.
+	closeWin := func(id int) {
+		println("wasmdock: close", id)
+		client.Call("closeWindow", id)
+	}
+
+	// setWorkspace asks the compositor to switch the active workspace to
+	// `index` (1..workspaceCount). Travels over the SDK's MessagePort just
 	// like `launch`; the compositor's WindowManager.handle_client_message
-	// routes the message to its `:restore` arm and pushes a refreshed
-	// tasks list back through `tasks_changed`.
-	restore := func(id int) {
-		println("wasmdock: restore", id)
-		client.Call("restore", id)
+	// routes the message to its `:set_workspace` arm and broadcasts a
+	// `workspace_changed` event back here on success (which updates the
+	// model + repaints).
+	setWorkspace := func(index int) {
+		println("wasmdock: setWorkspace", index)
+		client.Call("setWorkspace", index)
 	}
 
 	// Initial paint so the compositor has something to blit immediately.
@@ -98,28 +120,87 @@ func main() {
 		case "mousedown":
 			x := ev.Get("x").Int()
 			y := ev.Get("y").Int()
+			// Mouse button: 0 = left, 2 = right (matches the W3C DOM
+			// MouseEvent.button). The compositor forwards the raw value via
+			// forward_mouse_to_client; missing field falls back to 0.
+			button := 0
+			if b := ev.Get("button"); !b.IsUndefined() && !b.IsNull() {
+				button = b.Int()
+			}
+			// Workspace section: left-click cycles to the next workspace.
+			// A right-click is reserved for a future "workspace menu" — in
+			// v0 it is a no-op (no popup yet, no per-workspace context).
+			if state.HitTestWorkspace(x, y) {
+				if button != 2 {
+					setWorkspace(state.NextWorkspace())
+				}
+				break
+			}
 			if i := state.HitTest(x, y); i >= 0 {
 				launch(state.Apps[i].Id)
 				break
 			}
-			if i := state.HitTestTask(x, y); i >= 0 {
-				restore(state.Tasks[i].Id)
+			if i := state.HitTestWindow(x, y); i >= 0 {
+				id := state.Windows[i].Id
+				if button == 2 {
+					// Right-click on a window button: close the window.
+					closeWin(id)
+				} else {
+					// Left-click (or any non-right button): focus + raise
+					// (restoring first if minimized).
+					focusWin(id)
+				}
 			}
-		case "tasks_changed":
-			// Compositor pushes the current minimized-window list as a
-			// JSON-encoded array string under `tasks_json`. We parse it
-			// into a fresh []scene.Task and re-render so the iconbar
-			// reflects the new state.
-			raw := ev.Get("tasks_json")
+		case "wheel":
+			// Scroll-wheel input: cycle workspaces when the wheel fires over
+			// the workspace section. deltaY > 0 = scroll DOWN = forward
+			// (next workspace); deltaY < 0 = scroll UP = backward (previous
+			// workspace). A wheel elsewhere on the toolbar is ignored.
+			x := ev.Get("x").Int()
+			y := ev.Get("y").Int()
+			if !state.HitTestWorkspace(x, y) {
+				break
+			}
+			dy := 0.0
+			if d := ev.Get("deltaY"); !d.IsUndefined() && !d.IsNull() {
+				dy = d.Float()
+			}
+			if dy > 0 {
+				setWorkspace(state.NextWorkspace())
+			} else if dy < 0 {
+				setWorkspace(state.PrevWorkspace())
+			}
+		case "workspace_changed":
+			// Compositor pushes the new active workspace + total count after
+			// a successful set_workspace. Update the model + repaint so the
+			// workspace section shows the new "<active> of <count>" label.
+			// The compositor sends a windows_changed immediately after this
+			// event, so the iconbar refresh is handled by that arm and we
+			// only need to re-render the workspace label here.
+			if c := ev.Get("count"); !c.IsUndefined() && !c.IsNull() {
+				state.SetWorkspaceCount(c.Int())
+			}
+			if a := ev.Get("active"); !a.IsUndefined() && !a.IsNull() {
+				state.SetActiveWorkspace(a.Int())
+			}
+			render()
+		case "windows_changed":
+			// Compositor pushes the current open-window list as a
+			// JSON-encoded array string under `windows_json`. We parse it
+			// into a fresh []scene.Window and re-render so the iconbar
+			// reflects the new state (new window, close, minimize, restore,
+			// focus shift, title rename — every state-changing event posts
+			// a fresh windows_changed).
+			raw := ev.Get("windows_json")
 			if raw.IsUndefined() || raw.IsNull() {
-				state.SetTasks(nil)
+				state.SetWindows(nil)
 			} else {
-				var parsed []scene.Task
+				var parsed []scene.Window
 				if err := json.Unmarshal([]byte(raw.String()), &parsed); err != nil {
-					println("wasmdock: tasks_changed parse error:", err.Error())
+					println("wasmdock: windows_changed parse error:", err.Error())
 					parsed = nil
 				}
-				state.SetTasks(parsed)
+				state.SetWindows(parsed)
 			}
 			render()
 		case "tick":

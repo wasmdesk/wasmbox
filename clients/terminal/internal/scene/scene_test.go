@@ -133,9 +133,11 @@ func TestHandleKeyEnterClear(t *testing.T) {
 			nonZero++
 		}
 	}
-	if nonZero != len(s.Shell.Prompt) {
+	// The prompt the shell paints after a clear is the full PromptString()
+	// (cwd + trailing prompt), not just sh.Prompt.
+	if nonZero != len(s.Shell.PromptString()) {
 		t.Fatalf("after `clear`, non-zero cells = %d, want prompt-length %d",
-			nonZero, len(s.Shell.Prompt))
+			nonZero, len(s.Shell.PromptString()))
 	}
 }
 

@@ -3,19 +3,27 @@
 // found in the LICENSE file at the root of this repository.
 
 // Package scene drives the terminal client: a Grid (character buffer + cursor),
-// a Shell (line-editor + builtin dispatch), and a renderer that rasterises the
-// Grid into the SAB pixel buffer the compositor blits.
+// a Shell (line-editor + builtin dispatch wired to a clients/sharedvfs VFS),
+// and a renderer that rasterises the Grid into the SAB pixel buffer the
+// compositor blits.
 //
 // The terminal is a real (if tiny) interactive shell: typing printable ASCII
 // extends the edit line, Backspace shrinks it, Enter executes via Shell, and
 // the shell's output lines are painted into the Grid above a fresh prompt.
+// File commands (cat / cd / mkdir / touch / rm / ls / echo > path) speak the
+// SAME VFS the files browser paints, so writes from the terminal show up in
+// the file browser (and survive page reloads when the VFS is IDB-backed).
 //
 // Everything in this file is pure Go (no syscall/js) so the layer is unit-
 // testable on any host. The wasm entry point (main.go) feeds keystrokes in
 // through HandleKey() and pulls bytes out through Render() every frame.
 package scene
 
-import "strings"
+import (
+	"strings"
+
+	"github.com/wasmdesk/wasmbox/clients/sharedvfs"
+)
 
 // State is the top-of-package handle the wasm entry point holds. It carries
 // the surface size, the character grid, and the shell. Surface size is fixed
@@ -27,11 +35,20 @@ type State struct {
 	Shell *Shell
 }
 
-// New constructs a State for a width x height pixel surface. The grid is
-// sized by dividing the surface into 16-pixel cells (scale=2 of the 8x8
-// font), which gives a comfortable 40 col x 25 row layout at 640x400.
-// Surfaces smaller than the font cell still produce a usable 1-cell grid.
+// New constructs a State for a width x height pixel surface backed by a
+// freshly seeded demo InMemoryVFS. Tests + the non-wasm host path use this.
+// The wasm boot path reaches for NewWithVFS to hand in an IDB-backed VFS so
+// the terminal observes the same tree as the files browser.
 func New(width, height int) *State {
+	v := sharedvfs.NewInMemoryVFS()
+	sharedvfs.SeedDemoTree(v)
+	return NewWithVFS(width, height, v)
+}
+
+// NewWithVFS constructs a State whose Shell talks to the supplied VFS. Used
+// by the wasm boot path to share an IDB-backed VFS with the files browser
+// (and by tests that want a deterministic empty tree).
+func NewWithVFS(width, height int, v sharedvfs.VFS) *State {
 	cols := width / (FontW * 2)
 	rows := height / (FontH * 2)
 	if cols < 1 {
@@ -44,7 +61,7 @@ func New(width, height int) *State {
 		W:     width,
 		H:     height,
 		Grid:  NewGrid(cols, rows),
-		Shell: NewShell(),
+		Shell: NewShellWithVFS(v),
 	}
 	s.writePrompt()
 	return s
@@ -109,12 +126,16 @@ func (s *State) HandleKey(key string) bool {
 }
 
 // writePrompt paints the shell's prompt into the grid at the current cursor.
-// We tint the prompt cyan so it visually separates from echoed input.
+// The prompt is composed of the cwd (in cyan, so it stands out as a path)
+// followed by the trailing prompt string (also cyan, matching the previous
+// `$ ` look). Tinting both keeps the line visually distinct from echoed
+// input which lands in the default ink.
 func (s *State) writePrompt() {
 	prev := s.Grid.FG
 	s.Grid.FG = 1 // cyan
-	for i := 0; i < len(s.Shell.Prompt); i++ {
-		s.Grid.Print(s.Shell.Prompt[i])
+	p := s.Shell.PromptString()
+	for i := 0; i < len(p); i++ {
+		s.Grid.Print(p[i])
 	}
 	s.Grid.FG = prev
 }

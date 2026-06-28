@@ -50,7 +50,7 @@ end
 # Pure data + math; no JS here.
 # ---------------------------------------------------------------------------
 class Window
-  attr_accessor :id, :title, :x, :y, :w, :h, :fill, :focused, :role, :minimized
+  attr_accessor :id, :title, :x, :y, :w, :h, :fill, :focused, :role, :minimized, :workspace
 
   def initialize(id, title, x, y, w, h, fill, role = "window")
     @id = id
@@ -70,6 +70,14 @@ class Window
     # pipeline (decoration + body) but kept in the stack so a click on its
     # entry in the dock's iconbar can restore it. Panels are never minimized.
     @minimized = false
+    # Fluxbox-style workspaces: every normal window belongs to exactly one
+    # workspace (1..WorkspaceCount). Only the active workspace's windows
+    # render and appear in the iconbar. Panels ignore the workspace field —
+    # they are always visible (workspace = 0 sentinel, set by spawn paths).
+    # WindowManager.register_external / WindowManager.spawn fill this in at
+    # creation time so the default here only matters for direct Window.new
+    # callers in tests.
+    @workspace = 1
   end
 
   def focused? = @focused
@@ -269,10 +277,24 @@ class WindowManager
   # surfaces); "editor" stays on the bundled hello client until a dedicated
   # editor client lands. A click on a dock icon thus opens a window whose
   # title matches the icon, completing the user-visible launch chain.
+  #
+  # The desktop root-menu (right-click an empty area of the desktop, see RootMenu
+  # below) reads this same table to populate its "Applications" submenu: an id
+  # listed here can be launched from the menu, anything else cannot. Keep the
+  # registry the SINGLE source of truth for the launch trust boundary so both
+  # surfaces (dock + root-menu) agree on what is launchable.
   LAUNCHABLE = {
     "terminal"  => "clients/terminal/worker.js",
     "editor"    => "clients/hello/worker.js",
     "files"     => "clients/files/worker.js",
+    # Bundled hello client (the wasm "Hello, wasmbox!" demo). Same descriptor
+    # shape as terminal/files; the root menu exposes it as "Hello (wasm)".
+    "hello"     => "clients/hello/worker.js",
+    # Bundled quake client (pure-Go Quake 1, from the sibling go-quake1 repo).
+    # The wasm is huge (~190 MB) and may not be built locally, but the worker.js
+    # is part of the wasmbox tree, so the descriptor is always safe — the worker
+    # surfaces an error window when the wasm is missing, never the compositor.
+    "quake"     => "clients/quake/worker.js",
     # OCI demo ids (resolved against WASMBOX_OCI_REGISTRIES or the default
     # http://127.0.0.1:5000 registry). The id "hello-oci" mirrors the bundled
     # hello client but pulls it from the registry instead of from disk; it
@@ -281,6 +303,14 @@ class WindowManager
   }.freeze
 
   LAYOUT_SEP = "\t"
+
+  # Fluxbox-style virtual workspaces. WORKSPACE_COUNT is fixed at 4 (numbered
+  # 1..4); the active workspace defaults to 1 at boot. Every normal window
+  # belongs to exactly one workspace and only the active workspace's windows
+  # render + appear in the iconbar. Panels (the dock) ignore the workspace
+  # field and are always visible — the dock IS the UI that switches
+  # workspaces, so hiding it with the windows would be a usability bug.
+  WORKSPACE_COUNT = 4
 
   def initialize
     @stack = []
@@ -292,9 +322,64 @@ class WindowManager
     # panel is never focused, so wm.focused cannot identify a freshly-registered
     # panel.
     @last_registered = nil
+    # Stash for the window most recently closed by a peer-issued `close` wire
+    # message (the dock right-clicking an iconbar entry). Filled in by
+    # handle_client_message's "close" arm BEFORE the close so the Compositor
+    # can post a `closed` event to the gone window's worker without a
+    # post-close lookup. Cleared by reader on consumption.
+    @last_closed_by_peer = nil
     # Records the most recent commit/lifecycle messages we have processed, for
     # introspection from tests. (Bounded to the last 16 — pure data.)
     @last_messages = []
+    # Currently active workspace (1..WORKSPACE_COUNT). New windows land here;
+    # render + windows_snapshot filter to this number.
+    @active_workspace = 1
+    @workspace_count = WORKSPACE_COUNT
+  end
+
+  # Active workspace accessor; the dock reads it via the `workspace_changed`
+  # event payload, tests read it directly.
+  def active_workspace = @active_workspace
+  def workspace_count  = @workspace_count
+
+  # Switch the active workspace to n (1..workspace_count). Returns the new
+  # active workspace on a real change, nil when n is out of range or already
+  # active (so the Compositor can skip a redundant broadcast). Pure state —
+  # the render loop reads @active_workspace on its next frame.
+  def set_workspace(n)
+    return nil unless n.is_a?(Integer)
+    return nil if n < 1 || n > @workspace_count
+    return nil if n == @active_workspace
+    @active_workspace = n
+    # Focus must follow the active workspace: the previously-focused window
+    # may live on a different workspace now (and so must not advertise itself
+    # as focused). Re-pick the top normal non-minimized window on the new
+    # workspace. We clear ALL focus first to keep the "exactly one focused
+    # window" invariant; if no window exists on the new workspace, focus
+    # legitimately becomes nil until one is spawned.
+    @stack.each { |o| o.focused = false unless o.panel? }
+    next_top = nil
+    @stack.each do |w|
+      next_top = w if !w.panel? && !w.minimized? && w.workspace == @active_workspace
+    end
+    next_top.focused = true if next_top
+    @active_workspace
+  end
+
+  # Windows on workspace n (bottom-to-top, panels excluded). Public so callers
+  # (and tests) can introspect per-workspace contents without rebuilding the
+  # filter inline.
+  def windows_on_workspace(n)
+    @stack.select { |w| !w.panel? && w.workspace == n }
+  end
+
+  # Consume + clear the most recent peer-close stash. The route layer reads
+  # this exactly once after a :closed_by_peer dispatch and posts the `closed`
+  # event to the now-removed window's worker.
+  def take_last_closed_by_peer
+    p = @last_closed_by_peer
+    @last_closed_by_peer = nil
+    p
   end
 
   # Apply any persisted geometry for win.title (size + position), overriding the
@@ -339,17 +424,22 @@ class WindowManager
 
   def windows = @stack
 
-  # The keyboard-focused window: the top-most NORMAL non-minimized window.
-  # Panels (the dock) are excluded from the focus ring, so a panel is never
-  # "focused" even though it sits on top visually. A minimized window has been
-  # folded into the dock's iconbar and is not visible on the canvas; it must
-  # not receive synthetic focus traffic either. Returns nil when no normal
-  # non-minimized window exists.
+  # The keyboard-focused window: the top-most NORMAL non-minimized window
+  # ON THE ACTIVE WORKSPACE. Panels (the dock) are excluded from the focus
+  # ring, so a panel is never "focused" even though it sits on top visually.
+  # A minimized window has been folded into the dock's iconbar and is not
+  # visible on the canvas; it must not receive synthetic focus traffic
+  # either. A window on a different workspace is hidden + cannot receive
+  # focus traffic on the active one. Returns nil when no normal non-minimized
+  # window exists on the active workspace.
   def focused
     top = nil
-    # Only decorated windows take keyboard focus; panels and popups are skipped
-    # (a popup still receives mouse input by hit-testing, just not focus).
-    @stack.each { |w| top = w if w.decorated? && !w.minimized? }
+    # Only decorated windows take keyboard focus (panels + popups are excluded;
+    # a popup still gets mouse input by hit-testing), and only those on the
+    # active workspace.
+    @stack.each do |w|
+      top = w if w.decorated? && !w.minimized? && w.workspace == @active_workspace
+    end
     top
   end
 
@@ -440,7 +530,9 @@ class WindowManager
   attr_reader :last_messages
 
   # Cascade placement, Openbox-style: each new window steps down-and-right and
-  # wraps once it would run off a notional screen.
+  # wraps once it would run off a notional screen. Spawned onto the active
+  # workspace — the user spawned it from there, so that is where they want to
+  # see it.
   def spawn(title, w = 240, h = 150)
     @next_id += 1
     step = 28
@@ -451,6 +543,7 @@ class WindowManager
     @cascade += 1
     fill = PALETTE[(@next_id - 1) % PALETTE.length]
     win = Window.new(@next_id, title, x, y, w, h, fill)
+    win.workspace = @active_workspace
     @stack.push(win)
     focus(win)
     apply_saved(win)
@@ -504,10 +597,14 @@ class WindowManager
     return nil if win.minimized?
     win.minimized = true
     # Clear focus so on-screen state matches: a minimized window cannot be
-    # the focused one. The top normal non-minimized window takes focus.
+    # the focused one. The top normal non-minimized window ON THE ACTIVE
+    # WORKSPACE takes focus (workspace-foreign windows are not visible and
+    # cannot capture focus).
     @stack.each { |o| o.focused = false unless o.panel? }
     next_top = nil
-    @stack.each { |w| next_top = w if !w.panel? && !w.minimized? }
+    @stack.each do |w|
+      next_top = w if !w.panel? && !w.minimized? && w.workspace == @active_workspace
+    end
     next_top.focused = true if next_top
     win
   end
@@ -529,33 +626,51 @@ class WindowManager
     @stack.select { |w| w.minimized? && !w.panel? }
   end
 
-  # Snapshot the current minimized windows as plain Hashes the Compositor can
-  # serialize and post to the dock as a tasks_changed event. Pure data — no JS.
-  def tasks_snapshot
-    minimized_windows.map { |w| { id: w.id, title: w.title.to_s } }
+  # Snapshot every non-panel window ON THE ACTIVE WORKSPACE (open + minimized),
+  # bottom-to-top, as plain Hashes the Compositor can serialize and post to
+  # the dock as a `windows_changed` event. Each entry carries:
+  #   :id         compositor window id (echoed back in focus/close/restore wires)
+  #   :title      current title (verbatim)
+  #   :minimized  true iff the window is currently folded into the iconbar
+  #   :focused    true iff this is the keyboard-focused window
+  #   :role       "window" (always non-panel here — panels are filtered out)
+  #   :workspace  workspace number this window lives on (always == active
+  #               workspace in the current snapshot, since the filter drops
+  #               foreign ones — but the field is sent so a future "show all"
+  #               panel view can read it without a schema change)
+  # The order mirrors the stack so first-spawned windows sit leftmost in the
+  # iconbar even when later windows are raised on top. Pure data — no JS.
+  def windows_snapshot
+    @stack.select { |w| !w.panel? && w.workspace == @active_workspace }.map do |w|
+      { id: w.id, title: w.title.to_s, minimized: w.minimized?,
+        focused: w.focused?, role: w.role.to_s, workspace: w.workspace }
+    end
   end
 
   # Top-most window under the pointer (search the stack top-down). A minimized
   # window has been folded into the dock's iconbar — it leaves no pixels on the
   # canvas, so a click at its former coordinates must NOT hit it. The
   # compositor's render loop skips minimized windows for the same reason; this
-  # keeps input + paint in lockstep.
+  # keeps input + paint in lockstep. Windows on inactive workspaces are
+  # likewise invisible and unhittable.
   def window_at(px, py)
     hit = nil
     @stack.each do |w|
       next if w.minimized?
+      next if !w.panel? && w.workspace != @active_workspace
       hit = w if w.contains?(px, py) # last (topmost) wins
     end
     hit
   end
 
-  # Alt+Tab-ish cycle over the NORMAL non-minimized windows only — panels (the
-  # dock) and minimized windows are excluded from the focus ring so Tab never
-  # lands on the dock or on a folded window. Sends the current focused window
-  # to the bottom of the normal pool and focuses the next normal window down,
-  # so repeated presses walk the whole visible app stack.
+  # Alt+Tab-ish cycle over the NORMAL non-minimized windows ON THE ACTIVE
+  # WORKSPACE only — panels (the dock), minimized windows, and windows on
+  # other workspaces are excluded from the focus ring so Tab never lands on
+  # any of them. Sends the current focused window to the bottom of the normal
+  # pool and focuses the next normal window down, so repeated presses walk
+  # the visible-on-this-workspace app stack.
   def cycle
-    normals = normal_windows.reject(&:minimized?)
+    normals = normal_windows.reject(&:minimized?).select { |w| w.workspace == @active_workspace }
     return nil if normals.length < 2
     top = normals.last
     next_win = normals[-2]
@@ -607,6 +722,11 @@ class WindowManager
     end
     win = ExternalWindow.new(@next_id, title, x, y, granted_w, granted_h, role)
     win.parent_id = parent_id if role == "popup"
+    # A panel is always visible (never workspace-filtered), encoded by the 0
+    # sentinel so workspace_filtered renders + snapshots skip it cleanly. A
+    # normal/popup window lands on the active workspace at register time — the
+    # user opened it from there, so that is where it appears.
+    win.workspace = (role == "panel") ? 0 : @active_workspace
     # Newest surface goes on top: a popup naturally sits above its (older)
     # parent. Panels are pinned on top each frame by the Compositor regardless.
     @stack.push(win)
@@ -681,6 +801,56 @@ class WindowManager
       return :ignored unless win.minimized?
       restore_window(win)
       :restored
+    when "focus"
+      # The dock asks to focus + raise a window the user clicked on its iconbar.
+      # If the window is currently minimized we also restore it (Fluxbox semantics:
+      # one click on an iconbar entry brings the window to the foreground regardless
+      # of its current state). Unknown id or panel id is dropped.
+      win = find(msg[:window_id])
+      return :ignored unless win
+      return :ignored if win.panel?
+      if win.minimized?
+        restore_window(win)
+      else
+        focus(win)
+      end
+      :focused
+    when "set_workspace"
+      # The dock asks to switch the active workspace (Fluxbox: click or scroll
+      # on the workspace section of the toolbar). An out-of-range or already-
+      # active index is dropped — the compositor's caller skips a redundant
+      # broadcast based on the :ignored result so the dock does not spin.
+      idx = msg[:index]
+      idx = idx.to_i if !idx.is_a?(Integer) && !idx.nil?
+      changed = set_workspace(idx)
+      changed.nil? ? :ignored : :workspace_changed
+    when "move_window"
+      # Reserved for v1: drag a window to another workspace via the dock. The
+      # wire shape `{type:"move_window", window_id:, workspace:}` updates
+      # win.workspace and refreshes the snapshot. The dock UI for it (click +
+      # hold a window-iconbar entry, drag onto a workspace number) is not in
+      # v0 — only the message arm is reserved so the wire protocol stays
+      # forward-compatible.
+      :ignored
+    when "close"
+      # The dock asks to close a window the user right-clicked on its iconbar.
+      # Same effect as clicking the window's close box. Unknown id or panel id
+      # is dropped. Returns :closed_by_peer (distinct from the :closed symbol
+      # used by a window closing ITSELF via request_close) so the Compositor
+      # tells the CLOSED window's worker about the closure — not the dock's
+      # worker, which is the peer that asked. The closed window's worker ref
+      # + id are stashed in @last_closed_by_peer so route_worker_message can
+      # post the `closed` event without re-looking-up a window we just removed
+      # from the stack. An in-process (non-external) window has no worker, so
+      # the stash carries external: false and the route layer skips the post.
+      win = find(msg[:window_id])
+      return :ignored unless win
+      return :ignored if win.panel?
+      ext = win.external?
+      w_ref = ext ? win.worker : nil
+      @last_closed_by_peer = { worker: w_ref, window_id: win.id, external: ext }
+      close(win)
+      :closed_by_peer
     else
       :ignored
     end
@@ -713,6 +883,180 @@ class WindowManager
 end
 
 # ---------------------------------------------------------------------------
+# Menu — a single hierarchical popup menu (Openbox-style). Each entry is a
+# plain Hash so the same structure can describe a regular leaf, a separator,
+# or a sub-menu opener:
+#
+#   { label: "Terminal",      action: [:launch, "terminal"]      }
+#   { label: "Applications",  submenu: <Menu> }
+#   { separator: true }
+#
+# Pure data + math: hit_test answers WHICH entry a (mx, my) pair falls in;
+# region answers the [x, y, w, h] rectangle the menu paints into. The
+# Compositor owns the canvas paint + the action dispatcher.
+# ---------------------------------------------------------------------------
+class Menu
+  ITEM_H = 24      # row height, per spec
+  WIDTH  = 170     # default menu width
+  SEP_H  = 6       # separator row height (a thin divider, not a full row)
+  PAD_X  = 8       # left/right text padding
+
+  attr_reader :entries
+
+  def initialize(entries)
+    @entries = entries
+  end
+
+  # The pixel height required to paint this menu, summed over every entry
+  # (separators are shorter than regular rows).
+  def height
+    h = 0
+    @entries.each { |e| h += e[:separator] ? SEP_H : ITEM_H }
+    h
+  end
+
+  # Bounding rectangle when popped up at (x, y), as [x, y, w, h].
+  def region(x, y)
+    [x, y, WIDTH, height]
+  end
+
+  # Index of the entry containing the point (mx, my) when the menu is popped
+  # up at (x, y), or -1 if the point falls outside the menu region (or on a
+  # separator, which is not selectable). Separators occupy SEP_H rather than
+  # the full ITEM_H, and they advance the cursor without being targetable.
+  #
+  # Implementation note: rbgo does NOT propagate a `return` from a block to
+  # the enclosing method (the block-local return only exits the block — see
+  # WindowManager#find for the same workaround). So we walk with a while-loop.
+  def hit_test(x, y, mx, my)
+    return -1 if mx < x || mx >= x + WIDTH
+    return -1 if my < y
+    cy = y
+    i = 0
+    n = @entries.length
+    while i < n
+      e = @entries[i]
+      row_h = e[:separator] ? SEP_H : ITEM_H
+      if my < cy + row_h
+        return -1 if e[:separator]
+        return i
+      end
+      cy += row_h
+      i += 1
+    end
+    -1
+  end
+
+  # Top-y of entry i when the menu starts at y. Needed by the Compositor to
+  # position a sub-menu flush with the parent entry it opens from. Walks with
+  # an indexed while-loop because rbgo block-return does not unwind the
+  # enclosing method.
+  def entry_top(y, idx)
+    cy = y
+    i = 0
+    n = @entries.length
+    while i < n
+      return cy if i == idx
+      cy += @entries[i][:separator] ? SEP_H : ITEM_H
+      i += 1
+    end
+    cy
+  end
+
+  # Convenience for the renderer: walk entries with their (y, h) row metrics.
+  # Yields [entry, row_y, row_h, index] for each entry.
+  def each_row(y)
+    cy = y
+    @entries.each_with_index do |e, i|
+      row_h = e[:separator] ? SEP_H : ITEM_H
+      yield e, cy, row_h, i
+      cy += row_h
+    end
+  end
+end
+
+# ---------------------------------------------------------------------------
+# RootMenu — builder for the desktop right-click menu (the Openbox "root
+# menu"). Hierarchy:
+#
+#   Applications →   (one entry per LAUNCHABLE id, label-formatted)
+#   Workspaces   →   (one entry per workspace 1..wm.workspace_count)
+#   ──────────       (separator)
+#   About wasmbox    (v0: dismiss-only)
+#   Reload           (v0: dismiss-only)
+#   Exit             (v0: dismiss-only)
+#
+# Pure: takes a WindowManager and returns a Menu. The Compositor pops it on
+# right-click of an empty desktop area and dispatches the selected entry.
+# ---------------------------------------------------------------------------
+module RootMenu
+  # Label overrides for the Applications submenu — every LAUNCHABLE id gets an
+  # entry, but the labels in the menu are human-friendly rather than the raw
+  # ids. An id missing from this map falls back to the capitalized id.
+  APP_LABELS = {
+    "terminal"  => "Terminal",
+    "editor"    => "Editor",
+    "files"     => "Files",
+    "hello"     => "Hello (wasm)",
+    "quake"     => "Quake",
+    "hello-oci" => "Hello (OCI)",
+  }.freeze
+
+  # IDs the root menu intentionally OMITS from the Applications submenu. The
+  # "editor" id currently aliases the hello worker (see LAUNCHABLE) so listing
+  # both would show two identical-looking entries. "hello-oci" is a probe-only
+  # demo, not a user-facing app.
+  HIDDEN = ["hello-oci"].freeze
+
+  # Compose the apps + workspaces submenus and the top-level menu.
+  def self.build(wm)
+    Menu.new([
+      { label: "Applications", submenu: build_apps(wm) },
+      { label: "Workspaces",   submenu: build_workspaces(wm) },
+      { separator: true },
+      { label: "About wasmbox", action: [:noop, "about"] },
+      { label: "Reload",        action: [:noop, "reload"] },
+      { label: "Exit",          action: [:noop, "exit"] },
+    ])
+  end
+
+  # Build the Applications submenu from the LAUNCHABLE registry. The order
+  # follows APP_LABELS insertion order so the listing is stable + readable
+  # (terminal/editor/files first, hello, then quake), with any LAUNCHABLE ids
+  # we did not pre-label appended at the end.
+  def self.build_apps(wm)
+    rows = []
+    seen = {}
+    APP_LABELS.each do |id, label|
+      next if HIDDEN.include?(id)
+      next unless wm.launchable?(id)
+      rows << { label: label, action: [:launch, id] }
+      seen[id] = true
+    end
+    # Hash#each_key is not implemented in rbgo — iterate with #each and the
+    # 2-arg destructure shape so we only need the key.
+    WindowManager::LAUNCHABLE.each do |id, _desc|
+      next if seen[id]
+      next if HIDDEN.include?(id)
+      rows << { label: id.to_s.capitalize, action: [:launch, id] }
+    end
+    Menu.new(rows)
+  end
+
+  # Build the Workspaces submenu. One entry per workspace, 1..wm.workspace_count.
+  def self.build_workspaces(wm)
+    rows = []
+    n = wm.workspace_count
+    i = 1
+    while i <= n
+      rows << { label: "Workspace #{i}", action: [:workspace, i] }
+      i += 1
+    end
+    Menu.new(rows)
+  end
+end
+
+# ---------------------------------------------------------------------------
 # Compositor — owns the WM, the canvas and the input/render loop. This is the
 # only part that talks to the JS bridge.
 # ---------------------------------------------------------------------------
@@ -720,7 +1064,14 @@ class Compositor
   def initialize(wm)
     @wm = wm
     @drag = nil      # {win:, mode: :move|:resize, dx:, dy:}
-    @menu = nil      # {x:, y:, items: [[label, action]]}
+    # @menu is either nil (no popup) or a Hash describing the active popup:
+    #   { x:, y:, menu: <Menu>, kind: :root|:window, win:?, hover:?,
+    #     submenu_idx:?, submenu:?, submenu_x:?, submenu_y:?, submenu_hover:? }
+    # The :root variant is the desktop right-click root menu (hierarchical,
+    # with one open submenu at a time). The :window variant is the per-window
+    # context menu (flat, with Raise/Close). Both share the Menu rendering /
+    # hit-test path; only the action dispatcher branches on :kind.
+    @menu = nil
     @frames = 0
     @last_t = 0.0
     @fps = 0.0
@@ -855,6 +1206,11 @@ class Compositor
         "granted_w", win.w,
         "granted_h", win.h)
       JS.global.call("wasmboxPostMessage", worker, welcome)
+      # A new window joins the iconbar — but only AFTER the dock panel itself
+      # has registered, otherwise notify_windows_changed is a no-op anyway. For
+      # the dock's own welcome, notify_windows_changed still publishes the
+      # initial list of any already-spawned in-process boot windows.
+      notify_windows_changed
     when :launch
       # Validated launch: route by descriptor shape.
       #   String      → wasmboxSpawnWorker(url) via spawn_external
@@ -874,24 +1230,60 @@ class Compositor
       stub_msg = JS.global.call("wasmboxMakeObject",
         "type", "closed", "window_id", win_id, "reason", "client")
       JS.global.call("wasmboxPostMessage", worker, stub_msg)
-      notify_tasks_changed
+      notify_windows_changed
+    when :closed_by_peer
+      # The dock right-clicked an iconbar entry — handle_client_message already
+      # removed the window from the WM and stashed its worker ref. We post the
+      # `closed` event to THAT worker (not the peer that asked), then refresh
+      # the iconbar.
+      stash = @wm.take_last_closed_by_peer
+      if stash && stash[:external] && !stash[:worker].nil?
+        stub_msg = JS.global.call("wasmboxMakeObject",
+          "type", "closed", "window_id", stash[:window_id], "reason", "peer")
+        JS.global.call("wasmboxPostMessage", stash[:worker], stub_msg)
+      end
+      notify_windows_changed
     when :restored
-      # The dock asked to restore a minimized window — push a refreshed task
-      # list so the icon for the restored window disappears from the iconbar.
-      notify_tasks_changed
+      # The dock asked to restore a minimized window — push a refreshed window
+      # list so the icon switches back to its "open" style in the iconbar.
+      notify_windows_changed
+    when :focused
+      # The dock asked to focus a window — push a refreshed window list so the
+      # iconbar's focused indicator follows.
+      notify_windows_changed
+    when :title
+      # A client renamed itself — refresh the iconbar so the new title shows.
+      notify_windows_changed
+    when :workspace_changed
+      # The dock switched the active workspace. Two pushes back-to-back: first
+      # the workspace_changed pulse so the workspace section repaints, then
+      # the windows_changed snapshot — its content is now filtered to the new
+      # workspace, so the iconbar updates as a side-effect of the same wire
+      # call.
+      notify_workspace_changed
+      notify_windows_changed
     end
   end
 
-  # Encode the wm.tasks_snapshot array as a tiny JSON string so the dock can
+  # Encode the wm.windows_snapshot array as a tiny JSON string so the dock can
   # decode it through encoding/json without any new JS bridge helpers. The
-  # snapshot is always [{id:<int>, title:<string>}, ...]; titles are escaped
+  # snapshot is always [{id:<int>, title:<string>, minimized:<bool>,
+  # focused:<bool>, role:<string>, workspace:<int>}, ...]; titles are escaped
   # for backslash, double-quote, newline, carriage return and tab — every
-  # other ASCII character is passed through verbatim. Pure string concatenation;
-  # no JSON library required (rbgo has none).
-  def tasks_json(tasks)
+  # other ASCII character is passed through verbatim. Pure string
+  # concatenation; no JSON library required (rbgo has none).
+  def windows_json(wins)
     parts = []
-    tasks.each do |t|
-      parts << '{"id":' + t[:id].to_s + ',"title":"' + json_escape(t[:title].to_s) + '"}'
+    wins.each do |w|
+      mflag = w[:minimized] ? "true" : "false"
+      fflag = w[:focused] ? "true" : "false"
+      s = '{"id":' + w[:id].to_s
+      s += ',"title":"' + json_escape(w[:title].to_s) + '"'
+      s += ',"minimized":' + mflag
+      s += ',"focused":' + fflag
+      s += ',"role":"' + json_escape(w[:role].to_s) + '"'
+      s += ',"workspace":' + w[:workspace].to_s + '}'
+      parts << s
     end
     "[" + parts.join(",") + "]"
   end
@@ -914,23 +1306,50 @@ class Compositor
     out
   end
 
-  # Push the current tasks_changed list to the dock (the first registered
-  # panel). Delivered as an `input` event of kind "tasks_changed" carrying a
-  # JSON-encoded tasks array — this reuses the existing input-event channel
-  # the dock's SDK already dispatches, so no new SDK message type is needed.
-  # No-op when no dock panel is registered or it lacks a worker ref.
-  def notify_tasks_changed
+  # Push the current windows list (open + minimized + focus state) to the dock
+  # (the first registered panel). Delivered as an `input` event of kind
+  # "windows_changed" carrying a JSON-encoded array — this reuses the existing
+  # input-event channel the dock's SDK already dispatches, so no new SDK
+  # message type is needed. Fires from EVERY site that changes the windows
+  # list, the focus, the minimized flag, OR the active workspace (the
+  # filtered snapshot changes whenever the active workspace switches):
+  # registration, close, minimize, restore, focus, cycle, set_title,
+  # set_workspace. No-op when no dock panel is registered or it lacks a
+  # worker ref.
+  def notify_windows_changed
     panel = @wm.panels.first
     return nil unless panel
     return nil unless panel.external?
     return nil if panel.worker.nil?
-    json = tasks_json(@wm.tasks_snapshot)
+    json = windows_json(@wm.windows_snapshot)
     payload = JS.global.call("wasmboxMakeObject",
       "type", "input",
       "window_id", panel.id,
       "event", JS.global.call("wasmboxMakeObject",
-        "kind", "tasks_changed",
-        "tasks_json", json))
+        "kind", "windows_changed",
+        "windows_json", json))
+    JS.global.call("wasmboxPostMessage", panel.worker, payload)
+  end
+
+  # Push the current active workspace + total workspace count to the dock as
+  # an `input` event of kind "workspace_changed". Fires on every successful
+  # set_workspace transition so the dock's workspace section can repaint
+  # immediately, without waiting for the next windows_changed (which arrives
+  # immediately after, but conceptually the workspace UI is independent of
+  # the iconbar UI). No-op when no dock panel is registered or it lacks a
+  # worker ref.
+  def notify_workspace_changed
+    panel = @wm.panels.first
+    return nil unless panel
+    return nil unless panel.external?
+    return nil if panel.worker.nil?
+    payload = JS.global.call("wasmboxMakeObject",
+      "type", "input",
+      "window_id", panel.id,
+      "event", JS.global.call("wasmboxMakeObject",
+        "kind", "workspace_changed",
+        "active", @wm.active_workspace,
+        "count", @wm.workspace_count))
     JS.global.call("wasmboxPostMessage", panel.worker, payload)
   end
 
@@ -942,9 +1361,10 @@ class Compositor
     type = data.get("type")
     return nil if type.nil?
     h = { type: type.to_s }
-    # Scalar fields. `parent` + `rel_x` + `rel_y` carry popup placement; without
-    # them a popup hello would lose its anchor and land at (0,0).
-    %w[window_id w h stride title role app parent rel_x rel_y].each do |k|
+    # Scalar fields. `index`/`workspace` are dock + workspace controls; `parent`
+    # + `rel_x` + `rel_y` carry popup placement (without them a popup hello would
+    # lose its anchor and land at (0,0)).
+    %w[window_id w h stride title role app index workspace parent rel_x rel_y].each do |k|
       v = data.get(k)
       h[k.to_sym] = v unless v.nil?
     end
@@ -1011,8 +1431,36 @@ class Compositor
     @canvas.on("mousemove")   { |e| on_mousemove(e) }
     @canvas.on("mouseup")     { |e| on_mouseup(e) }
     @canvas.on("contextmenu") { |e| on_contextmenu(e) }
+    @canvas.on("wheel")       { |e| on_wheel(e) }
     JS.window.on("keydown")   { |e| on_keydown(e) }
     JS.window.on("keyup")     { |e| on_keyup(e) }
+  end
+
+  # Scroll-wheel input. Forwarded to the panel under the pointer (the dock —
+  # which uses wheel events on its workspace section to cycle workspaces) or
+  # to the focused external window. The compositor itself does not consume
+  # the wheel, so the page never scrolls in response (preventDefault keeps
+  # the browser from scrolling underneath us).
+  def on_wheel(e)
+    e.call("preventDefault")
+    mx = e.get("offsetX")
+    my = e.get("offsetY")
+    dy = e.get("deltaY")
+    dx = e.get("deltaX")
+    panel = panel_at(mx, my)
+    target = panel || @wm.focused
+    return nil unless target&.external?
+    return nil unless target.worker
+    payload = JS.global.call("wasmboxMakeObject",
+      "type", "input",
+      "window_id", target.id,
+      "event", JS.global.call("wasmboxMakeObject",
+        "kind", "wheel",
+        "x", mx - target.x,
+        "y", my - target.y,
+        "deltaX", dx.nil? ? 0 : dx,
+        "deltaY", dy.nil? ? 0 : dy))
+    JS.global.call("wasmboxPostMessage", target.worker, payload)
   end
 
   def on_mouseup(e)
@@ -1120,15 +1568,18 @@ class Compositor
     end
 
     @wm.focus(win)
+    # The focus call may have re-ordered the stack: tell the dock so its
+    # iconbar's focused indicator follows the click.
+    notify_windows_changed
 
     if win.on_close?(mx, my)
       dismiss_popups(@wm.child_popups(win.id))  # notify any orphaned popups first
       @wm.close(win)
       notify_closed(win, "user")
-      notify_tasks_changed
+      notify_windows_changed
     elsif win.on_minimize?(mx, my)
       @wm.minimize(win)
-      notify_tasks_changed
+      notify_windows_changed
     elsif win.on_resize?(mx, my)
       @drag = { win: win, mode: :resize, dx: win.right - mx, dy: win.bottom - my }
     elsif win.on_titlebar?(mx, my)
@@ -1152,6 +1603,13 @@ class Compositor
     end
     mx = e.get("offsetX")
     my = e.get("offsetY")
+    # An open menu captures hover so its highlight tracks the pointer and a
+    # slide-over onto a parent submenu opener auto-switches the open submenu.
+    # We do not forward to clients while a menu is up.
+    if @menu
+      handle_menu_hover(mx, my)
+      return
+    end
     # No drag in progress. A panel (the dock) receives pointer events on
     # geometric HOVER, not on focus — so its magnification tracks the cursor
     # without it ever being the keyboard-focused window. A hovered panel wins
@@ -1177,21 +1635,34 @@ class Compositor
     hit
   end
 
+  # Right-click context menu. Two shapes:
+  #   - over a window: a small per-window menu (Raise/Close), built directly
+  #     as a Menu instance so the same draw/hit-test path serves it.
+  #   - over the empty desktop: the Openbox-style hierarchical RootMenu
+  #     (Applications, Workspaces, About/Reload/Exit) built from the WM's
+  #     LAUNCHABLE registry + workspace count.
+  # Right-click over a panel (the dock) is swallowed — the dock's own client
+  # turns a right-click on an iconbar entry into a `close` wire message and
+  # we must not double-open a desktop menu underneath it.
   def on_contextmenu(e)
     e.call("preventDefault")
     mx = e.get("offsetX")
     my = e.get("offsetY")
+    return if panel_at(mx, my)
     win = @wm.window_at(mx, my)
-    @menu = if win
-      { x: mx, y: my, items: [
-        ["Raise",  -> { @wm.focus(win) }],
-        ["Close",  -> { @wm.close(win) }],
-      ] }
+    if win
+      menu = Menu.new([
+        { label: "Raise", action: [:focus, win.id] },
+        { label: "Close", action: [:close, win.id] },
+      ])
+      @menu = { kind: :window, x: mx, y: my, menu: menu, win: win, hover: -1,
+                submenu_idx: -1, submenu: nil, submenu_x: 0, submenu_y: 0,
+                submenu_hover: -1 }
     else
-      { x: mx, y: my, items: [
-        ["New window", -> { @wm.spawn("xterm ##{@wm.windows.length + 1}") }],
-        ["New window (wide)", -> { w = @wm.spawn("editor", 320, 200) }],
-      ] }
+      menu = RootMenu.build(@wm)
+      @menu = { kind: :root, x: mx, y: my, menu: menu, hover: -1,
+                submenu_idx: -1, submenu: nil, submenu_x: 0, submenu_y: 0,
+                submenu_hover: -1 }
     end
   end
 
@@ -1215,6 +1686,7 @@ class Compositor
     when "Tab"
       e.call("preventDefault")
       @wm.cycle
+      notify_windows_changed
       return
     when "Escape"
       @menu = nil
@@ -1224,18 +1696,146 @@ class Compositor
     forward_key_to_client(win, "keydown", e) if win&.external?
   end
 
-  MENU_ITEM_H = 22
-  MENU_W = 150
+  # Resolve a (mx, my) click against the currently-open menu (parent + an
+  # optional open submenu). Returns a Hash:
+  #   { in_submenu: bool, idx: int (or -1) }
+  # When the open submenu is non-nil, its rectangle takes priority over the
+  # parent's rectangle (a stale click in the parent under a submenu must hit
+  # the submenu, not the parent).
+  def menu_resolve(mx, my)
+    state = @menu
+    if state[:submenu]
+      sub = state[:submenu]
+      sx = state[:submenu_x]
+      sy = state[:submenu_y]
+      sidx = sub.hit_test(sx, sy, mx, my)
+      return { in_submenu: true, idx: sidx } if sidx >= 0
+      # Outside the submenu? Fall through to the parent.
+    end
+    pidx = state[:menu].hit_test(state[:x], state[:y], mx, my)
+    { in_submenu: false, idx: pidx }
+  end
 
   def handle_menu_click(mx, my)
-    items = @menu[:items]
-    x = @menu[:x]
-    y = @menu[:y]
-    if mx >= x && mx < x + MENU_W && my >= y && my < y + items.length * MENU_ITEM_H
-      idx = (my - y) / MENU_ITEM_H
-      items[idx][1].call
+    state = @menu
+    res = menu_resolve(mx, my)
+    if res[:idx] < 0
+      # Clicked outside both menus: dismiss without firing anything.
+      @menu = nil
+      return
     end
+    if res[:in_submenu]
+      entry = state[:submenu].entries[res[:idx]]
+      dispatch_menu_action(entry[:action])
+      @menu = nil
+      return
+    end
+    entry = state[:menu].entries[res[:idx]]
+    if entry[:submenu]
+      # Parent entry with a submenu: ensure the matching submenu is open. We
+      # do NOT toggle on repeat click because the hover handler (on_mousemove)
+      # already opens the submenu when the pointer arrives on a parent row
+      # (sliding feel); a click that follows would otherwise close it. The
+      # action is idempotent: clicking a parent always leaves its submenu
+      # open, ready for the user to dive in.
+      if state[:submenu_idx] != res[:idx]
+        state[:submenu_idx] = res[:idx]
+        state[:submenu] = entry[:submenu]
+        state[:submenu_x] = state[:x] + Menu::WIDTH - 1
+        state[:submenu_y] = state[:menu].entry_top(state[:y], res[:idx])
+        state[:submenu_hover] = -1
+      end
+      return
+    end
+    dispatch_menu_action(entry[:action])
     @menu = nil
+  end
+
+  # Hover tracking: a mousemove inside the menu region highlights the entry
+  # under the pointer (Openbox-style) — both parent and any open submenu. Used
+  # only for the visual feedback; the actual action fires on click. Returns
+  # truthy when the event was consumed (no further forwarding to clients).
+  def handle_menu_hover(mx, my)
+    state = @menu
+    if state[:submenu]
+      sub = state[:submenu]
+      sidx = sub.hit_test(state[:submenu_x], state[:submenu_y], mx, my)
+      state[:submenu_hover] = sidx
+      if sidx >= 0
+        state[:hover] = state[:submenu_idx]
+        return true
+      end
+    end
+    pidx = state[:menu].hit_test(state[:x], state[:y], mx, my)
+    state[:hover] = pidx
+    # Sliding the pointer onto a different parent submenu opener swaps the
+    # open submenu so the menu feels live (matches every desktop env's UX).
+    if pidx >= 0
+      entry = state[:menu].entries[pidx]
+      if entry[:submenu] && state[:submenu_idx] != pidx
+        state[:submenu_idx] = pidx
+        state[:submenu] = entry[:submenu]
+        state[:submenu_x] = state[:x] + Menu::WIDTH - 1
+        state[:submenu_y] = state[:menu].entry_top(state[:y], pidx)
+        state[:submenu_hover] = -1
+      end
+    end
+    pidx >= 0 || state[:submenu] != nil
+  end
+
+  # Dispatch a [tag, arg] action tuple. Menu entries carry their effect as
+  # plain data (no Proc — Procs are awkward to reach from rbtest, and the
+  # WM is the source of truth for what an action actually does). The
+  # Compositor maps the tuple back onto its JS-touching helpers.
+  def dispatch_menu_action(act)
+    return nil unless act.is_a?(Array)
+    tag = act[0]
+    arg = act[1]
+    case tag
+    when :launch
+      do_launch(arg.to_s)
+    when :workspace
+      changed = @wm.set_workspace(arg.to_i)
+      if changed
+        notify_workspace_changed
+        notify_windows_changed
+      end
+    when :focus
+      win = @wm.find(arg.to_i)
+      if win
+        @wm.focus(win)
+        notify_windows_changed
+      end
+    when :close
+      win = @wm.find(arg.to_i)
+      if win
+        @wm.close(win)
+        notify_closed(win, "user")
+        notify_windows_changed
+      end
+    when :noop
+      # About / Reload / Exit are dismiss-only in v0: the click closes the
+      # menu (already done by the caller setting @menu = nil) and does
+      # nothing else. arg names which entry was clicked, for log
+      # introspection from Playwright.
+      nil
+    end
+  end
+
+  # Apply a validated launch by app id: route the LAUNCHABLE descriptor to
+  # the matching JS spawner, exactly mirroring the :launch arm of
+  # route_worker_message. Unknown ids are dropped (the menu's Applications
+  # submenu only lists wm.launchable? ids, so this is defence in depth).
+  def do_launch(app)
+    return nil unless @wm.launchable?(app)
+    url = @wm.launchable_url(app)
+    if !url.nil?
+      spawn_external(url)
+      return :launched
+    end
+    ref = @wm.launchable_oci(app)
+    spawn_external_oci(ref) unless ref.nil?
+    :launched
   end
 
   # --- rendering -----------------------------------------------------------
@@ -1274,7 +1874,16 @@ class Compositor
     # Draw normal windows first, then panels on top (always-on-top stratum).
     # Minimized windows have been folded into the dock's iconbar; the
     # compositor skips them entirely so they leave no pixels on the canvas.
-    @wm.ordered_windows.each { |win| draw_window(win) unless win.minimized? }
+    # Windows on inactive workspaces are likewise skipped — only the active
+    # workspace's windows render. Panels (the dock) IGNORE the workspace
+    # filter and always render, because the dock is the UI that switches
+    # workspaces in the first place.
+    active = @wm.active_workspace
+    @wm.ordered_windows.each do |win|
+      next if win.minimized?
+      next if !win.panel? && win.workspace != active
+      draw_window(win)
+    end
     draw_menu if @menu
     draw_hud
   end
@@ -1400,16 +2009,50 @@ class Compositor
     win.clear_damage
   end
 
+  # Draw the open menu (and its open submenu, if any) onto the canvas. Both
+  # use the Theme::MENU_* palette: MENU_BG fill, MENU_BORDER 1-px frame,
+  # MENU_TEXT label ink, and MENU_HILITE band for the hovered row.
   def draw_menu
-    items = @menu[:items]
-    x = @menu[:x]
-    y = @menu[:y]
-    h = items.length * MENU_ITEM_H
-    fill_rect([x, y, MENU_W, h], Theme::MENU_BG)
-    stroke_rect([x, y, MENU_W, h], Theme::MENU_BORDER, 1)
-    items.each_with_index do |(label, _action), i|
-      iy = y + i * MENU_ITEM_H
-      text(label, x + 8, iy + 15, Theme::MENU_TEXT)
+    state = @menu
+    draw_menu_panel(state[:menu], state[:x], state[:y], state[:hover],
+                    state[:submenu_idx])
+    if state[:submenu]
+      draw_menu_panel(state[:submenu], state[:submenu_x], state[:submenu_y],
+                      state[:submenu_hover], -1)
+    end
+  end
+
+  # Render a single menu panel at (x, y) with `hover` highlighted (-1 = no
+  # highlight) and `open_sub_idx` showing the entry whose submenu is open
+  # (drawn highlighted too, so the user can read the parent path at a glance).
+  def draw_menu_panel(menu, x, y, hover, open_sub_idx)
+    h = menu.height
+    fill_rect([x, y, Menu::WIDTH, h], Theme::MENU_BG)
+    stroke_rect([x, y, Menu::WIDTH, h], Theme::MENU_BORDER, 1)
+    menu.each_row(y) do |entry, row_y, row_h, i|
+      if entry[:separator]
+        # A thin divider centered vertically in its SEP_H band — same colour
+        # as the frame so it reads as a hairline. We inset by Menu::PAD_X on
+        # each side so the line never touches the menu's vertical border.
+        mid = row_y + row_h / 2
+        @ctx.set("strokeStyle", Theme::MENU_BORDER)
+        @ctx.set("lineWidth", 1)
+        @ctx.call("beginPath")
+        @ctx.call("moveTo", x + Menu::PAD_X,                 mid + 0.5)
+        @ctx.call("lineTo", x + Menu::WIDTH - Menu::PAD_X,   mid + 0.5)
+        @ctx.call("stroke")
+        next
+      end
+      # Highlight the hovered row OR the row whose submenu is currently open.
+      if i == hover || i == open_sub_idx
+        fill_rect([x + 1, row_y, Menu::WIDTH - 2, row_h], Theme::MENU_HILITE)
+      end
+      text(entry[:label].to_s, x + Menu::PAD_X, row_y + row_h - 8, Theme::MENU_TEXT)
+      if entry[:submenu]
+        # Right-aligned chevron — render with the same MENU_TEXT colour as
+        # the label so it reads cleanly on both the bg and the hilite band.
+        text(">", x + Menu::WIDTH - Menu::PAD_X - 6, row_y + row_h - 8, Theme::MENU_TEXT)
+      end
     end
   end
 
