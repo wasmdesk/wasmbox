@@ -606,6 +606,8 @@ function dispatchDomEvent(m) {
     offsetX: m.offsetX ?? 0,
     offsetY: m.offsetY ?? 0,
     button: m.button ?? 0,
+    deltaX: m.deltaX ?? 0,   // wheel / two-finger swipe
+    deltaY: m.deltaY ?? 0,
     preventDefault() {},
   };
   // The Ruby `e.get("foo")` path goes through syscall/js .Get, which reads a

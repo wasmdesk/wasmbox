@@ -148,6 +148,12 @@ jobs:
           WASMBOX_BASE_URL: "http://127.0.0.1:8137"
         run: node probe-files-contextmenu.mjs
 
+      - name: Run headless window-shade probe (two-finger swipe fold/unfold)
+        working-directory: test
+        env:
+          WASMBOX_BASE_URL: "http://127.0.0.1:8137"
+        run: node probe-shade.mjs
+
       - name: Stop the server
         if: always()
         run: |
