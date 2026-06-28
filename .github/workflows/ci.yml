@@ -142,6 +142,12 @@ jobs:
           WASMBOX_BASE_URL: "http://127.0.0.1:8137"
         run: node probe-keyboard.mjs
 
+      - name: Run headless Files context-menu probe (no compositor-menu conflict)
+        working-directory: test
+        env:
+          WASMBOX_BASE_URL: "http://127.0.0.1:8137"
+        run: node probe-files-contextmenu.mjs
+
       - name: Stop the server
         if: always()
         run: |
