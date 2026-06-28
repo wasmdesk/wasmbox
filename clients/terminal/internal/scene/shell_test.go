@@ -211,16 +211,19 @@ func TestExecuteCatNoTrailingNL(t *testing.T) {
 }
 
 // `cat` of multiple files concatenates outputs and reports per-file errors.
+// Since stdout (the file bodies) and stderr (the missing-file diagnostic)
+// are routed through separate buffers and concatenated, stdout precedes
+// stderr in the merged output regardless of the order the tool wrote them.
 func TestExecuteCatMultiple(t *testing.T) {
 	sh := newTestShell()
 	_ = sh.VFS.Write("/a.txt", []byte("A\n"))
 	_ = sh.VFS.Write("/b.txt", []byte("B\n"))
 	out := sh.Execute("cat /a.txt /missing /b.txt")
-	if len(out) != 3 || out[0] != "A" || out[2] != "B" {
+	if len(out) != 3 || out[0] != "A" || out[1] != "B" {
 		t.Fatalf("cat multi = %v", out)
 	}
-	if out[1][:4] != "cat:" {
-		t.Errorf("cat missing line = %q", out[1])
+	if out[2][:4] != "cat:" {
+		t.Errorf("cat missing line = %q", out[2])
 	}
 }
 
