@@ -318,6 +318,10 @@ closes it.
 * **OCI client delivery** — clients pulled at runtime as OCI artifacts
   (`wasmboxSpawnFromOCI` / `OCIAppsLoader`).
 * **Tear-free seqlock** — the optional `ctl` control word (see above).
+* **Window shade** ("roll up" / *replier-déplier*) — a two-finger swipe (or
+  wheel) over a window's titlebar folds it to just the titlebar (swipe up) and
+  unfolds it (swipe down). Compositor-side only; no client message. Distinct
+  from minimize (which folds a window into the dock iconbar).
 
 ## Roadmap / not yet implemented
 

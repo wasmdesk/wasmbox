@@ -382,6 +382,38 @@ panel = wmin2.last_registered
 assert(wmin2.minimize(panel).nil?, "minimize on panel is a no-op")
 assert(!panel.minimized?, "panel never gets the minimized flag")
 
+# ---- shade ("roll up"): state + geometry ------------------------------
+wsh = WindowManager.new
+sw = wsh.spawn("shademe", 200, 150)
+assert(!sw.shaded?, "fresh window not shaded")
+# Full frame extent = body + titlebar before shading.
+fr_before = sw.frame_rect
+assert_eq(fr_before[3], sw.h + Theme::TITLE_H, "unshaded frame height = body + titlebar")
+res = wsh.shade(sw)
+assert(!res.nil?, "shade returns the window on a real transition")
+assert(sw.shaded?, "shaded flag flipped")
+# Shaded: the frame collapses to JUST the titlebar (body rolled away).
+fr_after = sw.frame_rect
+assert_eq(fr_after[3], Theme::TITLE_H, "shaded frame height = titlebar only")
+assert_eq(fr_after[1], sw.frame_top, "shaded frame top still at the titlebar top")
+# A click in the old BODY area no longer hits the window (falls through).
+body_mid_y = sw.y + sw.h/2
+assert(!sw.contains?(sw.x + 10, body_mid_y), "shaded window: old body area no longer hit-tested")
+assert(sw.contains?(sw.x + 10, sw.frame_top + 2), "shaded window: titlebar still hit-tested")
+# Resize is disabled while shaded (no body / grip).
+assert(!sw.on_resize?(sw.right - 2, sw.bottom - 2), "shaded window not resizable")
+# Titlebar gestures still work (drag/close reachable).
+assert(sw.on_titlebar?(sw.x + 10, sw.frame_top + 2), "shaded window titlebar still draggable")
+# shade is idempotent; unshade restores the full frame.
+assert(wsh.shade(sw).nil?, "second shade is a no-op")
+assert(!wsh.unshade(sw).nil?, "unshade returns the window on a real transition")
+assert(!sw.shaded?, "shaded cleared on unshade")
+assert_eq(sw.frame_rect[3], sw.h + Theme::TITLE_H, "unshaded frame height restored")
+assert(wsh.unshade(sw).nil?, "unshade on a non-shaded window is a no-op")
+# Panels never shade.
+wsh.register_external("dock", 480, 28, "panel")
+assert(wsh.shade(wsh.last_registered).nil?, "shade on a panel is a no-op")
+
 # ---- minimized window: render-loop skip + click hit-test --------------
 # A minimized window must be excluded from window_at so a click at its
 # former coordinates does not surface it instead of the desktop.

@@ -193,6 +193,25 @@ canvas.addEventListener("mousemove",   relayMouse("mousemove"));
 canvas.addEventListener("mouseup",     relayMouse("mouseup"));
 canvas.addEventListener("contextmenu", relayMouse("contextmenu"));
 
+// Wheel / two-finger swipe carries deltas in addition to the pointer position.
+// The compositor uses it for the dock's workspace cycle, client scrolling, and
+// the window-shade gesture (swipe over a titlebar). passive:false so the
+// compositor's preventDefault (relayed asynchronously) is honoured -- we also
+// preventDefault here pre-emptively so the page never scrolls underneath.
+function relayWheel(e) {
+  e.preventDefault();
+  worker.postMessage({
+    type: B.M2C_DOM_EVENT,
+    target: B.TARGET_CANVAS,
+    kind: "wheel",
+    offsetX: e.offsetX,
+    offsetY: e.offsetY,
+    deltaX: e.deltaX,
+    deltaY: e.deltaY,
+  });
+}
+canvas.addEventListener("wheel", relayWheel, { passive: false });
+
 // Viewport resize: send the new size to the worker so it can update its
 // shim's innerWidth/innerHeight + run the Ruby fit_canvas handler.
 window.addEventListener("resize", () => {

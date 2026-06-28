@@ -50,7 +50,7 @@ end
 # Pure data + math; no JS here.
 # ---------------------------------------------------------------------------
 class Window
-  attr_accessor :id, :title, :x, :y, :w, :h, :fill, :focused, :role, :minimized, :workspace
+  attr_accessor :id, :title, :x, :y, :w, :h, :fill, :focused, :role, :minimized, :workspace, :shaded
 
   def initialize(id, title, x, y, w, h, fill, role = "window")
     @id = id
@@ -78,10 +78,17 @@ class Window
     # creation time so the default here only matters for direct Window.new
     # callers in tests.
     @workspace = 1
+    # Window-shade ("roll-up", a.k.a. replier/déplier): a shaded window collapses
+    # to just its titlebar — the body is not rendered and not hit-testable, but
+    # the window stays put + draggable + closable from its titlebar. Toggled by a
+    # two-finger swipe over the titlebar (up = fold, down = unfold). Distinct from
+    # minimize (which folds into the dock iconbar). Panels/popups never shade.
+    @shaded = false
   end
 
   def focused? = @focused
   def minimized? = @minimized
+  def shaded? = @shaded
 
   # A panel (dock-style surface) has no decoration and is anchored, never
   # cascade-placed. A popup is a child surface anchored to a parent window
@@ -125,12 +132,19 @@ class Window
 
   def resize_rect
     return [@x, @y, 0, 0] unless decorated?
+    return [@x, @y, 0, 0] if @shaded   # a rolled-up window has no body to resize
     [right - Theme::GRIP, bottom - Theme::GRIP, Theme::GRIP, Theme::GRIP]
   end
 
   # The whole decorated extent, used for "did the click land on me at all?".
-  # For an undecorated surface (panel / popup) the extent is just the body.
-  def frame_rect = decorated? ? [@x, frame_top, @w, @h + Theme::TITLE_H] : [@x, @y, @w, @h]
+  # For an undecorated surface (panel / popup) the extent is just the body; for a
+  # shaded (rolled-up) window the extent is just the titlebar (the body is gone,
+  # so clicks in that area fall through to whatever is behind it).
+  def frame_rect
+    return [@x, @y, @w, @h] unless decorated?
+    return [@x, frame_top, @w, Theme::TITLE_H] if @shaded
+    [@x, frame_top, @w, @h + Theme::TITLE_H]
+  end
 
   def hit?(rect, px, py)
     rx, ry, rw, rh = rect
@@ -765,6 +779,26 @@ class WindowManager
     return nil unless win.minimized?
     win.minimized = false
     focus(win)
+    win
+  end
+
+  # Shade ("roll up") a window: collapse it to just its titlebar (the body stops
+  # rendering + hit-testing). Only decorated windows shade; idempotent. Returns
+  # the window on a real state change, nil otherwise.
+  def shade(win)
+    return nil unless win
+    return nil unless win.decorated?
+    return nil if win.shaded?
+    win.shaded = true
+    win
+  end
+
+  # Unshade ("roll down") a window: expand it back to its full body. Idempotent.
+  # Returns the window on a real state change, nil otherwise.
+  def unshade(win)
+    return nil unless win
+    return nil unless win.shaded?
+    win.shaded = false
     win
   end
 
@@ -1648,6 +1682,18 @@ class Compositor
     my = e.get("offsetY")
     dy = e.get("deltaY")
     dx = e.get("deltaX")
+    # Two-finger swipe (or wheel) over a window's TITLEBAR rolls it up/down:
+    # swipe up folds the window to just its titlebar (shade), swipe down unfolds
+    # it. The titlebar carries no scrollable content, so this never competes
+    # with a client scrolling its body. deltaY > 0 is a swipe up under macOS
+    # natural scrolling (the user's platform); flip the comparison if reversed.
+    over = @wm.window_at(mx, my)
+    if over && over.decorated? && over.on_titlebar?(mx, my)
+      d = dy.nil? ? 0 : dy
+      changed = d > 0 ? @wm.shade(over) : (d < 0 ? @wm.unshade(over) : nil)
+      notify_windows_changed if changed
+      return
+    end
     panel = panel_at(mx, my)
     target = panel || @wm.focused
     return nil unless target&.external?
@@ -2188,6 +2234,10 @@ class Compositor
     @ctx.call("moveTo", mx + 3,      my + mh - 4)
     @ctx.call("lineTo", mx + mw - 3, my + mh - 4)
     @ctx.call("stroke")
+
+    # Shaded ("rolled up"): only the titlebar + its boxes are drawn — no body,
+    # no resize grip. The body area shows whatever sits behind the window.
+    return if win.shaded?
 
     # Client body. In-process windows paint a solid fill; external windows
     # blit their SharedArrayBuffer through a cached ImageData view.
