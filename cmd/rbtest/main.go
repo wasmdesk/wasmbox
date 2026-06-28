@@ -209,6 +209,71 @@ assert_eq(fr, br, "panel frame_rect equals body_rect")
 wmp.cycle
 assert(wmp.focused.equal?(nrm), "cycle keeps the only normal window focused")
 
+# ---- popup role: hello "popup" + parent-relative placement + grab ----------
+wmpp = WindowManager.new
+parent = wmpp.register_external("editor", 300, 200)   # a normal, decorated window
+parent.move_to(100, 80)
+res = wmpp.handle_client_message({ type: "hello", title: "menu", role: "popup",
+                                   parent: parent.id, rel_x: 20, rel_y: 30,
+                                   w: 40, h: 24, sab: :psab, stride: 160 })
+assert_eq(res, :welcome, "popup hello yields :welcome")
+pop = wmpp.last_registered
+assert(pop.popup?, "popup window reports popup?")
+assert(!pop.decorated?, "popup is undecorated")
+assert(pop.external?, "popup is external")
+# Anchored at the parent body origin + (rel_x, rel_y), and NOT MIN-clamped (a
+# 40x24 menu would be clamped up for a normal window, but a popup keeps it).
+assert_eq(pop.x, 120, "popup x = parent.x + rel_x (100+20)")
+assert_eq(pop.y, 110, "popup y = parent.y + rel_y (80+30)")
+assert_eq(pop.w, 40, "popup keeps requested w (no MIN clamp)")
+assert_eq(pop.h, 24, "popup keeps requested h (no MIN clamp)")
+assert_eq(pop.parent_id, parent.id, "popup remembers its parent_id")
+# No decoration (same as a panel): every decoration hit-test is no-hit and the
+# frame equals the body.
+assert(!pop.on_titlebar?(pop.x + 5, pop.y + 2), "popup titlebar not hittable")
+assert(!pop.on_close?(pop.x + pop.w - 5, pop.y + 2), "popup close not hittable")
+assert_eq(pop.frame_rect, pop.body_rect, "popup frame_rect equals body_rect")
+# Excluded from the focus ring: the parent stays the focused window.
+assert(wmpp.focused.equal?(parent), "popup does not steal focus from its parent")
+assert_eq(wmpp.popups.length, 1, "one popup tracked")
+assert_eq(wmpp.child_popups(parent.id).length, 1, "child_popups finds it by parent_id")
+# Stacks above its parent (newest non-panel on top).
+assert(wmpp.ordered_windows.last.equal?(pop), "popup drawn last (above its parent)")
+# Closing the parent orphans + unmaps the popup.
+wmpp.close(parent)
+assert_eq(wmpp.popups.length, 0, "closing the parent unmaps its popup")
+assert_eq(wmpp.windows.length, 0, "no windows remain after parent close")
+
+# ---- nested popups: a popup parented to another popup (submenu) ------------
+wmn = WindowManager.new
+base = wmn.register_external("editor", 300, 200); base.move_to(50, 40)
+wmn.handle_client_message({ type: "hello", title: "menu", role: "popup",
+                            parent: base.id, rel_x: 10, rel_y: 10, w: 80, h: 60, sab: :s1 })
+p1 = wmn.last_registered
+assert_eq(p1.x, 60, "level-1 popup x = window.x + rel (50+10)")
+# A submenu anchored to the FIRST popup, not the window.
+wmn.handle_client_message({ type: "hello", title: "submenu", role: "popup",
+                            parent: p1.id, rel_x: 70, rel_y: 5, w: 80, h: 50, sab: :s2 })
+p2 = wmn.last_registered
+assert(p2.popup?, "level-2 surface is a popup")
+assert_eq(p2.parent_id, p1.id, "submenu's parent is the level-1 popup")
+assert_eq(p2.x, p1.x + 70, "submenu x = parent popup.x + rel_x")
+assert_eq(p2.y, p1.y + 5, "submenu y = parent popup.y + rel_y")
+# popups is bottom-to-top: the submenu stacks above its parent popup.
+pops = wmn.popups
+assert_eq(pops.length, 2, "two popups tracked")
+assert(pops[0].equal?(p1) && pops[1].equal?(p2), "popups bottom-to-top (p1 below its child p2)")
+assert_eq(wmn.child_popups(p1.id).length, 1, "child_popups(p1) finds the submenu")
+# Keyboard grab policy: an open popup is the key_target (top-most first),
+# overriding the focused window beneath.
+assert(wmn.key_target.equal?(p2), "key_target is the top-most popup while popups are open")
+# Closing the level-1 popup orphans + unmaps its submenu too.
+wmn.close(p1)
+assert_eq(wmn.popups.length, 0, "closing a popup unmaps its child submenu")
+assert(!wmn.find(base.id).nil?, "the parent window itself is untouched")
+# With no popups left, key_target falls back to the focused window.
+assert(wmn.key_target.equal?(base), "key_target falls back to the focused window when no popups")
+
 # ---- launch registry: known id -> :launch, unknown id -> :ignored ---------
 wml = WindowManager.new
 assert_eq(wml.handle_client_message({ type: "launch", app: "terminal" }), :launch,

@@ -81,6 +81,14 @@ jobs:
         with:
           node-version: "20"
 
+      - name: Seqlock fence unit test (no deps)
+        working-directory: test
+        run: node seqlock.test.mjs
+
+      - name: Popup multi-surface SDK unit test (no deps)
+        working-directory: test
+        run: node popup-sdk.test.mjs
+
       - name: Build wasm + clients + serve (task build)
         uses: arduino/setup-task@v2
         with:
@@ -115,6 +123,24 @@ jobs:
         env:
           WASMBOX_BASE_URL: "http://127.0.0.1:8137"
         run: node render.mjs
+
+      - name: Run headless popup probe (open + grab-dismiss)
+        working-directory: test
+        env:
+          WASMBOX_BASE_URL: "http://127.0.0.1:8137"
+        run: node probe-popup.mjs
+
+      - name: Run headless nested-popup probe (submenu + layered grab)
+        working-directory: test
+        env:
+          WASMBOX_BASE_URL: "http://127.0.0.1:8137"
+        run: node probe-nested.mjs
+
+      - name: Run headless popup-keyboard probe (arrow routing + Escape)
+        working-directory: test
+        env:
+          WASMBOX_BASE_URL: "http://127.0.0.1:8137"
+        run: node probe-keyboard.mjs
 
       - name: Stop the server
         if: always()
