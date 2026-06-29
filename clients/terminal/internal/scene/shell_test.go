@@ -37,7 +37,9 @@ func TestNewShellDefaults(t *testing.T) {
 }
 
 // PromptString composes cwd + Prompt so the wasm renderer can paint the
-// path the user is standing in without an extra pwd.
+// path the user is standing in without an extra pwd. When the last command
+// failed (LastExit != 0) the prompt prepends "[N] " so the user notices
+// without typing echo $?.
 func TestPromptString(t *testing.T) {
 	sh := newTestShell()
 	if got, want := sh.PromptString(), "/ $ "; got != want {
@@ -46,6 +48,10 @@ func TestPromptString(t *testing.T) {
 	sh.Cwd = "/Documents"
 	if got, want := sh.PromptString(), "/Documents $ "; got != want {
 		t.Errorf("PromptString after cd = %q, want %q", got, want)
+	}
+	sh.LastExit = 7
+	if got, want := sh.PromptString(), "[7] /Documents $ "; got != want {
+		t.Errorf("PromptString with LastExit = %q, want %q", got, want)
 	}
 }
 
@@ -79,12 +85,13 @@ func TestExecuteEcho(t *testing.T) {
 	}
 }
 
-// `help` lists the (now larger) builtin set.
+// `help` lists the (now larger) builtin set plus the four shell-grammar
+// hints (redirection, pipelines, chaining).
 func TestExecuteHelp(t *testing.T) {
 	sh := newTestShell()
 	out := sh.Execute("help")
-	if len(out) != 2 {
-		t.Fatalf("help = %v, want 2 lines", out)
+	if len(out) != 4 {
+		t.Fatalf("help = %v, want 4 lines", out)
 	}
 	if want := "builtins:"; out[0][:len(want)] != want {
 		t.Fatalf("help first line = %q", out[0])
@@ -364,33 +371,29 @@ func TestExecuteEchoRedirectQuoted(t *testing.T) {
 	}
 }
 
-// `echo > PATH` with the parent missing reports an error.
+// `echo > PATH` with the parent missing surfaces the VFS error via the
+// shellparse executor's "shell: PATH: <reason>" line on stderr, and the
+// shell records exit 1.
 func TestExecuteEchoRedirectFail(t *testing.T) {
 	sh := newTestShell()
 	out := sh.Execute("echo hi > /nope/x.txt")
-	if len(out) != 1 || out[0][:5] != "echo:" {
+	if len(out) != 1 || !strings.HasPrefix(out[0], "shell: /nope/x.txt:") {
 		t.Fatalf("echo > bad-path = %v", out)
+	}
+	if sh.LastExit != 1 {
+		t.Fatalf("LastExit = %d, want 1", sh.LastExit)
 	}
 }
 
-// `echo TEXT >` (empty destination) is NOT a redirect; treated as a plain
-// echo (which prints `TEXT >`).
+// `echo hi >` (empty destination) is a parser error.
 func TestExecuteEchoRedirectEmptyPath(t *testing.T) {
 	sh := newTestShell()
 	out := sh.Execute("echo hi >")
-	// The fallback is plain `echo hi >` -> prints "hi >".
-	if len(out) != 1 || out[0] != "hi >" {
+	if len(out) != 1 || !strings.Contains(out[0], "missing path after redirect") {
 		t.Fatalf("echo hi > = %v", out)
 	}
-}
-
-// parseEchoRedirect rejects lines that do not start with `echo`.
-func TestParseEchoRedirectNonEcho(t *testing.T) {
-	if _, _, ok := parseEchoRedirect("ls > x"); ok {
-		t.Errorf("parseEchoRedirect(ls > x) ok=true, want false")
-	}
-	if _, _, ok := parseEchoRedirect("echo hi"); ok {
-		t.Errorf("parseEchoRedirect(echo hi) ok=true, want false (no >)")
+	if sh.LastExit != 2 {
+		t.Fatalf("LastExit = %d, want 2 (parse error)", sh.LastExit)
 	}
 }
 
@@ -465,3 +468,123 @@ var errBoom = boomError{}
 type boomError struct{}
 
 func (boomError) Error() string { return "boom" }
+
+// A lexer-level error (unclosed single quote) surfaces as a "shell: ..."
+// line and sets LastExit to 2.
+func TestExecuteLexError(t *testing.T) {
+	sh := newTestShell()
+	out := sh.Execute("echo 'hi")
+	if len(out) != 1 || !strings.Contains(out[0], "unclosed single quote") {
+		t.Fatalf("lex error = %v", out)
+	}
+	if sh.LastExit != 2 {
+		t.Fatalf("LastExit after lex error = %d, want 2", sh.LastExit)
+	}
+}
+
+// A parser-level error (missing command after &&) surfaces as a "shell:
+// ..." line and sets LastExit to 2.
+func TestExecuteParseError(t *testing.T) {
+	sh := newTestShell()
+	out := sh.Execute("true &&")
+	if len(out) != 1 || !strings.Contains(out[0], "missing command after") {
+		t.Fatalf("parse error = %v", out)
+	}
+	if sh.LastExit != 2 {
+		t.Fatalf("LastExit after parse error = %d, want 2", sh.LastExit)
+	}
+}
+
+// '< path' threads the file's bytes into the stage's stdin via the
+// vfsExecAdapter.Read path. The stdin-bridge then materializes them to a
+// synthetic file (rewritten to "-" in user-visible output) so wc, which
+// doesn't stream stdin, can still count them.
+func TestExecuteRedirectIn(t *testing.T) {
+	sh := newTestShell()
+	_ = sh.VFS.Write("/n.txt", []byte("a\nb\nc\n"))
+	out := sh.Execute("wc -l < /n.txt")
+	if len(out) != 1 || !strings.HasPrefix(strings.TrimSpace(out[0]), "3") {
+		t.Fatalf("wc -l < /n.txt = %v", out)
+	}
+	if sh.LastExit != 0 {
+		t.Fatalf("LastExit = %d", sh.LastExit)
+	}
+}
+
+// '< path' against a missing file routes the VFS error through
+// vfsExecAdapter.Read -> shellparse's "shell: PATH: <reason>" line + exit 1.
+func TestExecuteRedirectInMissing(t *testing.T) {
+	sh := newTestShell()
+	out := sh.Execute("wc -l < /nope")
+	if len(out) == 0 || !strings.Contains(out[len(out)-1], "/nope") {
+		t.Fatalf("redirect-in missing = %v", out)
+	}
+	if sh.LastExit != 1 {
+		t.Fatalf("LastExit = %d, want 1", sh.LastExit)
+	}
+}
+
+// Pipeline (cat | wc -l) wires the bytes through. wc prints "N -" since
+// the stdin-bridge presents stdin as the synthetic file renamed "-".
+func TestExecutePipeline(t *testing.T) {
+	sh := newTestShell()
+	_ = sh.VFS.Write("/p.txt", []byte("one\ntwo\nthree\n"))
+	out := sh.Execute("cat /p.txt | wc -l")
+	if len(out) != 1 || !strings.HasPrefix(strings.TrimSpace(out[0]), "3") {
+		t.Fatalf("pipeline = %v", out)
+	}
+}
+
+// '&&' runs the RHS only on success; the chain's exit is the last stage's.
+func TestExecuteAndChain(t *testing.T) {
+	sh := newTestShell()
+	out := sh.Execute("true && echo yes")
+	if len(out) != 1 || out[0] != "yes" {
+		t.Fatalf("true && echo yes = %v", out)
+	}
+	out = sh.Execute("false && echo yes")
+	if out != nil {
+		t.Fatalf("false && echo yes = %v, want no output", out)
+	}
+	if sh.LastExit != 1 {
+		t.Fatalf("LastExit = %d, want 1 (false's exit)", sh.LastExit)
+	}
+}
+
+// '||' runs the RHS only on failure.
+func TestExecuteOrChain(t *testing.T) {
+	sh := newTestShell()
+	out := sh.Execute("false || echo no")
+	if len(out) != 1 || out[0] != "no" {
+		t.Fatalf("false || echo no = %v", out)
+	}
+	if sh.LastExit != 0 {
+		t.Fatalf("LastExit = %d, want 0", sh.LastExit)
+	}
+}
+
+// ';' runs both regardless; '$?' expands to the previous exit code.
+func TestExecuteSemiAndDollarQ(t *testing.T) {
+	sh := newTestShell()
+	out := sh.Execute("false; echo $?")
+	if len(out) != 1 || out[0] != "1" {
+		t.Fatalf("false; echo $? = %v", out)
+	}
+	out = sh.Execute("true; echo $?")
+	if len(out) != 1 || out[0] != "0" {
+		t.Fatalf("true; echo $? = %v", out)
+	}
+}
+
+// 'unknown' on a line free of metacharacters routes to dispatch (since
+// it's not a local builtin), surfaces "command not found" + non-zero exit.
+// In a pipe the trailing 'cat' sees empty stdin AND no positional file, so
+// it usage-errors -- exit code is cat's (2), not the missing tool's (127).
+func TestExecuteUnknownThroughParser(t *testing.T) {
+	sh := newTestShell()
+	out := sh.Execute("frobnicate | cat")
+	joined := strings.Join(out, "\n")
+	if !strings.Contains(joined, "command not found") {
+		t.Fatalf("unknown-in-pipe = %v (no 'command not found')", out)
+	}
+}

@@ -3,40 +3,65 @@
 // found in the LICENSE file at the root of this repository.
 
 // Package scene's shell.go is the in-process "shell" the terminal client
-// runs. It is intentionally small: a command line, an Execute() that
-// dispatches to a fixed builtin table, and a cwd tracked as a real
-// VFS-relative path.
+// runs. v1 was a Fields-split builtin dispatcher; v2 layers a real POSIX-ish
+// front-end (clients/terminal/internal/shellparse) on top, so the terminal
+// now supports:
 //
-// Most builtins (every name in coreutils' multicall.Names() -- v0.3: 42
-// tools spanning cat/ls/cp/mv/wc/grep/find/sort/uniq/cut/tr/paste/nl/tac/
-// rev/fold/expand/unexpand/printf/basename/dirname/date/seq/sleep/true/
-// false/yes/env/expr/md5sum/sha1sum/sha256sum/base64/base32/...) are
-// delegated to the wasmdesk/coreutils suite via multicall.Dispatch. The
-// terminal wraps its sharedvfs handle into a coreutils fsx.FS adapter and
-// pipes the tool's stdout/stderr into the grid the renderer paints. Pure-
-// shell builtins (cd / clear / help / `echo TEXT > PATH`) stay local
-// because they either mutate shell state (cd) or do something the
-// dispatcher does not model (clear). Adding a tool to coreutils auto-
-// exposes it here -- multicall.Has(name) gates the route.
+//   - pipelines via '|' (each stage's stdout becomes the next stage's stdin)
+//   - I/O redirection '<' / '>' / '>>'
+//   - statement sequencing with ';' / '&&' / '||'
+//   - '$?' expansion to the previous command's exit code
+//   - single- + double-quoted words and backslash escapes
+//
+// Built-ins that mutate shell state (cd / clear / help) STILL stay local
+// because they aren't per-process tools; everything else routes through
+// wasmdesk/coreutils via multicall.Dispatch using a per-stage fsx.Env.
+//
+// The prompt is decorated with the previous command's exit code when
+// non-zero (e.g. "[1] /tmp $ "), so a failed command is visible at a glance
+// without typing `echo $?`.
 
 package scene
 
 import (
 	"bytes"
+	"fmt"
+	"io"
 	"strings"
+	"sync/atomic"
 
 	"github.com/wasmdesk/coreutils/multicall"
 	corefsx "github.com/wasmdesk/coreutils/pkg/fsx"
 	"github.com/wasmdesk/wasmbox/clients/sharedvfs"
+	"github.com/wasmdesk/wasmbox/clients/terminal/internal/shellparse"
 )
 
-// Shell is the per-window terminal state.
+// stdinBridgeSeq names the synthetic VFS file the stdin-bridge wrapper uses
+// to materialize a pipeline stage's incoming stdin so tools that don't
+// stream stdin (cat / head / tail / wc / grep / ...) still receive piped
+// bytes. The counter keeps successive bridges distinct so a tool that
+// leaves the file around (none currently does) doesn't collide across
+// pipelines or terminals.
+var stdinBridgeSeq uint64
+
+// stdinBridgePath returns the next unique synthetic-stdin path. We put it
+// under "/" with a leading dot so a stray `ls` in the terminal will not
+// surface it. The path is removed by the wrapper after the tool returns.
+func stdinBridgePath() string {
+	n := atomic.AddUint64(&stdinBridgeSeq, 1)
+	return fmt.Sprintf("/.shellstdin.%d", n)
+}
+
+// Shell is the per-window terminal state. LastExit carries the most recent
+// command's exit code so the prompt can paint "[N]" and the lexer can
+// expand $? on the next line.
 type Shell struct {
-	Prompt  string
-	Line    []byte
-	History [][]byte
-	Cwd     string
-	VFS     sharedvfs.VFS
+	Prompt   string
+	Line     []byte
+	History  [][]byte
+	Cwd      string
+	VFS      sharedvfs.VFS
+	LastExit int
 }
 
 // NewShell returns a Shell rooted at "/" with a freshly seeded demo
@@ -53,15 +78,24 @@ func NewShellWithVFS(v sharedvfs.VFS) *Shell {
 	return &Shell{Prompt: " $ ", Cwd: "/", VFS: v}
 }
 
-// PromptString returns the rendered prompt.
+// PromptString returns the rendered prompt. When the last command failed
+// we prepend "[N] " so the failure is visible without typing echo $?.
 func (sh *Shell) PromptString() string {
+	if sh.LastExit != 0 {
+		return fmt.Sprintf("[%d] %s%s", sh.LastExit, sh.Cwd, sh.Prompt)
+	}
 	return sh.Cwd + sh.Prompt
 }
 
-// Execute dispatches one command line. The pure-shell builtins (cd / clear
-// / help / `echo TEXT > PATH`) stay local; everything else routes through
-// coreutils.Dispatch so the terminal grows new commands by adding them to
-// the dispatch table (zero terminal code per new tool).
+// Execute parses one command line (with pipes/redirects/&&/||/;/$?) and
+// runs it. The returned slice is the lines the renderer paints; LastExit
+// is updated so the next prompt + the next line's $? expansion are right.
+//
+// Pure-shell builtins (cd / clear / help) short-circuit BEFORE the parser
+// because they mutate Shell state and don't fit the per-stage tool model.
+// `clear` is handled by the scene above (via IsClear); we keep a no-op
+// branch so a Shell driven outside the scene (e.g. tests) still does the
+// right thing.
 func (sh *Shell) Execute(line string) []string {
 	trimmed := strings.TrimSpace(line)
 	if trimmed == "" {
@@ -69,50 +103,183 @@ func (sh *Shell) Execute(line string) []string {
 	}
 	sh.History = append(sh.History, []byte(trimmed))
 
-	// `echo TEXT > PATH` is handled before generic field splitting so the
-	// quoting-free "everything between echo and >" stays intact (a plain
-	// strings.Fields would collapse double-spaces).
-	if rest, path, ok := parseEchoRedirect(trimmed); ok {
-		return sh.runEchoRedirect(rest, path)
+	// Local builtins that mutate shell state -- only intercept when the
+	// line is JUST that builtin (no pipes/redirects/chains). A user typing
+	// `cd /tmp && ls` should still hit the parser; `cd /tmp` alone takes
+	// the fast path.
+	if out, ok := sh.tryLocalBuiltin(trimmed); ok {
+		return out
 	}
 
-	parts := strings.Fields(trimmed)
-	cmd, args := parts[0], parts[1:]
-	switch cmd {
-	case "help":
-		return []string{
-			"builtins: " + strings.Join(append([]string{"cd", "clear", "help"}, multicall.Names()...), " "),
-			"redirection: echo TEXT > PATH",
-		}
-	case "clear":
-		return nil
-	case "cd":
-		return sh.runCd(args)
+	toks, err := shellparse.Lex(trimmed)
+	if err != nil {
+		sh.LastExit = 2
+		return []string{err.Error()}
 	}
-	if multicall.Has(cmd) {
-		return sh.runViaCoreutils(cmd, args)
+	tree, err := shellparse.Parse(toks)
+	if err != nil {
+		sh.LastExit = 2
+		return []string{err.Error()}
 	}
-	return []string{cmd + ": command not found"}
+
+	res := shellparse.Run(tree, sh.LastExit, &vfsExecAdapter{v: sh.VFS, cwd: sh.Cwd}, sh.dispatch)
+	sh.LastExit = res.LastExit
+	return splitLines(string(res.Stdout) + string(res.Stderr))
 }
 
-// runViaCoreutils builds an fsx.Env, dispatches, and turns the tool's
-// stdout/stderr bytes into the slice of lines the renderer paints. Each
-// invocation builds a fresh env (cheap: a pointer to the same sharedvfs).
-func (sh *Shell) runViaCoreutils(cmd string, args []string) []string {
-	var out, errb bytes.Buffer
+// tryLocalBuiltin handles the three lines that don't compose with the
+// shell grammar: `cd ...`, `clear`, `help`. Returns (output, true) when it
+// handled the line. Anything with shell metacharacters (|, >, <, ;, &, $)
+// falls through so the parser sees it. Caller has already trimmed leading
+// and trailing whitespace, so strings.Fields below is guaranteed to return
+// at least one element on a non-empty input.
+func (sh *Shell) tryLocalBuiltin(line string) ([]string, bool) {
+	if strings.ContainsAny(line, "|<>;&$\"'\\") {
+		return nil, false
+	}
+	parts := strings.Fields(line)
+	switch parts[0] {
+	case "help":
+		sh.LastExit = 0
+		return []string{
+			"builtins: " + strings.Join(append([]string{"cd", "clear", "help"}, multicall.Names()...), " "),
+			"redirection: cmd > path / cmd >> path / cmd < path",
+			"pipelines:   cmd1 | cmd2 | cmd3",
+			"chaining:    a && b   |   a || b   |   a ; b   |   echo $?",
+		}, true
+	case "clear":
+		sh.LastExit = 0
+		return nil, true
+	case "cd":
+		sh.LastExit = 0
+		out := sh.runCd(parts[1:])
+		if len(out) > 0 {
+			sh.LastExit = 1
+		}
+		return out, true
+	}
+	return nil, false
+}
+
+// dispatch is the DispatchFunc the shellparse executor calls for every
+// pipeline stage. It builds a per-stage fsx.Env (cheap: a pointer to the
+// same sharedvfs adapter) and routes to coreutils.Dispatch. Unknown names
+// emit a "command not found" line + exit 127, matching real shells.
+//
+// Pipeline stdin bridge: most coreutils tools (cat/head/tail/wc/grep/...)
+// take a positional FILE rather than streaming env.Stdin. To make
+// pipelines like `cat /n.txt | head -n 2 | wc -l` work WITHOUT modifying
+// coreutils, we run the tool a first time; if it returns Usage (2) with a
+// "missing operand" stderr AND we have piped-in stdin bytes, we
+// materialize those bytes to a synthetic VFS file and re-dispatch with
+// the path appended to argv. The synthetic file is removed on return.
+// Tools that don't need bridging (success on first try) pay only the
+// drain cost (one ReadAll of the piped bytes).
+func (sh *Shell) dispatch(name string, argv []string, stdin io.Reader, stdout, stderr io.Writer) int {
+	if !multicall.Has(name) {
+		fmt.Fprintf(stderr, "%s: command not found\n", name)
+		return 127
+	}
+	// Drain stdin once so we can retry; cheap (in-memory bytes from the
+	// upstream pipeline's bytes.Buffer).
+	var inBytes []byte
+	if stdin != nil {
+		if b, err := io.ReadAll(stdin); err == nil {
+			inBytes = b
+		}
+	}
+
+	// First attempt: stdin as-is, original argv.
+	var firstStdout, firstStderr bytes.Buffer
 	env := &corefsx.Env{
-		Args:   append([]string{cmd}, args...),
-		Stdin:  bytes.NewReader(nil),
-		Stdout: &out,
-		Stderr: &errb,
+		Args:   argv,
+		Stdin:  bytes.NewReader(inBytes),
+		Stdout: &firstStdout,
+		Stderr: &firstStderr,
 		Cwd:    sh.Cwd,
 		FS:     newVFSAdapter(sh.VFS),
 	}
-	_ = multicall.Dispatch(cmd, env)
-	// Merge stdout + stderr so the user sees both inline (matching how a
-	// real shell paints them onto the same TTY).
-	return splitLines(out.String() + errb.String())
+	code := multicall.Dispatch(name, env)
+
+	// Retry path: tool wants a file operand but we have piped-in bytes.
+	// Match the suite's two failure shapes: "missing operand" (cat / head
+	// / tail / wc) and "usage:" (grep needs PATTERN + FILE).
+	if code == 2 && len(inBytes) > 0 && isMissingOperand(firstStderr.String()) {
+		path := stdinBridgePath()
+		if werr := sh.VFS.Write(path, inBytes); werr == nil {
+			defer func() { _ = sh.VFS.Remove(path) }()
+			var retryStdout, retryStderr bytes.Buffer
+			retryArgv := append(append([]string{}, argv...), path)
+			retryEnv := &corefsx.Env{
+				Args:   retryArgv,
+				Stdin:  bytes.NewReader(inBytes),
+				Stdout: &retryStdout,
+				Stderr: &retryStderr,
+				Cwd:    sh.Cwd,
+				FS:     newVFSAdapter(sh.VFS),
+			}
+			retryCode := multicall.Dispatch(name, retryEnv)
+			// Hide the synthetic stdin path from the user-visible output.
+			// wc / head / tail print the file name; sort / grep can echo
+			// it back via -n prefixes. Replace it with "-" so the line
+			// reads like a normal pipeline (the dash is the POSIX
+			// convention for "stdin").
+			cleanOut := bytes.ReplaceAll(retryStdout.Bytes(), []byte(path), []byte("-"))
+			cleanErr := bytes.ReplaceAll(retryStderr.Bytes(), []byte(path), []byte("-"))
+			_, _ = stdout.Write(cleanOut)
+			_, _ = stderr.Write(cleanErr)
+			return retryCode
+		}
+	}
+
+	_, _ = stdout.Write(firstStdout.Bytes())
+	_, _ = stderr.Write(firstStderr.Bytes())
+	return code
 }
+
+// isMissingOperand recognises the two stderr shapes coreutils emits when a
+// tool expected a FILE operand it didn't get: GNU-style "missing operand"
+// (cat / head / tail / wc) and grep's compact "usage:" message. Either
+// triggers the stdin-bridge retry in dispatch.
+func isMissingOperand(s string) bool {
+	return strings.Contains(s, "missing operand") || strings.Contains(s, "usage:")
+}
+
+// vfsExecAdapter wraps a sharedvfs.VFS for the shellparse VFS contract --
+// the executor only needs Read + Write (for '<' / '>' / '>>'), so we keep
+// the interface intentionally narrow. Path resolution against cwd happens
+// here so callers can write `> out.txt` without an absolute path.
+type vfsExecAdapter struct {
+	v   sharedvfs.VFS
+	cwd string
+}
+
+// Read translates the sharedvfs error vocabulary into a shell-shaped
+// message ("no such file or directory" etc.) so the user sees the right
+// suffix on redirect failures.
+func (a *vfsExecAdapter) Read(p string) ([]byte, error) {
+	b, err := a.v.Read(sharedvfs.Resolve(a.cwd, p))
+	if err != nil {
+		return nil, &vfsErr{msg: errString(err)}
+	}
+	return b, nil
+}
+
+// Write delegates and translates errors the same way.
+func (a *vfsExecAdapter) Write(p string, data []byte) error {
+	if err := a.v.Write(sharedvfs.Resolve(a.cwd, p), data); err != nil {
+		return &vfsErr{msg: errString(err)}
+	}
+	return nil
+}
+
+// vfsErr is the typed error vfsExecAdapter returns so the executor's
+// "shell: <path>: <err>" line shows a humane message instead of the
+// sharedvfs sentinel prose.
+type vfsErr struct{ msg string }
+
+// Error returns the wrapped suffix (the executor prepends "shell: <path>:").
+func (e *vfsErr) Error() string { return e.msg }
 
 // splitLines turns a captured stdout/stderr blob into the slice the
 // renderer paints. Trailing newlines are dropped (they would otherwise emit
@@ -137,37 +304,6 @@ func splitLines(s string) []string {
 // IsClear reports whether a command line is the `clear` builtin.
 func IsClear(line string) bool {
 	return strings.TrimSpace(line) == "clear"
-}
-
-// parseEchoRedirect detects the `echo TEXT > PATH` shape.
-func parseEchoRedirect(line string) (text, path string, ok bool) {
-	if !strings.HasPrefix(line, "echo ") && line != "echo" {
-		return "", "", false
-	}
-	i := strings.Index(line, ">")
-	if i < 0 {
-		return "", "", false
-	}
-	left := strings.TrimSpace(line[len("echo"):i])
-	right := strings.TrimSpace(line[i+1:])
-	if right == "" {
-		return "", "", false
-	}
-	return left, right, true
-}
-
-// runEchoRedirect writes text + "\n" to the destination path. Kept local
-// because coreutils.echo is pure stdout (no redirect), and adding shell
-// redirection to coreutils would muddy a per-process tool interface.
-func (sh *Shell) runEchoRedirect(text, path string) []string {
-	abs := sharedvfs.Resolve(sh.Cwd, path)
-	if len(text) >= 2 && text[0] == '"' && text[len(text)-1] == '"' {
-		text = text[1 : len(text)-1]
-	}
-	if err := sh.VFS.Write(abs, []byte(text+"\n")); err != nil {
-		return []string{"echo: " + path + ": " + errString(err)}
-	}
-	return nil
 }
 
 // runCd updates Cwd. Stays local because changing shell state is not a
@@ -200,3 +336,4 @@ func errString(err error) string {
 	}
 	return err.Error()
 }
+
