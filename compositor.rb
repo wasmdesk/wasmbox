@@ -1938,10 +1938,16 @@ class Compositor
     end
     case key
     when "Tab"
-      e.call("preventDefault")
-      @wm.cycle
-      notify_windows_changed
-      return
+      # Shift+Tab cycles windows (Openbox/Alt-Tab equivalent). Plain Tab
+      # forwards to the focused window so the terminal can use it for
+      # autocompletion (and any text-editor client can use it for indent).
+      if e[:shiftKey]
+        e.call("preventDefault")
+        @wm.cycle
+        notify_windows_changed
+        return
+      end
+      # fall through to forward_key_to_client
     when "Escape"
       @menu = nil
       return
