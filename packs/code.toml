@@ -1,0 +1,12 @@
+# ociapps-pack manifest for the VS Code-styled code editor client.
+#
+# Pack the three files the OCI spawn path needs. The SDK is loaded from an
+# absolute URL by clients/code/worker.js at run time.
+
+mediatype = "application/vnd.oci.image.manifest.v1+json"
+
+[files]
+"worker.js"    = "worker.js"
+"wasm_exec.js" = "wasm_exec.js"
+"sdk.js"       = "sdk.js"
+"code.wasm"    = "code.wasm"

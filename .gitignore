@@ -8,6 +8,7 @@
 /clients/dock/wasm_exec.js
 /clients/terminal/terminal.wasm
 /clients/files/files.wasm
+/clients/code/code.wasm
 /bin/
 
 # OCI pack prep artifacts (materialised by `task ociapps:prep:<app>`).
@@ -19,6 +20,8 @@
 /clients/terminal/wasm_exec.js
 /clients/files/sdk.js
 /clients/files/wasm_exec.js
+/clients/code/sdk.js
+/clients/code/wasm_exec.js
 /clients/quake/wasm_exec.js
 
 # Agent/CI test harness deps

@@ -44,12 +44,12 @@ tasks:
       - task --list
 
   build:
-    desc: Build wasmbox.wasm + hello + dock + terminal + files clients + copy wasm_exec.js
-    deps: [build:compositor, build:hello, build:dock, build:terminal, build:files, build:serve]
+    desc: Build wasmbox.wasm + hello + dock + terminal + files + code clients + copy wasm_exec.js
+    deps: [build:compositor, build:hello, build:dock, build:terminal, build:files, build:code, build:serve]
 
   build:all:
     desc: Build everything incl. the external go-quake1 + wasmdock clients
-    deps: [build:compositor, build:hello, build:quake, build:dock, build:terminal, build:files, build:serve]
+    deps: [build:compositor, build:hello, build:quake, build:dock, build:terminal, build:files, build:code, build:serve]
 
   build:dock:
     desc: Build the wasmdock external client from the sibling wasmdesk/wasmdock repo into clients/dock/dock.wasm. The dock's worker.js + sdk.js are committed in clients/dock/; only the wasm + wasm_exec.js are built. Override DOCK_DIR if wasmdock repo lives elsewhere.
@@ -227,6 +227,18 @@ tasks:
     generates:
       - clients/files/files.wasm
 
+  build:code:
+    desc: Build the VS Code-styled code editor external client (clients/code/code.wasm)
+    env:
+      GOWORK: "off"
+      GOOS: js
+      GOARCH: wasm
+      CGO_ENABLED: "0"
+    cmds:
+      - go build -o clients/code/code.wasm ./clients/code
+    generates:
+      - clients/code/code.wasm
+
   build:serve:
     desc: Build the native dev server (cmd/serve) with COOP/COEP headers
     env:
@@ -249,7 +261,7 @@ tasks:
     env:
       GOWORK: "off"
     cmds:
-      - go test ./clients/hello/... ./clients/dock/... ./clients/terminal/... ./clients/files/...
+      - go test ./clients/hello/... ./clients/dock/... ./clients/terminal/... ./clients/files/... ./clients/code/...
       - go test ./
       - go test ./packs/...
       - go run ./cmd/rbtest
@@ -258,12 +270,13 @@ tasks:
   clean:
     desc: Remove the build artifacts
     cmds:
-      - rm -f wasmbox.wasm wasm_exec.js clients/hello/hello.wasm clients/dock/dock.wasm clients/terminal/terminal.wasm clients/files/files.wasm
+      - rm -f wasmbox.wasm wasm_exec.js clients/hello/hello.wasm clients/dock/dock.wasm clients/terminal/terminal.wasm clients/files/files.wasm clients/code/code.wasm
       - rm -f clients/hello/sdk.js clients/hello/wasm_exec.js
       - rm -f clients/terminal/sdk.js clients/terminal/wasm_exec.js
       - rm -f clients/files/sdk.js clients/files/wasm_exec.js
+      - rm -f clients/code/sdk.js clients/code/wasm_exec.js
       - rm -f clients/quake/wasm_exec.js
-      - rm -rf bin /tmp/ociapps-hello /tmp/ociapps-dock /tmp/ociapps-terminal /tmp/ociapps-files /tmp/ociapps-quake
+      - rm -rf bin /tmp/ociapps-hello /tmp/ociapps-dock /tmp/ociapps-terminal /tmp/ociapps-files /tmp/ociapps-code /tmp/ociapps-quake
 
   # ----- OCI image packaging + push (B3) -----------------------------------
   #
@@ -357,6 +370,22 @@ tasks:
       - clients/files/sdk.js
       - clients/files/wasm_exec.js
 
+  ociapps:prep:code:
+    desc: Materialise the wasm_exec.js + sdk.js + .wasm clients/code needs for an OCI pack.
+    deps: [build:code]
+    cmds:
+      - cp clients/sdk/sdk.js clients/code/sdk.js
+      - |
+        root="$(go env GOROOT)"
+        if [ -f "$root/lib/wasm/wasm_exec.js" ]; then
+          cp "$root/lib/wasm/wasm_exec.js" clients/code/wasm_exec.js
+        else
+          cp "$root/misc/wasm/wasm_exec.js" clients/code/wasm_exec.js
+        fi
+    generates:
+      - clients/code/sdk.js
+      - clients/code/wasm_exec.js
+
   ociapps:prep:quake:
     desc: Materialise wasm_exec.js for clients/quake. (Quake never loads the JS SDK -- the Go side drives the protocol directly.)
     deps: [build:quake]
@@ -395,6 +424,12 @@ tasks:
     cmds:
       - ./bin/ociapps-pack -in clients/files -manifest packs/files.toml -out /tmp/ociapps-files -ref files:latest
 
+  ociapps:pack:code:
+    desc: Pack clients/code into /tmp/ociapps-code with ref code:latest.
+    deps: [build:ociapps-cli, ociapps:prep:code]
+    cmds:
+      - ./bin/ociapps-pack -in clients/code -manifest packs/code.toml -out /tmp/ociapps-code -ref code:latest
+
   ociapps:pack:quake:
     desc: Pack clients/quake into /tmp/ociapps-quake with ref quake:latest. Requires ENGINE_DIR + a built clients/quake/quake.wasm.
     deps: [build:ociapps-cli, ociapps:prep:quake]
@@ -402,8 +437,8 @@ tasks:
       - ./bin/ociapps-pack -in clients/quake -manifest packs/quake.toml -out /tmp/ociapps-quake -ref quake:latest
 
   ociapps:pack:all:
-    desc: Pack every OCI client image (hello + dock + terminal + files; quake is opt-in via `task ociapps:pack:quake`).
-    deps: [ociapps:pack:hello, ociapps:pack:dock, ociapps:pack:terminal, ociapps:pack:files]
+    desc: Pack every OCI client image (hello + dock + terminal + files + code; quake is opt-in via `task ociapps:pack:quake`).
+    deps: [ociapps:pack:hello, ociapps:pack:dock, ociapps:pack:terminal, ociapps:pack:files, ociapps:pack:code]
 
   ociapps:push:hello:
     desc: Push /tmp/ociapps-hello to {{.OCI_REGISTRY}}/hello:latest.
@@ -429,6 +464,12 @@ tasks:
     cmds:
       - ./bin/ociapps-push -in /tmp/ociapps-files -ref {{.OCI_REGISTRY}}/files:latest
 
+  ociapps:push:code:
+    desc: Push /tmp/ociapps-code to {{.OCI_REGISTRY}}/code:latest.
+    deps: [build:ociapps-cli]
+    cmds:
+      - ./bin/ociapps-push -in /tmp/ociapps-code -ref {{.OCI_REGISTRY}}/code:latest
+
   ociapps:push:quake:
     desc: Push /tmp/ociapps-quake to {{.OCI_REGISTRY}}/quake:latest.
     deps: [build:ociapps-cli]
@@ -436,8 +477,8 @@ tasks:
       - ./bin/ociapps-push -in /tmp/ociapps-quake -ref {{.OCI_REGISTRY}}/quake:latest
 
   ociapps:push:all:
-    desc: Push every packed OCI image to {{.OCI_REGISTRY}} (hello + dock + terminal + files).
-    deps: [ociapps:push:hello, ociapps:push:dock, ociapps:push:terminal, ociapps:push:files]
+    desc: Push every packed OCI image to {{.OCI_REGISTRY}} (hello + dock + terminal + files + code).
+    deps: [ociapps:push:hello, ociapps:push:dock, ociapps:push:terminal, ociapps:push:files, ociapps:push:code]
 
   ociapps:registry:up:
     desc: Start a local OCI Distribution v2 registry on :5000 in Docker, with CORS + CORP headers wide enough that the browser can fetch /v2/* from a different origin (the wasmbox compositor's page). No-op when a CORS-enabled registry is already listening on :5000 (e.g. the one the sibling `task demo-wasmbox-oci` started).
@@ -532,6 +573,7 @@ tasks:
       - ./bin/ociapps-static -in /tmp/ociapps-dock     -repo dock     -out "{{.SITE_DIR}}"
       - ./bin/ociapps-static -in /tmp/ociapps-terminal -repo terminal -out "{{.SITE_DIR}}"
       - ./bin/ociapps-static -in /tmp/ociapps-files    -repo files    -out "{{.SITE_DIR}}"
+      - ./bin/ociapps-static -in /tmp/ociapps-code     -repo code     -out "{{.SITE_DIR}}"
       - 'echo "site: assembled {{.SITE_DIR}} ($(find "{{.SITE_DIR}}/v2" -type f | wc -l | tr -d " ") /v2 files)"'
 
   serve:pages:

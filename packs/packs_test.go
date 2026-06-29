@@ -55,6 +55,7 @@ var expectedFiles = map[string][]string{
 	"dock":     {"worker.js", "wasm_exec.js", "sdk.js", "dock.wasm"},
 	"terminal": {"worker.js", "wasm_exec.js", "sdk.js", "terminal.wasm"},
 	"files":    {"worker.js", "wasm_exec.js", "sdk.js", "files.wasm"},
+	"code":     {"worker.js", "wasm_exec.js", "sdk.js", "code.wasm"},
 	"quake":    {"worker.js", "wasm_exec.js", "quake.wasm"},
 }
 
