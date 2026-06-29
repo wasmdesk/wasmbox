@@ -20,11 +20,12 @@ if (isOCI) {
   importScripts("../../wasm_exec.js");
 }
 
-// 900x540 matches the layout constants in internal/scene/render.go: sidebar
-// (200) + gutter (50) + editor pane fills the remaining width; tab strip (28)
-// at the top, status bar (24) at the bottom. Keep these in sync if the
-// layout constants in render.go change.
-const client = new WasmboxClient({ title: "Code", w: 900, h: 540 });
+// 900x460 fits a typical 720-tall browser viewport (cascade origin ~y=200 +
+// compositor title 22 px + 460 surface = 682 < 720). The previous 540 made
+// the bottom 20 px of the status bar clip off-canvas. Layout in render.go:
+// sidebar (200) + gutter (50) + editor; tab strip (28) top, status bar (24)
+// bottom. Keep these in sync if the layout constants in render.go change.
+const client = new WasmboxClient({ title: "Code", w: 900, h: 460 });
 
 // Expose the client to the Go program through globalThis so it can grab the
 // SAB view + commit() + onInput() through syscall/js. Done BEFORE starting
