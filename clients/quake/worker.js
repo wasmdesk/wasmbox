@@ -31,6 +31,101 @@
 
 "use strict";
 
+// Saved-size restore (2026-06-29). The Go side allocates the SAB at
+// hello-time at (w, h) AND the compositor will accept those as the
+// granted surface dims. If we hardcode 320x240 the engine renders at
+// 320x240 and the compositor scale-fits up to whatever window-rect the
+// saved layout dictates -- wasted per-pixel work in the software
+// rasterizer. Instead: ask the main thread for the saved window size
+// (the compositor persists window geometry to localStorage under the
+// "wasmbox.layout" key, but `localStorage` is window-only -- Workers
+// see `self.localStorage === undefined` -- so we cannot read it here
+// directly). The main-thread agent in boot-config.js answers a tiny
+// BroadcastChannel request with the latest persisted layout, the
+// worker parses out the Quake window's record + uses (w, h) as the
+// SAB + render dims. Falls back to 800x600 (a 4:3 modern-desktop
+// default that scales cleanly from Quake's 4:3 internal aspect) when
+// no record exists or the channel does not answer within the small
+// timeout. We clamp to a sane min/max so a malformed layout record or
+// a user who shrank the window past usability cannot trigger a
+// 1-pixel-wide SAB or a 16384x16384 allocation.
+const QUAKE_TITLE = "quake (wasm)";
+const QUAKE_FB_DEFAULT_W = 800;
+const QUAKE_FB_DEFAULT_H = 600;
+const QUAKE_FB_MIN_W = 320;
+const QUAKE_FB_MIN_H = 240;
+const QUAKE_FB_MAX_W = 1920;
+const QUAKE_FB_MAX_H = 1080;
+// Time we'll wait for boot-config.js's main-thread agent to answer
+// the BroadcastChannel layout query before falling back to defaults.
+// On a reload the main thread spends a few hundred ms instantiating
+// wasmbox.wasm (the compositor) before its message loop services
+// our query; 2 s is the safe upper bound that still keeps boot
+// snappy when storage is empty.
+const QUAKE_FB_QUERY_TIMEOUT_MS = 2000;
+const QUAKE_FB_CHANNEL = "wasmbox.quake.fb";
+
+function parseSavedSize(raw, title) {
+  if (raw == null) return null;
+  // Last matching record wins (the compositor appends most-recent at
+  // the end of the stack, so the last "title<TAB>..." line for `title`
+  // is the freshest geometry).
+  let hit = null;
+  for (const line of String(raw).split("\n")) {
+    const parts = line.split("\t");
+    if (parts.length < 5) continue;
+    if (parts[0] !== title) continue;
+    const w = parseInt(parts[3], 10);
+    const h = parseInt(parts[4], 10);
+    if (!Number.isFinite(w) || !Number.isFinite(h)) continue;
+    hit = { w: w, h: h };
+  }
+  return hit;
+}
+
+function clamp(v, lo, hi) {
+  if (!Number.isFinite(v)) return lo;
+  if (v < lo) return lo;
+  if (v > hi) return hi;
+  return v | 0;
+}
+
+// fetchSavedLayout asks the main-thread agent (boot-config.js) for
+// the persisted layout via BroadcastChannel. Returns the raw layout
+// string (null when storage was empty / the agent declined to
+// answer / BroadcastChannel is unsupported / the response did not
+// arrive within the timeout).
+function fetchSavedLayout() {
+  return new Promise((resolve) => {
+    let bc;
+    try { bc = new BroadcastChannel(QUAKE_FB_CHANNEL); }
+    catch (_) { resolve(null); return; }
+    const timer = setTimeout(() => {
+      try { bc.close(); } catch (_) {}
+      resolve(null);
+    }, QUAKE_FB_QUERY_TIMEOUT_MS);
+    bc.addEventListener("message", (ev) => {
+      const m = ev.data;
+      if (!m || m.type !== "wasmbox.quake.fb/response") return;
+      clearTimeout(timer);
+      try { bc.close(); } catch (_) {}
+      resolve(typeof m.layout === "string" ? m.layout : null);
+    });
+    try { bc.postMessage({ type: "wasmbox.quake.fb/query" }); }
+    catch (_) { clearTimeout(timer); try { bc.close(); } catch (_) {} resolve(null); }
+  });
+}
+
+async function chooseFB() {
+  const raw = await fetchSavedLayout();
+  const saved = parseSavedSize(raw, QUAKE_TITLE);
+  let w = saved ? saved.w : QUAKE_FB_DEFAULT_W;
+  let h = saved ? saved.h : QUAKE_FB_DEFAULT_H;
+  w = clamp(w, QUAKE_FB_MIN_W, QUAKE_FB_MAX_W);
+  h = clamp(h, QUAKE_FB_MIN_H, QUAKE_FB_MAX_H);
+  return { w: w, h: h, source: saved ? "saved" : "default" };
+}
+
 // Stash the original postMessage + override it with a buffer-aware shim. As
 // soon as the port arrives the shim flushes the buffer + forwards all future
 // sends through the port. Installed at module load so the buffer is in place
@@ -73,6 +168,17 @@ self.addEventListener("message", function bootPortHandler(ev) {
 const isOCI = self.location.protocol === "blob:";
 
 (async () => {
+  // Pick the SAB / framebuffer dims FIRST + publish them on globals
+  // before instantiating quake.wasm. The Go side reads __quake_fb_w
+  // / __quake_fb_h at NewClient time; absent globals (older Go build)
+  // fall back to the Go-side defaults (also 800x600).
+  const fb = await chooseFB();
+  self.__quake_fb_w = fb.w;
+  self.__quake_fb_h = fb.h;
+  self.__quake_fb_source = fb.source;
+  try { console.log("quake worker: fb=" + fb.w + "x" + fb.h + " source=" + fb.source); }
+  catch (_) {}
+
   let wasmExecURL = "../../wasm_exec.js";
   let wasmURL = "./quake.wasm";
   if (isOCI) {

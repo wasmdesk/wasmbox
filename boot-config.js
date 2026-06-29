@@ -31,6 +31,57 @@
 
 "use strict";
 
+// Saved-window-size relay for Quake (2026-06-29). The quake worker
+// needs the persisted geometry from localStorage["wasmbox.layout"] so
+// the Go side can allocate the SAB at the user's last window size
+// instead of the hardcoded 320x240. But `localStorage` is window-only
+// (`self.localStorage === undefined` inside a Web Worker), so the
+// worker cannot read the key itself. We answer a small
+// BroadcastChannel query from the main thread instead.
+//
+// Protocol: a single channel ("wasmbox.quake.fb"); the worker posts
+// {type:"wasmbox.quake.fb/query"}, we reply with
+// {type:"wasmbox.quake.fb/response", layout: <string|null>}. Same
+// origin so the channel is delivered to every worker in the page.
+// The relay must be registered before the quake worker spawns; this
+// file is loaded as a regular <script> in index.html ahead of any
+// worker construction, which satisfies that ordering.
+(function () {
+  // Snapshot the persisted layout AT SCRIPT-LOAD TIME, before the
+  // compositor wasm boots + starts re-serializing its own state into
+  // the same key. By the time the quake worker queries us (a few
+  // hundred ms later, after `new Worker(...)` + module load), the
+  // compositor's tick has already overwritten localStorage with its
+  // current windows -- which does NOT yet include the quake entry
+  // (quake hasn't sent its hello yet). The snapshot preserves the
+  // pre-boot state -- exactly what the worker needs to size its SAB
+  // at the user's last-known quake window dims.
+  let layoutSnapshot = null;
+  try {
+    layoutSnapshot = globalThis.localStorage
+      ? globalThis.localStorage.getItem("wasmbox.layout")
+      : null;
+  } catch (_) { layoutSnapshot = null; }
+
+  try {
+    const bc = new BroadcastChannel("wasmbox.quake.fb");
+    bc.addEventListener("message", (ev) => {
+      const m = ev.data;
+      if (!m || m.type !== "wasmbox.quake.fb/query") return;
+      try {
+        bc.postMessage({ type: "wasmbox.quake.fb/response", layout: layoutSnapshot });
+        console.log("boot-config: served wasmbox.quake.fb query (layout=" +
+          (layoutSnapshot ? layoutSnapshot.length + " bytes" : "null") + ")");
+      } catch (_) {}
+    });
+    console.log("boot-config: wasmbox.quake.fb relay armed (snapshot=" +
+      (layoutSnapshot ? layoutSnapshot.length + " bytes" : "null") + ")");
+  } catch (_) {
+    // BroadcastChannel unsupported (legacy browsers); the worker will
+    // fall back to its default 800x600 after the query timeout.
+  }
+})();
+
 (function () {
   const params = new URLSearchParams(globalThis.location ? globalThis.location.search : "");
   let enable = params.get("ociapps") === "1";
