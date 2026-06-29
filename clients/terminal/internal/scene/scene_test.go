@@ -408,3 +408,250 @@ func TestHandleKeyTabSingleMatchNoExtension(t *testing.T) {
 		t.Fatal("Tab on full 'echo' should NOT signal a change")
 	}
 }
+
+// typeLine pushes the bytes of one command line into HandleKey -- printable
+// chars + Enter. Helper for the history tests below.
+func typeLine(s *State, line string) {
+	for i := 0; i < len(line); i++ {
+		s.HandleKey(string(line[i]))
+	}
+	s.HandleKey("Enter")
+}
+
+// TestHandleKeyHistoryWalkAndStashRestore covers the headline Bash-style
+// sequence: push three commands, walk Up through the three (clamped at the
+// oldest), walk Down back through, and pop off the most-recent into the
+// empty stash (the user typed nothing before the first Up).
+func TestHandleKeyHistoryWalkAndStashRestore(t *testing.T) {
+	s := newSceneWithVFS(t, nil)
+	typeLine(s, "a")
+	typeLine(s, "b")
+	typeLine(s, "c")
+	if len(s.Shell.History) != 3 {
+		t.Fatalf("history len = %d, want 3", len(s.Shell.History))
+	}
+
+	// First Up: stash empty Line + jump to newest ("c").
+	if !s.HandleKey("ArrowUp") {
+		t.Fatal("ArrowUp #1 should signal a change")
+	}
+	if string(s.Shell.Line) != "c" {
+		t.Fatalf("after Up #1: Line = %q, want %q", s.Shell.Line, "c")
+	}
+	if !s.HandleKey("ArrowUp") || string(s.Shell.Line) != "b" {
+		t.Fatalf("after Up #2: Line = %q, want %q", s.Shell.Line, "b")
+	}
+	if !s.HandleKey("ArrowUp") || string(s.Shell.Line) != "a" {
+		t.Fatalf("after Up #3: Line = %q, want %q", s.Shell.Line, "a")
+	}
+	// Clamped: another Up at the oldest is a no-op (returns false).
+	if s.HandleKey("ArrowUp") {
+		t.Fatal("ArrowUp at oldest should NOT signal a change")
+	}
+	if string(s.Shell.Line) != "a" {
+		t.Fatalf("after Up-clamp: Line = %q, want unchanged %q", s.Shell.Line, "a")
+	}
+
+	// Walk back down: a -> b -> c -> stash ("").
+	if !s.HandleKey("ArrowDown") || string(s.Shell.Line) != "b" {
+		t.Fatalf("after Down #1: Line = %q, want %q", s.Shell.Line, "b")
+	}
+	if !s.HandleKey("ArrowDown") || string(s.Shell.Line) != "c" {
+		t.Fatalf("after Down #2: Line = %q, want %q", s.Shell.Line, "c")
+	}
+	// Past newest: HistIdx = -1, Line reverts to stash ("").
+	if !s.HandleKey("ArrowDown") || string(s.Shell.Line) != "" {
+		t.Fatalf("after Down #3 (pop to stash): Line = %q, want empty", s.Shell.Line)
+	}
+	// Down from a fresh line: no-op.
+	if s.HandleKey("ArrowDown") {
+		t.Fatal("ArrowDown on fresh line should NOT signal a change")
+	}
+}
+
+// TestHandleKeyHistoryDedupesAdjacent: typing the same command twice leaves
+// History at length 1 (Bash HISTCONTROL=ignoredups default).
+func TestHandleKeyHistoryDedupesAdjacent(t *testing.T) {
+	s := newSceneWithVFS(t, nil)
+	typeLine(s, "a")
+	typeLine(s, "a")
+	if len(s.Shell.History) != 1 || string(s.Shell.History[0]) != "a" {
+		t.Fatalf("history = %v, want [\"a\"] (dedup)", s.Shell.History)
+	}
+	// A different command between two duplicates pushes both copies of "a"
+	// (only IMMEDIATELY-prior duplicates are suppressed, matching Bash).
+	typeLine(s, "b")
+	typeLine(s, "a")
+	if len(s.Shell.History) != 3 {
+		t.Fatalf("history len = %d, want 3 after non-adjacent dup", len(s.Shell.History))
+	}
+}
+
+// TestHandleKeyHistoryStashesInProgressEdit: typing "wip" then ArrowUp
+// stashes "wip"; walking back down past the newest entry restores it.
+func TestHandleKeyHistoryStashesInProgressEdit(t *testing.T) {
+	s := newSceneWithVFS(t, nil)
+	typeLine(s, "a")
+	typeLine(s, "b")
+	typeLine(s, "c")
+	for _, b := range "wip" {
+		s.HandleKey(string(b))
+	}
+	if string(s.Shell.Line) != "wip" {
+		t.Fatalf("pre-Up: Line = %q, want %q", s.Shell.Line, "wip")
+	}
+	s.HandleKey("ArrowUp")
+	if string(s.Shell.Line) != "c" {
+		t.Fatalf("after Up: Line = %q, want %q", s.Shell.Line, "c")
+	}
+	s.HandleKey("ArrowDown")
+	if string(s.Shell.Line) != "wip" {
+		t.Fatalf("after Down (stash restore): Line = %q, want %q", s.Shell.Line, "wip")
+	}
+}
+
+// TestHandleKeyHistoryCapsAt500: pushing more than historyCap entries
+// truncates the oldest, keeping len(History) == historyCap and the newest
+// at the tail.
+func TestHandleKeyHistoryCapsAt500(t *testing.T) {
+	s := newSceneWithVFS(t, nil)
+	for i := 0; i < 600; i++ {
+		// Each line is distinct so the dedup rule doesn't interfere.
+		s.Shell.Execute(itoa(i))
+	}
+	if got := len(s.Shell.History); got != historyCap {
+		t.Fatalf("history len = %d, want %d (cap)", got, historyCap)
+	}
+	// The newest entry survived; the oldest 100 were trimmed off the front.
+	if string(s.Shell.History[historyCap-1]) != itoa(599) {
+		t.Fatalf("newest = %q, want %q", s.Shell.History[historyCap-1], itoa(599))
+	}
+	if string(s.Shell.History[0]) != itoa(100) {
+		t.Fatalf("oldest = %q, want %q (front trimmed)", s.Shell.History[0], itoa(100))
+	}
+}
+
+// itoa is a tiny stdlib-free int-to-decimal helper so the cap test does not
+// pull in strconv just for fixture-building.
+func itoa(n int) string {
+	if n == 0 {
+		return "0"
+	}
+	var buf [20]byte
+	i := len(buf)
+	for n > 0 {
+		i--
+		buf[i] = byte('0' + n%10)
+		n /= 10
+	}
+	return string(buf[i:])
+}
+
+// TestHandleKeyHistoryEmpty: ArrowUp / ArrowDown with no history are
+// no-ops -- HandleKey returns false and Line is unchanged.
+func TestHandleKeyHistoryEmpty(t *testing.T) {
+	s := newSceneWithVFS(t, nil)
+	if s.HandleKey("ArrowUp") {
+		t.Fatal("ArrowUp with empty history should NOT signal a change")
+	}
+	if s.HandleKey("ArrowDown") {
+		t.Fatal("ArrowDown on fresh line should NOT signal a change")
+	}
+	if len(s.Shell.Line) != 0 {
+		t.Fatalf("Line mutated to %q on no-op nav", s.Shell.Line)
+	}
+}
+
+// TestHandleKeyHistoryResetOnEdit: after walking into history, a printable
+// keystroke detaches navigation -- the displayed line is kept (now editable)
+// and the next ArrowUp restarts from the new top of stack (the just-edited
+// line is NOT in History until Enter, so Up jumps to the previous entry).
+func TestHandleKeyHistoryResetOnEdit(t *testing.T) {
+	s := newSceneWithVFS(t, nil)
+	typeLine(s, "a")
+	typeLine(s, "b")
+	s.HandleKey("ArrowUp") // Line = "b"
+	if s.Shell.HistIdx == -1 {
+		t.Fatal("HistIdx should be set after ArrowUp")
+	}
+	s.HandleKey("X") // edit: HistIdx resets, Line becomes "bX"
+	if s.Shell.HistIdx != -1 {
+		t.Fatalf("HistIdx = %d after edit, want -1", s.Shell.HistIdx)
+	}
+	if string(s.Shell.Line) != "bX" {
+		t.Fatalf("Line = %q after edit, want %q", s.Shell.Line, "bX")
+	}
+	// Up now restarts: stashes "bX" + jumps to newest ("b").
+	s.HandleKey("ArrowUp")
+	if string(s.Shell.Line) != "b" {
+		t.Fatalf("post-edit Up: Line = %q, want %q", s.Shell.Line, "b")
+	}
+	// Down past newest restores the stashed "bX".
+	s.HandleKey("ArrowDown")
+	if string(s.Shell.Line) != "bX" {
+		t.Fatalf("post-edit Down: Line = %q, want stashed %q", s.Shell.Line, "bX")
+	}
+}
+
+// TestHandleKeyHistoryBackspaceResetsCursor: Backspace after a history Up
+// resets navigation + shrinks the recalled line (proving Backspace flows
+// through the reset path AND the existing shrink logic).
+func TestHandleKeyHistoryBackspaceResetsCursor(t *testing.T) {
+	s := newSceneWithVFS(t, nil)
+	typeLine(s, "ab")
+	s.HandleKey("ArrowUp") // Line = "ab"
+	s.HandleKey("Backspace")
+	if s.Shell.HistIdx != -1 {
+		t.Fatalf("HistIdx = %d after Backspace, want -1", s.Shell.HistIdx)
+	}
+	if string(s.Shell.Line) != "a" {
+		t.Fatalf("Line = %q after Backspace, want %q", s.Shell.Line, "a")
+	}
+}
+
+// TestHandleKeyHistoryEnterResetsCursor: Enter on a recalled line executes
+// it (Bash semantics) AND detaches navigation so the next Up restarts.
+func TestHandleKeyHistoryEnterResetsCursor(t *testing.T) {
+	s := newSceneWithVFS(t, nil)
+	typeLine(s, "echo a")
+	s.HandleKey("ArrowUp") // Line = "echo a"
+	if s.Shell.HistIdx == -1 {
+		t.Fatal("HistIdx should be set after Up")
+	}
+	s.HandleKey("Enter")
+	if s.Shell.HistIdx != -1 {
+		t.Fatalf("HistIdx = %d after Enter, want -1", s.Shell.HistIdx)
+	}
+	// "echo a" deduped against the immediately-prior entry of the same name.
+	if len(s.Shell.History) != 1 {
+		t.Fatalf("history len = %d after Enter-on-recall, want 1 (dedup)", len(s.Shell.History))
+	}
+}
+
+// TestHandleKeyHistoryTabResetsCursor: Tab also detaches history navigation
+// (Bash treats Tab as a line edit for this purpose).
+func TestHandleKeyHistoryTabResetsCursor(t *testing.T) {
+	s := newSceneWithVFS(t, nil)
+	typeLine(s, "echo a")
+	s.HandleKey("ArrowUp") // Line = "echo a"
+	if s.Shell.HistIdx == -1 {
+		t.Fatal("HistIdx should be set after Up")
+	}
+	s.HandleKey("Tab")
+	if s.Shell.HistIdx != -1 {
+		t.Fatalf("HistIdx = %d after Tab, want -1", s.Shell.HistIdx)
+	}
+}
+
+// TestReplaceLinePaintsRecalledBytes: drive replaceLine through ArrowUp and
+// confirm the recalled bytes land in the grid (after the prompt).
+func TestReplaceLinePaintsRecalledBytes(t *testing.T) {
+	s := newSceneWithVFS(t, nil)
+	typeLine(s, "echo hi")
+	// After Enter, the grid has the executed line + output + a fresh
+	// prompt. ArrowUp should paint "echo hi" again on the prompt row.
+	s.HandleKey("ArrowUp")
+	if !strings.Contains(gridString(s), "echo hi") {
+		t.Fatal("grid missing recalled 'echo hi' after ArrowUp")
+	}
+}

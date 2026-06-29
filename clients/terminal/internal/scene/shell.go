@@ -52,13 +52,35 @@ func stdinBridgePath() string {
 	return fmt.Sprintf("/.shellstdin.%d", n)
 }
 
+// historyCap caps the in-memory command history at the same order of
+// magnitude as Bash's default HISTSIZE (500). Older entries fall off the
+// front when the cap is reached -- bounded memory, newest-wins.
+const historyCap = 500
+
 // Shell is the per-window terminal state. LastExit carries the most recent
 // command's exit code so the prompt can paint "[N]" and the lexer can
 // expand $? on the next line.
+//
+// Bash-style history recall: every successful Execute pushes the trimmed
+// line into History (subject to dedup + cap). The HistIdx cursor and Stash
+// support the Up / Down arrow navigation wired in scene.HandleKey:
+//
+//   - HistIdx == -1 means "user is editing a fresh line"; Up jumps the
+//     cursor to the most recent entry after first stashing Line into Stash
+//     so Down can restore it.
+//   - HistIdx in [0, len(History)-1] points at the entry currently echoed
+//     back into Line; Up decrements, Down increments, clamping at 0; Down
+//     past the newest pops back to -1 and restores Stash.
+//
+// Any non-arrow key edit (printable / Backspace / Enter / Tab) resets
+// HistIdx to -1 so the next Up restarts navigation from the new line --
+// matches Bash's "edit detaches you from history" behaviour.
 type Shell struct {
 	Prompt   string
 	Line     []byte
 	History  [][]byte
+	HistIdx  int    // -1 = fresh line; otherwise index into History.
+	Stash    []byte // saved Line when navigation started from a non-empty edit.
 	Cwd      string
 	VFS      sharedvfs.VFS
 	LastExit int
@@ -73,9 +95,11 @@ func NewShell() *Shell {
 	return NewShellWithVFS(v)
 }
 
-// NewShellWithVFS returns a Shell that speaks the supplied VFS.
+// NewShellWithVFS returns a Shell that speaks the supplied VFS. HistIdx is
+// seeded to -1 (the "fresh line" sentinel) so a first Up arrow correctly
+// jumps to the newest entry rather than into a zero-valued slot.
 func NewShellWithVFS(v sharedvfs.VFS) *Shell {
-	return &Shell{Prompt: " $ ", Cwd: "/", VFS: v}
+	return &Shell{Prompt: " $ ", Cwd: "/", VFS: v, HistIdx: -1}
 }
 
 // PromptString returns the rendered prompt. When the last command failed
@@ -101,7 +125,7 @@ func (sh *Shell) Execute(line string) []string {
 	if trimmed == "" {
 		return nil
 	}
-	sh.History = append(sh.History, []byte(trimmed))
+	sh.pushHistory(trimmed)
 
 	// Local builtins that mutate shell state -- only intercept when the
 	// line is JUST that builtin (no pipes/redirects/chains). A user typing
@@ -125,6 +149,83 @@ func (sh *Shell) Execute(line string) []string {
 	res := shellparse.Run(tree, sh.LastExit, &vfsExecAdapter{v: sh.VFS, cwd: sh.Cwd}, sh.dispatch)
 	sh.LastExit = res.LastExit
 	return splitLines(string(res.Stdout) + string(res.Stderr))
+}
+
+// pushHistory appends trimmed to History with two Bash-style rules:
+//
+//   - HISTCONTROL=ignoredups (the Bash default): if trimmed is identical to
+//     the immediately previous entry, drop it -- repeated Enter on the same
+//     command leaves history at the same size.
+//   - HISTSIZE=historyCap: once the slice reaches the cap, drop the oldest
+//     entry before appending so memory is bounded and newest-wins.
+//
+// We do NOT touch HistIdx here; it is the caller's job (HandleKey at Enter
+// time) to reset navigation state, because pushHistory is also called from
+// codepaths that may want to keep the cursor (none today, but the seam is
+// useful for a future :history-merge / readline-style reload).
+func (sh *Shell) pushHistory(trimmed string) {
+	if n := len(sh.History); n > 0 && string(sh.History[n-1]) == trimmed {
+		return
+	}
+	if len(sh.History) >= historyCap {
+		// Drop the oldest entry. We could use sh.History[1:] but that
+		// keeps the backing array growing without bound across many
+		// rollovers; copy-in-place keeps the slice header stable.
+		copy(sh.History, sh.History[1:])
+		sh.History = sh.History[:len(sh.History)-1]
+	}
+	sh.History = append(sh.History, []byte(trimmed))
+}
+
+// HistoryUp moves the recall cursor one step further into the past and
+// returns the line the caller should display in Line. When called from
+// HistIdx == -1 it first stashes the current Line into Stash so a matching
+// Down can restore it. ok=false means "no change" (history empty, already
+// at oldest, etc.) -- HandleKey forwards that into a false return so the
+// renderer skips a no-op repaint.
+func (sh *Shell) HistoryUp() (line []byte, ok bool) {
+	if len(sh.History) == 0 {
+		return nil, false
+	}
+	if sh.HistIdx == -1 {
+		// Stash a copy so subsequent Line mutations don't alias it.
+		sh.Stash = append(sh.Stash[:0], sh.Line...)
+		sh.HistIdx = len(sh.History) - 1
+		return append([]byte(nil), sh.History[sh.HistIdx]...), true
+	}
+	if sh.HistIdx == 0 {
+		// Clamped at oldest -- Bash beeps; we just no-op.
+		return nil, false
+	}
+	sh.HistIdx--
+	return append([]byte(nil), sh.History[sh.HistIdx]...), true
+}
+
+// HistoryDown moves the recall cursor one step toward the present. From a
+// fresh line (HistIdx == -1) it no-ops; from the newest entry it falls back
+// to -1 + the stashed line (which is the empty string when the user pressed
+// Up from an empty Line). ok=false means "no change".
+func (sh *Shell) HistoryDown() (line []byte, ok bool) {
+	if sh.HistIdx == -1 {
+		return nil, false
+	}
+	if sh.HistIdx < len(sh.History)-1 {
+		sh.HistIdx++
+		return append([]byte(nil), sh.History[sh.HistIdx]...), true
+	}
+	// At newest entry: pop back to the fresh-line slot + return the stash.
+	sh.HistIdx = -1
+	out := append([]byte(nil), sh.Stash...)
+	sh.Stash = sh.Stash[:0]
+	return out, true
+}
+
+// HistoryReset detaches the recall cursor without touching Line. Called by
+// HandleKey on any input event other than ArrowUp / ArrowDown so the next
+// Up restarts navigation from the just-edited line (Bash semantics).
+func (sh *Shell) HistoryReset() {
+	sh.HistIdx = -1
+	sh.Stash = sh.Stash[:0]
 }
 
 // tryLocalBuiltin handles the three lines that don't compose with the

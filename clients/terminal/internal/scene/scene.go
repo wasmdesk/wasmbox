@@ -106,7 +106,10 @@ func Render(s *State, buf []byte) {
 //   - single printable ASCII (key.length == 1): append + echo into the grid.
 //   - "Enter":     execute the line, paint output, render fresh prompt.
 //   - "Backspace": pop one byte off the line + reverse-cursor the grid.
-//   - anything else (arrows, modifiers): ignored.
+//   - "ArrowUp" / "ArrowDown": walk the in-memory command history Bash-style
+//     (most-recent first; first Up from a fresh line stashes the in-progress
+//     edit so a matching Down can restore it).
+//   - anything else (ArrowLeft / ArrowRight, modifiers): ignored.
 //
 // Returns true when the grid changed, so the caller can decide whether to
 // re-render. We chose key-string dispatch over keycodes because the SDK
@@ -115,7 +118,20 @@ func (s *State) HandleKey(key string) bool {
 	switch key {
 	case "":
 		return false
+	case "ArrowUp":
+		if line, ok := s.Shell.HistoryUp(); ok {
+			s.replaceLine(line)
+			return true
+		}
+		return false
+	case "ArrowDown":
+		if line, ok := s.Shell.HistoryDown(); ok {
+			s.replaceLine(line)
+			return true
+		}
+		return false
 	case "Enter":
+		s.Shell.HistoryReset()
 		s.Grid.CRLF()
 		line := string(s.Shell.Line)
 		s.Shell.Line = s.Shell.Line[:0]
@@ -132,6 +148,7 @@ func (s *State) HandleKey(key string) bool {
 		s.writePrompt()
 		return true
 	case "Backspace":
+		s.Shell.HistoryReset()
 		if len(s.Shell.Line) == 0 {
 			return false
 		}
@@ -139,17 +156,43 @@ func (s *State) HandleKey(key string) bool {
 		s.Grid.Backspace()
 		return true
 	case "Tab":
+		s.Shell.HistoryReset()
 		return s.handleTab()
 	default:
 		if len(key) == 1 {
 			b := key[0]
 			if b >= 0x20 && b <= 0x7E {
+				s.Shell.HistoryReset()
 				s.Shell.Line = append(s.Shell.Line, b)
 				s.Grid.Print(b)
 				return true
 			}
 		}
 		return false
+	}
+}
+
+// replaceLine swaps the current in-progress edit (Shell.Line + the on-grid
+// echo of it) for newLine. Used by ArrowUp / ArrowDown to display a recalled
+// history entry. The redraw is a two-step "erase + repaint":
+//
+//  1. Backspace the grid len(Shell.Line) times to wipe the echoed bytes
+//     (Backspace clamps at column 0 so wrapped lines erase cleanly up to
+//     the row start). If a history line was longer than the surface width
+//     and wrapped, we cannot perfectly undo the wrap -- the grid lacks the
+//     history of how many rows the echo consumed -- but recalled commands
+//     in practice fit one row, and the next Enter / Backspace will repaint
+//     correctly. We accept this v0 limitation rather than tracking a per-
+//     line "wrap rows" counter.
+//  2. Replace Shell.Line with newLine and Print each byte so the echo and
+//     the internal line stay in lockstep.
+func (s *State) replaceLine(newLine []byte) {
+	for i := 0; i < len(s.Shell.Line); i++ {
+		s.Grid.Backspace()
+	}
+	s.Shell.Line = append(s.Shell.Line[:0], newLine...)
+	for i := 0; i < len(s.Shell.Line); i++ {
+		s.Grid.Print(s.Shell.Line[i])
 	}
 }
 
