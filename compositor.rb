@@ -300,6 +300,7 @@ class WindowManager
   LAUNCHABLE = {
     "terminal"  => "clients/terminal/worker.js",
     "editor"    => "clients/hello/worker.js",
+    "code"      => "clients/code/worker.js",
     "files"     => "clients/files/worker.js",
     # Bundled hello client (the wasm "Hello, wasmbox!" demo). Same descriptor
     # shape as terminal/files; the root menu exposes it as "Hello (wasm)".
