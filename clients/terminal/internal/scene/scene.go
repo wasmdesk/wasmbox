@@ -22,8 +22,34 @@ package scene
 import (
 	"strings"
 
+	"github.com/wasmdesk/coreutils/multicall"
 	"github.com/wasmdesk/wasmbox/clients/sharedvfs"
+	"github.com/wasmdesk/wasmbox/clients/terminal/internal/complete"
 )
+
+// localBuiltinsForCompletion is the set of pure-shell builtins (cd / clear /
+// help) the shell handles locally. The completion command-position candidate
+// set is this list UNIONed with multicall.Names() -- so Tab after a fresh
+// prompt sees every command the user can actually run.
+var localBuiltinsForCompletion = []string{"cd", "clear", "help"}
+
+// completionBuiltins returns the merged + sorted list. We build it on every
+// Tab rather than cache it because multicall.Names() is already O(N log N)
+// over a tiny N and the resulting slice is small (~45 entries).
+func completionBuiltins() []string {
+	tools := multicall.Names()
+	out := make([]string, 0, len(localBuiltinsForCompletion)+len(tools))
+	out = append(out, localBuiltinsForCompletion...)
+	out = append(out, tools...)
+	// sort.Strings would pull a fresh import; reuse complete.LongestCommonPrefix
+	// for sorting? no -- inline insertion sort over a small N is fine.
+	for i := 1; i < len(out); i++ {
+		for j := i; j > 0 && out[j] < out[j-1]; j-- {
+			out[j], out[j-1] = out[j-1], out[j]
+		}
+	}
+	return out
+}
 
 // State is the top-of-package handle the wasm entry point holds. It carries
 // the surface size, the character grid, and the shell. Surface size is fixed
@@ -112,6 +138,8 @@ func (s *State) HandleKey(key string) bool {
 		s.Shell.Line = s.Shell.Line[:len(s.Shell.Line)-1]
 		s.Grid.Backspace()
 		return true
+	case "Tab":
+		return s.handleTab()
 	default:
 		if len(key) == 1 {
 			b := key[0]
@@ -145,4 +173,66 @@ func (s *State) writePrompt() {
 // method on *State (not free function) so the doc shows up next to State.
 func (s *State) ExecuteForTest(line string) []string {
 	return s.Shell.Execute(strings.TrimRight(line, "\n"))
+}
+
+// handleTab runs one Tab autocompletion against the current edit line. The
+// cursor is always at len(Line) because the scene has no cursor-motion keys
+// (left/right arrows do nothing); we still pass it explicitly so a future
+// arrow-key wiring can pipe a real cursor through unchanged.
+//
+// Outcomes (mirroring bash):
+//
+//   - 0 matches: ring a soft "no change" (return false) -- the user sees
+//     the line untouched.
+//   - 1 match:   splice the match in place of the partial word, advancing
+//     the grid cursor for each new byte.
+//   - >1 match:  print the candidates on a fresh row, then re-paint the
+//     prompt + the unchanged edit line so the user can keep typing.
+//
+// Multi-match policy: print one match per row. A future iteration may
+// column-pack to fit; v0 is row-per-match because rendering columns in the
+// monospace grid requires knowing the grid width AND padding each cell,
+// and the simpler shape is always readable.
+func (s *State) handleTab() bool {
+	line := string(s.Shell.Line)
+	cursor := len(line)
+	r := complete.Complete(line, cursor, completionBuiltins(), s.Shell.VFS, s.Shell.Cwd)
+	switch len(r.Matches) {
+	case 0:
+		return false
+	case 1:
+		// Replace the partial word with the match. Because the cursor was
+		// at end-of-line, the new bytes are appended; we extend Shell.Line
+		// and Print each new byte to advance the grid cursor identically.
+		add := r.Matches[0][len(r.Target):]
+		if add == "" {
+			return false
+		}
+		for i := 0; i < len(add); i++ {
+			b := add[i]
+			s.Shell.Line = append(s.Shell.Line, b)
+			s.Grid.Print(b)
+		}
+		return true
+	default:
+		// Multi-match: drop to a new row, print the matches one-per-row,
+		// then re-paint the prompt + the in-progress line so the user's
+		// editing state is intact. We deliberately do NOT auto-extend by
+		// the longest common prefix in v0 -- bash does, but it complicates
+		// the "matches all share the target" edge-case, and the user can
+		// always type one more character + Tab again.
+		s.Grid.CRLF()
+		for _, m := range r.Matches {
+			s.Grid.PrintString(m)
+			s.Grid.CRLF()
+		}
+		s.writePrompt()
+		// Re-echo the unchanged edit line into the grid so the user sees
+		// what they have typed so far -- the prompt above wrote only the
+		// PromptString, not the line bytes.
+		for i := 0; i < len(s.Shell.Line); i++ {
+			s.Grid.Print(s.Shell.Line[i])
+		}
+		return true
+	}
 }

@@ -4,7 +4,12 @@
 
 package scene
 
-import "testing"
+import (
+	"strings"
+	"testing"
+
+	"github.com/wasmdesk/wasmbox/clients/sharedvfs"
+)
 
 // newBuf allocates a buffer the right size for state s.
 func newBuf(s *State) []byte { return make([]byte, 4*s.W*s.H) }
@@ -147,5 +152,149 @@ func TestExecuteForTest(t *testing.T) {
 	out := s.ExecuteForTest("echo hi\n")
 	if len(out) != 1 || out[0] != "hi" {
 		t.Fatalf("ExecuteForTest('echo hi\\n') = %v, want [\"hi\"]", out)
+	}
+}
+
+// completionBuiltins merges the three local builtins with every coreutils
+// tool name. The list must (a) include "cd" (local) and "echo" (multicall)
+// and (b) be sorted -- the completion contract requires sorted input.
+func TestCompletionBuiltinsMerged(t *testing.T) {
+	got := completionBuiltins()
+	if len(got) < 4 {
+		t.Fatalf("completionBuiltins() too short: %d", len(got))
+	}
+	have := map[string]bool{}
+	for _, b := range got {
+		have[b] = true
+	}
+	for _, w := range []string{"cd", "clear", "help", "echo"} {
+		if !have[w] {
+			t.Errorf("completionBuiltins() missing %q (got %v)", w, got)
+		}
+	}
+	// Sorted invariant.
+	for i := 1; i < len(got); i++ {
+		if got[i] < got[i-1] {
+			t.Errorf("completionBuiltins() not sorted at %d: %q then %q", i, got[i-1], got[i])
+		}
+	}
+}
+
+// newSceneWithVFS spins up a State that owns a fresh InMemoryVFS the test
+// can pre-populate. Surface is large enough (640x400 => 40x25 cells) that
+// multi-match menus + the redrawn prompt all fit on screen.
+func newSceneWithVFS(t *testing.T, seed func(v sharedvfs.VFS)) *State {
+	t.Helper()
+	v := sharedvfs.NewInMemoryVFS()
+	if seed != nil {
+		seed(v)
+	}
+	return NewWithVFS(640, 400, v)
+}
+
+// gridString joins the grid's glyphs row-by-row into a single string for
+// substring assertions. Empty cells (Glyph==0) become spaces so the result
+// reads like a screen dump.
+func gridString(s *State) string {
+	g := s.Grid
+	var b strings.Builder
+	for r := 0; r < g.Rows; r++ {
+		for c := 0; c < g.Cols; c++ {
+			ch := g.Cells[r*g.Cols+c].Glyph
+			if ch == 0 {
+				b.WriteByte(' ')
+			} else {
+				b.WriteByte(ch)
+			}
+		}
+		b.WriteByte('\n')
+	}
+	return b.String()
+}
+
+// TestHandleKeyTabSingleMatch: typing "ec" + Tab autocompletes to "echo"
+// (single match in command position) -- Line grows and the new bytes are
+// painted into the grid.
+func TestHandleKeyTabSingleMatch(t *testing.T) {
+	s := newSceneWithVFS(t, nil)
+	for _, k := range []string{"e", "c"} {
+		s.HandleKey(k)
+	}
+	if !s.HandleKey("Tab") {
+		t.Fatal("Tab on 'ec' should signal a change")
+	}
+	if string(s.Shell.Line) != "echo" {
+		t.Fatalf("Shell.Line = %q, want %q", string(s.Shell.Line), "echo")
+	}
+	if !strings.Contains(gridString(s), "echo") {
+		t.Fatal("grid does not contain 'echo' after Tab autocompletion")
+	}
+}
+
+// TestHandleKeyTabMultiMatch: typing "r" + Tab in command position has
+// two matches (rm, rmdir) -- Line should stay "r" but the matches should
+// be painted into the grid below the prompt.
+func TestHandleKeyTabMultiMatch(t *testing.T) {
+	s := newSceneWithVFS(t, nil)
+	s.HandleKey("r")
+	if !s.HandleKey("Tab") {
+		t.Fatal("Tab on 'r' should signal a change (printed menu)")
+	}
+	if string(s.Shell.Line) != "r" {
+		t.Fatalf("Shell.Line = %q, want unchanged %q", string(s.Shell.Line), "r")
+	}
+	grid := gridString(s)
+	if !strings.Contains(grid, "rm") {
+		t.Fatal("grid missing 'rm' candidate after multi-match Tab")
+	}
+	if !strings.Contains(grid, "rmdir") {
+		t.Fatal("grid missing 'rmdir' candidate after multi-match Tab")
+	}
+}
+
+// TestHandleKeyTabNoMatch: typing a prefix that matches nothing returns
+// false (no grid change) -- the user sees their line as-is.
+func TestHandleKeyTabNoMatch(t *testing.T) {
+	s := newSceneWithVFS(t, nil)
+	for _, k := range []string{"z", "z", "z"} {
+		s.HandleKey(k)
+	}
+	if s.HandleKey("Tab") {
+		t.Fatal("Tab on 'zzz' should NOT signal a change (no matches)")
+	}
+	if string(s.Shell.Line) != "zzz" {
+		t.Fatalf("Shell.Line = %q, want %q", string(s.Shell.Line), "zzz")
+	}
+}
+
+// TestHandleKeyTabArgFilenameSingle: typing "ls /scr" + Tab autocompletes
+// the directory to "/scratch/" -- the new bytes land in Line + grid.
+func TestHandleKeyTabArgFilenameSingle(t *testing.T) {
+	s := newSceneWithVFS(t, func(v sharedvfs.VFS) {
+		if err := v.Mkdir("/scratch"); err != nil {
+			t.Fatal(err)
+		}
+	})
+	for _, k := range []string{"l", "s", " ", "/", "s", "c", "r"} {
+		s.HandleKey(k)
+	}
+	if !s.HandleKey("Tab") {
+		t.Fatal("Tab on 'ls /scr' should signal a change")
+	}
+	if string(s.Shell.Line) != "ls /scratch/" {
+		t.Fatalf("Shell.Line = %q, want %q", string(s.Shell.Line), "ls /scratch/")
+	}
+}
+
+// TestHandleKeyTabSingleMatchNoExtension: the single match exactly equals
+// the target -- no bytes to add, so handleTab returns false (no change).
+func TestHandleKeyTabSingleMatchNoExtension(t *testing.T) {
+	s := newSceneWithVFS(t, nil)
+	for _, k := range []string{"e", "c", "h", "o"} {
+		s.HandleKey(k)
+	}
+	// "echo" matches exactly one builtin ("echo") with nothing to extend.
+	if s.HandleKey("Tab") {
+		t.Fatal("Tab on full 'echo' should NOT signal a change")
 	}
 }
