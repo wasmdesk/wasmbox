@@ -7,14 +7,17 @@
 // dispatches to a fixed builtin table, and a cwd tracked as a real
 // VFS-relative path.
 //
-// Most file-touching builtins (cat / ls / mkdir / touch / rm / pwd / echo /
-// cp / mv / rmdir / head / tail / wc / grep / find) are delegated to the
-// wasmdesk/coreutils suite via multicall.Dispatch. The terminal wraps its
-// sharedvfs handle into a coreutils fsx.FS adapter and pipes the tool's
-// stdout/stderr into the grid the renderer paints. Pure-shell builtins
-// (cd / clear / date / help / `echo TEXT > PATH`) stay local because they
-// either mutate shell state (cd) or do something the dispatcher does not
-// model (clear).
+// Most builtins (every name in coreutils' multicall.Names() -- v0.3: 42
+// tools spanning cat/ls/cp/mv/wc/grep/find/sort/uniq/cut/tr/paste/nl/tac/
+// rev/fold/expand/unexpand/printf/basename/dirname/date/seq/sleep/true/
+// false/yes/env/expr/md5sum/sha1sum/sha256sum/base64/base32/...) are
+// delegated to the wasmdesk/coreutils suite via multicall.Dispatch. The
+// terminal wraps its sharedvfs handle into a coreutils fsx.FS adapter and
+// pipes the tool's stdout/stderr into the grid the renderer paints. Pure-
+// shell builtins (cd / clear / help / `echo TEXT > PATH`) stay local
+// because they either mutate shell state (cd) or do something the
+// dispatcher does not model (clear). Adding a tool to coreutils auto-
+// exposes it here -- multicall.Has(name) gates the route.
 
 package scene
 
@@ -55,10 +58,10 @@ func (sh *Shell) PromptString() string {
 	return sh.Cwd + sh.Prompt
 }
 
-// Execute dispatches one command line. The pure-shell builtins (cd / clear /
-// date / help / `echo TEXT > PATH`) stay local; everything else routes
-// through coreutils.Dispatch so the terminal grows new commands by adding
-// them to the dispatch table (zero terminal code per new tool).
+// Execute dispatches one command line. The pure-shell builtins (cd / clear
+// / help / `echo TEXT > PATH`) stay local; everything else routes through
+// coreutils.Dispatch so the terminal grows new commands by adding them to
+// the dispatch table (zero terminal code per new tool).
 func (sh *Shell) Execute(line string) []string {
 	trimmed := strings.TrimSpace(line)
 	if trimmed == "" {
@@ -78,13 +81,11 @@ func (sh *Shell) Execute(line string) []string {
 	switch cmd {
 	case "help":
 		return []string{
-			"builtins: " + strings.Join(append([]string{"cd", "clear", "date", "help"}, multicall.Names()...), " "),
+			"builtins: " + strings.Join(append([]string{"cd", "clear", "help"}, multicall.Names()...), " "),
 			"redirection: echo TEXT > PATH",
 		}
 	case "clear":
 		return nil
-	case "date":
-		return []string{"Fri Jun 26 12:00:00 UTC 2026"}
 	case "cd":
 		return sh.runCd(args)
 	}

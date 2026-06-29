@@ -5,6 +5,7 @@
 package scene
 
 import (
+	"strings"
 	"testing"
 
 	"github.com/wasmdesk/wasmbox/clients/sharedvfs"
@@ -98,12 +99,16 @@ func TestExecuteClear(t *testing.T) {
 	}
 }
 
-// `date` is deterministic so the playwright probe can assert exact pixels.
+// `date` routes to the coreutils date builtin (UTC RFC1123). We only
+// pattern-match on the suffix so the test stays clock-agnostic.
 func TestExecuteDate(t *testing.T) {
 	sh := newTestShell()
 	out := sh.Execute("date")
-	if len(out) != 1 || out[0] != "Fri Jun 26 12:00:00 UTC 2026" {
-		t.Fatalf("date = %v", out)
+	if len(out) != 1 {
+		t.Fatalf("date = %v, want 1 line", out)
+	}
+	if !strings.HasSuffix(out[0], " UTC") {
+		t.Fatalf("date %q lacks UTC suffix", out[0])
 	}
 }
 
