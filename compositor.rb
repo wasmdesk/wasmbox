@@ -188,6 +188,12 @@ end
 # ---------------------------------------------------------------------------
 class ExternalWindow < Window
   attr_accessor :worker, :sab, :ctl, :image_data, :stride, :pending_damage
+  # The SAB-backed surface is allocated ONCE at welcome time at the granted
+  # (w, h) dimensions; @w/@h then drift independently as the user drags the
+  # resize grip. Compositor#blit_external uses @native_w/@native_h to address
+  # the SAB and scales into @w/@h on present. Without this pair a resized
+  # window would read past the SAB end and show garbage / black bands.
+  attr_accessor :native_w, :native_h
   # For popups: the window_id of the parent surface this popup is anchored to
   # (nil for windows/panels). Used to dismiss a popup when its parent goes.
   attr_accessor :parent_id
@@ -202,6 +208,11 @@ class ExternalWindow < Window
     @sab = nil
     @image_data = nil
     @stride = 4 * w
+    # Native SAB dimensions -- frozen at construction (the client only
+    # allocated this many RGBA bytes). @w/@h may drift via resize_to; the
+    # SAB+ImageData never resize, the blit scale-fits instead.
+    @native_w = w
+    @native_h = h
     # Until the first commit lands, paint the full body so we don't flash an
     # uninitialised SAB. After that, the client tells us which rect changed.
     @pending_damage = { x: 0, y: 0, w: w, h: h }
@@ -226,14 +237,18 @@ class ExternalWindow < Window
   end
 
   # Clip the damage rect to the surface bounds and to a maximum-area-1 sanity
-  # bound, returning nil if there is nothing left.
+  # bound, returning nil if there is nothing left. The bound is the NATIVE SAB
+  # size, not the current window size -- the SAB never grows, only the on-
+  # canvas presentation rect does. Without this, a window dragged smaller than
+  # its native surface would silently truncate the damage and the blit would
+  # only refresh the visible top-left slice on resize-up.
   def clipped_damage
     return nil unless @pending_damage
     d = @pending_damage
     x = [d[:x], 0].max
     y = [d[:y], 0].max
-    w = [d[:w] + [d[:x], 0].min, @w - x].min
-    h = [d[:h] + [d[:y], 0].min, @h - y].min
+    w = [d[:w] + [d[:x], 0].min, @native_w - x].min
+    h = [d[:h] + [d[:y], 0].min, @native_h - y].min
     return nil if w <= 0 || h <= 0
     { x: x, y: y, w: w, h: h }
   end
@@ -2273,11 +2288,31 @@ class Compositor
   # constructing an ImageData over a SAB-backed Uint8ClampedArray, so the JS
   # helper wasmboxBlitFromSAB() owns a non-shared ImageData and copies the
   # damage rect out of the SAB into it before putImageData.
+  #
+  # SCALE-FIT: when the user resizes a window the SAB stays at its native size
+  # (the client allocated it once and the protocol has no resize handshake).
+  # If win.w/win.h differ from native_w/native_h we ask the helper for a
+  # scaled present -- it draws the WHOLE native surface stretched into the
+  # window rect, so e.g. Quake's 320x240 framebuffer fills a 800x600 window.
   def blit_external(win)
     return nil unless win.image_data
-    d = win.clipped_damage || { x: 0, y: 0, w: win.w, h: win.h }
-    JS.global.call("wasmboxBlitFromSAB", @ctx, win.image_data,
-                   win.x, win.y, d[:x], d[:y], d[:w], d[:h])
+    d = win.clipped_damage || { x: 0, y: 0, w: win.native_w, h: win.native_h }
+    if win.w == win.native_w && win.h == win.native_h
+      # Native-size present: copy only the damaged rect (cheaper, and we can
+      # restrict the drawImage to that rect since it lines up 1:1).
+      JS.global.call("wasmboxBlitFromSAB", @ctx, win.image_data,
+                     win.x, win.y, d[:x], d[:y], d[:w], d[:h])
+    else
+      # Resized present: any damage means the visible scaled image must
+      # refresh in its entirety -- a damaged pixel in source maps to a
+      # damaged-RECT in destination once scale != 1, and computing the exact
+      # destination damage band is fiddlier than just redrawing. The helper
+      # still does the seqlock-safe copy of the damage out of the SAB so we
+      # never sample mid-paint bytes.
+      JS.global.call("wasmboxBlitFromSABScaled", @ctx, win.image_data,
+                     d[:x], d[:y], d[:w], d[:h],
+                     win.x, win.y, win.w, win.h)
+    end
     win.clear_damage
   end
 

@@ -160,6 +160,33 @@ ew2 = wm3.register_external("tiny", 10, 10)
 assert_eq(ew2.w, Theme::MIN_W, "clamp below MIN_W")
 assert_eq(ew2.h, Theme::MIN_H, "clamp below MIN_H")
 
+# ---- native_w/native_h frozen at construction; resize_to drifts @w/@h -----
+# The SAB is sized once at hello-time; the user dragging the resize grip must
+# NOT shrink/grow the SAB-backed surface (the protocol has no resize
+# handshake yet). The compositor scale-fits the native surface into @w/@h.
+wm3r = WindowManager.new
+ewr = wm3r.register_external("resize-me", 320, 240)
+assert_eq(ewr.native_w, 320, "native_w captured at construction")
+assert_eq(ewr.native_h, 240, "native_h captured at construction")
+ewr.resize_to(800, 600)
+assert_eq(ewr.w, 800, "resize_to grew @w")
+assert_eq(ewr.h, 600, "resize_to grew @h")
+assert_eq(ewr.native_w, 320, "native_w preserved across resize_to (SAB stays)")
+assert_eq(ewr.native_h, 240, "native_h preserved across resize_to (SAB stays)")
+# clipped_damage must clip to NATIVE bounds (SAB extent), not to @w/@h --
+# otherwise a window grown larger would tell the blit to read past the SAB
+# end and decode garbage.
+ewr.clear_damage
+ewr.merge_damage({ x: 0, y: 0, w: 9999, h: 9999 })
+cdr = ewr.clipped_damage
+assert_eq(cdr[:w], 320, "clipped_damage w clipped to native_w, not @w")
+assert_eq(cdr[:h], 240, "clipped_damage h clipped to native_h, not @h")
+# Shrinking below native should keep the SAB intact too (the visible image
+# scales DOWN; the SAB never deallocates pixels).
+ewr.resize_to(160, 120)
+assert_eq(ewr.native_w, 320, "native_w preserved across shrink resize_to")
+assert_eq(ewr.native_h, 240, "native_h preserved across shrink resize_to")
+
 # ---- translate_input surface-local coordinates ----------------------------
 ew.move_to(50, 80)
 payload = wm3.translate_input(ew, :mousedown, 70, 100, button: 0)

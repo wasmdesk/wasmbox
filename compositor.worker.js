@@ -433,6 +433,42 @@ globalThis.wasmboxBlitFromSAB = function (ctx, slot, dx, dy, sx, sy, sw, sh) {
   ctx.drawImage(slot.canvas, sx, sy, sw, sh, dx + sx, dy + sy, sw, sh);
 };
 
+// Scale-fit twin of wasmboxBlitFromSAB. Used when an external window's
+// on-screen rect (dw x dh) differs from its SAB's native size (slot.w x
+// slot.h) -- which happens whenever the user drags the resize grip, since the
+// SAB stays at its native dimensions for the lifetime of the surface. The
+// helper still does the seqlock-protected copy of the damage rect out of the
+// SAB into the slot's private ImageData, but then draws the FULL native
+// surface stretched into (dx, dy, dw, dh). Browser drawImage scaling is
+// hardware-accelerated and respects ctx.imageSmoothingEnabled (the compositor
+// leaves it on the default = true, so 320x240 -> 800x600 is bilinear).
+globalThis.wasmboxBlitFromSABScaled = function (ctx, slot, sx, sy, sw, sh, dx, dy, dw, dh) {
+  const stride = slot.w * 4;
+  let s1 = 0;
+  if (slot.seq) {
+    s1 = Atomics.load(slot.seq, 0);
+    if (s1 & 1) return;
+  }
+  const dst = slot.image.data;
+  for (let row = 0; row < sh; row++) {
+    const srcOff = (sy + row) * stride + sx * 4;
+    const dstOff = (sy + row) * stride + sx * 4;
+    dst.set(slot.src.subarray(srcOff, srcOff + sw * 4), dstOff);
+  }
+  if (slot.seq && Atomics.load(slot.seq, 0) !== s1) return;
+  if (!slot.canvas) {
+    slot.canvas = new OffscreenCanvas(slot.w, slot.h);
+    slot.octx = slot.canvas.getContext("2d");
+  }
+  // Refresh the damaged region in our private OffscreenCanvas at native size,
+  // then stretch the WHOLE native surface into the window's on-screen rect.
+  // (Partial scale-mapping would be cheaper but accumulates fringe artifacts
+  // on integer rounding -- redrawing the whole surface keeps the present
+  // visually correct for any scale, at the cost of one extra drawImage.)
+  slot.octx.putImageData(slot.image, 0, 0, sx, sy, sw, sh);
+  ctx.drawImage(slot.canvas, 0, 0, slot.w, slot.h, dx, dy, dw, dh);
+};
+
 globalThis.wasmboxMakeObject = function () {
   const o = {};
   for (let i = 0; i < arguments.length; i += 2) o[arguments[i]] = arguments[i + 1];
