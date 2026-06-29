@@ -50,7 +50,7 @@ end
 # Pure data + math; no JS here.
 # ---------------------------------------------------------------------------
 class Window
-  attr_accessor :id, :title, :x, :y, :w, :h, :fill, :focused, :role, :minimized, :workspace, :shaded
+  attr_accessor :id, :title, :x, :y, :w, :h, :fill, :focused, :role, :minimized, :workspace, :shaded, :lock_aspect
 
   def initialize(id, title, x, y, w, h, fill, role = "window")
     @id = id
@@ -61,6 +61,15 @@ class Window
     @h = h
     @fill = fill
     @focused = false
+    # Aspect-ratio lock for interactive resize: when > 0, the compositor
+    # preserves w / h == @lock_aspect each time resize_to is called. 0 means
+    # free resize (the default). Set from the hello-handshake's optional
+    # `lock_aspect` field, OR after the fact via the additive `set_lock_aspect`
+    # wire message (Quake takes that path: its worker.js cannot reach the SDK's
+    # hello payload, so it posts set_lock_aspect from the port shim after the
+    # welcome lands). The lock is purely a UI policy; the SAB native_w/native_h
+    # are unchanged, so the scale-fit blit still works at any locked size.
+    @lock_aspect = 0.0
     # role is "window" (normal, decorated, cascade-placed) or "panel" (the dock:
     # undecorated, bottom-center anchored, always-on-top). An unknown role MUST
     # behave like a normal window, so anything that is not exactly "panel" is
@@ -166,8 +175,27 @@ class Window
   end
 
   def resize_to(nw, nh)
-    @w = [nw, Theme::MIN_W].max
-    @h = [nh, Theme::MIN_H].max
+    # Aspect-lock policy: when @lock_aspect > 0 the user's drag delta on EITHER
+    # axis is treated as the leader and the OTHER axis snaps so w/h matches the
+    # locked ratio. We pick width as the leader (the bottom-right grip's
+    # horizontal drag dominates the visual; the vertical follows). nh is then
+    # round(nw / lock_aspect). MIN_W/MIN_H clamps apply AFTER the lock so a
+    # tiny request still yields the smaller of the two bounds without breaking
+    # the ratio. Backward-compat: a 0.0 lock leaves the free-resize behaviour
+    # the SDK clients have always seen.
+    if @lock_aspect > 0
+      lw = [nw, Theme::MIN_W].max
+      lh = (lw / @lock_aspect).round
+      if lh < Theme::MIN_H
+        lh = Theme::MIN_H
+        lw = (lh * @lock_aspect).round
+      end
+      @w = lw
+      @h = lh
+    else
+      @w = [nw, Theme::MIN_W].max
+      @h = [nh, Theme::MIN_H].max
+    end
   end
 
   # In-process windows ("step A"): painted by the compositor itself from #fill.
@@ -963,6 +991,12 @@ class WindowManager
       win.sab = msg[:sab]
       win.ctl = msg[:ctl]   # optional seqlock control word; nil for older clients
       win.stride = msg[:stride] || (4 * win.w)
+      # Optional aspect-ratio lock declared at hello time. A client that knows
+      # its native aspect (Quake = 4:3, retro consoles ditto) can pin it here
+      # and the compositor's resize_to will preserve w/h == ratio while the
+      # user drags the grip. Absent / zero / negative -> free resize.
+      la = msg[:lock_aspect]
+      win.lock_aspect = la.to_f if !la.nil? && la.to_f > 0
       :welcome
     when "launch"
       # A client asks the compositor to start another client. Validate the app
@@ -1029,6 +1063,23 @@ class WindowManager
       # skips notify_theme_changed on :ignored so the panel does not spin.
       changed = set_theme(msg[:name].to_s)
       changed.nil? ? :ignored : :theme_changed
+    when "set_lock_aspect"
+      # A client (e.g. Quake) post-handshake declares an aspect-ratio lock for
+      # the interactive resize grip. The compositor's resize_to then snaps
+      # height to width/ratio on every drag tick, so the SAB's intrinsic shape
+      # (4:3 for Quake) survives the user pulling the grip around. Purely
+      # additive: a client that never sends this keeps the free-resize behaviour
+      # the SDK has always exposed. Unknown id, panel id, or non-positive ratio
+      # is dropped -- the lock is opt-in.
+      win = find(msg[:window_id])
+      return :ignored unless win
+      return :ignored if win.panel?
+      ratio = msg[:ratio]
+      return :ignored if ratio.nil?
+      r = ratio.to_f
+      return :ignored if r <= 0
+      win.lock_aspect = r
+      :lock_aspect_set
     when "move_window"
       # Reserved for v1: drag a window to another workspace via the dock. The
       # wire shape `{type:"move_window", window_id:, workspace:}` updates
@@ -1615,7 +1666,9 @@ class Compositor
     # Scalar fields. `index`/`workspace` are dock + workspace controls; `name`
     # is the theme name for theme switching; `parent` + `rel_x` + `rel_y` carry
     # popup placement (without them a popup hello would land at (0,0)).
-    %w[window_id w h stride title role app index workspace name parent rel_x rel_y].each do |k|
+    # `lock_aspect` rides on `hello` (optional intrinsic ratio); `ratio` rides
+    # on `set_lock_aspect` (post-handshake declaration).
+    %w[window_id w h stride title role app index workspace name parent rel_x rel_y lock_aspect ratio].each do |k|
       v = data.get(k)
       h[k.to_sym] = v unless v.nil?
     end

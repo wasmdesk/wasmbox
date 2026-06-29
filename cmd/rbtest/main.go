@@ -844,5 +844,92 @@ exts = wme.externals
 assert_eq(exts.length, 2, "externals counts only register_external windows")
 exts.each { |w| assert(w.external?, "every externals entry is external?") }
 
+# ---- aspect-ratio lock: default + resize_to honours it ------------------
+# Default lock is 0.0 (free resize). Without a lock, resize_to writes the
+# requested w/h after MIN clamp -- the existing behaviour.
+wmal = WindowManager.new
+fw = wmal.spawn("free", 400, 300)
+assert_eq(fw.lock_aspect, 0.0, "default lock_aspect is 0 (free resize)")
+fw.resize_to(900, 200)
+assert_eq(fw.w, 900, "free resize: width = requested")
+assert_eq(fw.h, 200, "free resize: height = requested (MIN ok)")
+# Set a 4:3 lock; resize_to then snaps h = round(w / 4:3).
+fw.lock_aspect = 4.0/3.0
+fw.resize_to(800, 9999)
+assert_eq(fw.w, 800, "locked resize: width is the leader")
+assert_eq(fw.h, 600, "locked resize: height snaps to width / 4:3 (800/1.333 = 600)")
+# Width-leader with a "natural" 4:3 input still snaps exactly.
+fw.resize_to(400, 300)
+assert_eq(fw.w, 400, "locked resize: 400 stays as width")
+assert_eq(fw.h, 300, "locked resize: 4:3 of 400 = 300")
+# MIN_W clamp applies BEFORE the ratio derivation: a request below MIN_W
+# clamps width up, then h follows from the locked ratio.
+fw.resize_to(10, 10)
+assert_eq(fw.w, Theme::MIN_W, "locked resize: width clamped to MIN_W")
+assert_eq(fw.h, (Theme::MIN_W / (4.0/3.0)).round,
+          "locked resize: height = MIN_W / ratio (rounded)")
+# 16:9 also snaps cleanly (1280/720) for the generalizability check.
+fw.lock_aspect = 16.0/9.0
+fw.resize_to(1280, 9999)
+assert_eq(fw.w, 1280, "16:9 lock: width leader = 1280")
+assert_eq(fw.h, 720, "16:9 lock: height = 1280 / (16:9) = 720")
+
+# ---- aspect-ratio lock: handle_client_message :set_lock_aspect arm -----
+wmla = WindowManager.new
+# Register an external window through the normal hello path.
+res = wmla.handle_client_message({ type: "hello", title: "qclient", w: 320, h: 240,
+                                   sab: :sab2, stride: 1280 })
+assert_eq(res, :welcome, "hello yields :welcome (pre set_lock_aspect)")
+qw = wmla.last_registered
+assert_eq(qw.lock_aspect, 0.0, "fresh external window: lock_aspect 0 (no hello.lock_aspect)")
+# set_lock_aspect arm: writes the ratio + returns :lock_aspect_set.
+res = wmla.handle_client_message({ type: "set_lock_aspect",
+                                   window_id: qw.id, ratio: 4.0/3.0 })
+assert_eq(res, :lock_aspect_set, "set_lock_aspect on a real window yields :lock_aspect_set")
+assert((qw.lock_aspect - 4.0/3.0).abs < 0.0001, "lock_aspect stored as 4:3")
+# Lock now takes effect: drag the grip would call resize_to; height snaps to w/(4:3).
+qw.resize_to(900, 800)
+assert_eq(qw.w, 900, "after set_lock_aspect: width still leader = 900")
+assert_eq(qw.h, (900 / (4.0/3.0)).round, "after set_lock_aspect: height snaps to 4:3 of 900")
+# A second set_lock_aspect rewrites the ratio (no-op-on-same-value is fine; we
+# always accept). Set to 0 disabled? We treat 0/negative as "ignored, keep
+# existing" so a client cannot silently DISABLE the lock by passing 0 -- they
+# must spawn a fresh window. (Symmetry with the hello.lock_aspect ignore-on-0.)
+res = wmla.handle_client_message({ type: "set_lock_aspect", window_id: qw.id, ratio: 0 })
+assert_eq(res, :ignored, "set_lock_aspect ratio=0 is :ignored")
+res = wmla.handle_client_message({ type: "set_lock_aspect", window_id: qw.id, ratio: -1.5 })
+assert_eq(res, :ignored, "set_lock_aspect ratio<0 is :ignored")
+assert((qw.lock_aspect - 4.0/3.0).abs < 0.0001, "lock_aspect unchanged by bad ratio")
+# Missing ratio is ignored.
+res = wmla.handle_client_message({ type: "set_lock_aspect", window_id: qw.id })
+assert_eq(res, :ignored, "set_lock_aspect missing ratio is :ignored")
+# Unknown window id is ignored.
+res = wmla.handle_client_message({ type: "set_lock_aspect", window_id: 999, ratio: 1.5 })
+assert_eq(res, :ignored, "set_lock_aspect unknown id is :ignored")
+# Panel id is ignored (a dock has no aspect-locked surface).
+wmla.register_external("dock", 480, 28, "panel")
+pana = wmla.last_registered
+res = wmla.handle_client_message({ type: "set_lock_aspect", window_id: pana.id, ratio: 1.5 })
+assert_eq(res, :ignored, "set_lock_aspect on a panel id is :ignored")
+
+# ---- aspect-ratio lock: hello.lock_aspect optional field ---------------
+# A forward-compat client that knows its aspect can declare it in hello.
+wmlh = WindowManager.new
+res = wmlh.handle_client_message({ type: "hello", title: "fc", w: 320, h: 240,
+                                   sab: :sab3, stride: 1280, lock_aspect: 4.0/3.0 })
+assert_eq(res, :welcome, "hello with lock_aspect still yields :welcome")
+fcw = wmlh.last_registered
+assert((fcw.lock_aspect - 4.0/3.0).abs < 0.0001, "hello.lock_aspect stored")
+# An older client without the field gets the existing free-resize default.
+res = wmlh.handle_client_message({ type: "hello", title: "old", w: 200, h: 150,
+                                   sab: :sab4, stride: 800 })
+oldw = wmlh.last_registered
+assert_eq(oldw.lock_aspect, 0.0, "hello without lock_aspect: lock_aspect stays 0")
+# A non-positive lock_aspect on hello is also ignored (defensive).
+res = wmlh.handle_client_message({ type: "hello", title: "bad", w: 200, h: 150,
+                                   sab: :sab5, stride: 800, lock_aspect: 0 })
+badw = wmlh.last_registered
+assert_eq(badw.lock_aspect, 0.0, "hello.lock_aspect = 0 stays 0 (defensive)")
+
 puts "rbtest: ran all pure-WM assertions"
 `

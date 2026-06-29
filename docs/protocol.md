@@ -174,6 +174,24 @@ The compositor responds by unmapping the window and posting `closed` back.
 
 Reserved; the SDK does not implement it yet (would need a fresh SAB).
 
+### `set_lock_aspect`  (C → S)
+
+```js
+{ type: "set_lock_aspect", window_id: 7, ratio: 4.0/3.0 }
+```
+
+A client declares an aspect-ratio lock for the interactive resize grip. While
+the lock is set, the compositor's `resize_to` snaps `h = round(w / ratio)` on
+every drag tick, so the surface's intrinsic shape survives the user dragging
+the grip around. `ratio <= 0`, an unknown `window_id`, or a panel id are
+dropped (the lock is opt-in; a 0 cannot silently disable an existing lock).
+
+The lock may also be declared at hello time via an optional `lock_aspect`
+field on the `hello` payload (same semantics: positive Float, or absent).
+
+Used by the Quake client (4:3) so dragging the grip cannot stretch the
+software-rasterised framebuffer into 16:9.
+
 ### `launch`  (C → S)
 
 A client (typically the dock `panel`) asks the compositor to start another

@@ -143,6 +143,16 @@ self.postMessage = function (msg, transferOrOpts) {
   }
   _pending.push([msg, transferOrOpts]);
 };
+// Quake's intrinsic frame aspect (id Tech 1, 1996): 320x240 = 4:3. The
+// compositor honours @lock_aspect during interactive resize so the user
+// dragging the bottom-right grip cannot stretch Quake into 16:9 letterbox.
+// Sent as a `set_lock_aspect` wire message AFTER the welcome lands -- the
+// SDK is off-limits + we don't have a clean way to add lock_aspect to the
+// hello payload Go composes, but the set_lock_aspect arm is purely
+// additive and needs only window_id + ratio, both of which we learn from
+// snooping the welcome inbound below.
+const QUAKE_LOCK_ASPECT = 4.0 / 3.0;
+
 self.addEventListener("message", function bootPortHandler(ev) {
   const m = ev.data;
   if (!m || m.type !== "__wasmbox_port" || !m.port) return;
@@ -152,8 +162,31 @@ self.addEventListener("message", function bootPortHandler(ev) {
   // so the Go side's `self.addEventListener("message", ...)` listener sees
   // it. The MessageEvent constructor copies `data` verbatim across the SAB
   // + js.Value bridge without serializing.
+  //
+  // We ALSO snoop the inbound stream for the first `welcome` message: it
+  // carries the compositor-assigned window_id, which we need to post the
+  // additive `set_lock_aspect` declaration back. Once sent (one-shot, no
+  // retries needed -- the port is ordered) we leave the re-dispatcher to
+  // pass every subsequent message through to Go untouched.
+  let _lockSent = false;
   _activePort.addEventListener("message", function (e) {
-    self.dispatchEvent(new MessageEvent("message", { data: e.data }));
+    const data = e.data;
+    if (!_lockSent && data && data.type === "welcome" &&
+        typeof data.window_id === "number") {
+      _lockSent = true;
+      try {
+        _activePort.postMessage({
+          type: "set_lock_aspect",
+          window_id: data.window_id,
+          ratio: QUAKE_LOCK_ASPECT,
+        });
+      } catch (err) {
+        // Non-fatal: the lock is a UX nicety; Quake still runs without it.
+        try { console.warn("quake worker: set_lock_aspect post failed: " + err); }
+        catch (_) {}
+      }
+    }
+    self.dispatchEvent(new MessageEvent("message", { data: data }));
   });
   // MessagePort needs an explicit start() when consumed via addEventListener.
   try { _activePort.start(); } catch (_) {}
