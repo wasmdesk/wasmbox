@@ -294,3 +294,88 @@ func TestIsCommandPositionWhitespaceOnly(t *testing.T) {
 		t.Fatal("'echo ' should NOT be command position")
 	}
 }
+
+// TestFormatColumns: row-major column packing across several grid widths.
+func TestFormatColumns(t *testing.T) {
+	cases := []struct {
+		name     string
+		gridCols int
+		in       []string
+		want     []string
+	}{
+		{
+			name:     "empty",
+			gridCols: 40,
+			in:       nil,
+			want:     nil,
+		},
+		{
+			name:     "single match fits one column",
+			gridCols: 40,
+			in:       []string{"echo"},
+			want:     []string{"echo"},
+		},
+		{
+			// widest = 10 ("foobar.txt") -> cell = 12 (10 + 2 gap).
+			// gridCols 40 / 12 = 3 cols, ceil(2/3) = 1 row.
+			// Last cell of the row is unpadded. First cell pads "foo.txt"
+			// (7) to 12 chars -> 5 trailing spaces before "foobar.txt".
+			name:     "two matches one row no trailing pad",
+			gridCols: 40,
+			in:       []string{"foo.txt", "foobar.txt"},
+			want:     []string{"foo.txt     foobar.txt"},
+		},
+		{
+			// widest = 5 ("alpha"|"delta") -> cell = 7. 20/7 = 2 cols.
+			// ceil(4/2) = 2 rows. Row-major:
+			//   col 0 = [alpha, beta]
+			//   col 1 = [gamma, delta]
+			name:     "four matches two cols two rows",
+			gridCols: 20,
+			in:       []string{"alpha", "beta", "gamma", "delta"},
+			want: []string{
+				"alpha  gamma",
+				"beta   delta",
+			},
+		},
+		{
+			// gridCols too narrow for even one padded cell -> 1-column fallback.
+			// 3 matches -> 3 rows, each a bare match.
+			name:     "narrow terminal one column fallback",
+			gridCols: 1,
+			in:       []string{"foo", "bar", "baz"},
+			want:     []string{"foo", "bar", "baz"},
+		},
+		{
+			// gridCols <= 0 also falls back to 1-column.
+			name:     "zero gridCols fallback",
+			gridCols: 0,
+			in:       []string{"a", "b"},
+			want:     []string{"a", "b"},
+		},
+		{
+			// Odd count: 5 items, 2 columns, ceil(5/2)=3 rows.
+			//   col 0 = [a, b, c]
+			//   col 1 = [d, e, _]  (last row col 1 missing)
+			// Row 2 has only col 0 occupied; col 0 is the last-occupied cell so
+			// it is NOT padded.
+			name:     "odd count short last row",
+			gridCols: 20,
+			in:       []string{"alpha", "beta", "gamma", "delta", "kappa"},
+			want: []string{
+				"alpha  delta",
+				"beta   kappa",
+				"gamma",
+			},
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got := FormatColumns(tc.gridCols, tc.in)
+			if !reflect.DeepEqual(got, tc.want) {
+				t.Fatalf("FormatColumns(%d, %v):\ngot:  %#v\nwant: %#v",
+					tc.gridCols, tc.in, got, tc.want)
+			}
+		})
+	}
+}

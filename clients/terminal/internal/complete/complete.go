@@ -237,3 +237,70 @@ func LongestCommonPrefix(ss []string) string {
 	}
 	return p
 }
+
+// FormatColumns lays out matches into a column-packed multi-line string
+// fitting into gridCols character columns. Bash's `complete -A` uses the
+// same shape: a 2-space gap between cells, each cell padded to the widest
+// item, candidates emitted row-major across the column grid (column 0 holds
+// matches[0..rows-1], column 1 holds matches[rows..2*rows-1], ...).
+//
+// The return value is one "row" per element (each ending in '\n'-style row
+// boundary -- handled by the caller; here we return a []string for direct
+// row-by-row painting into the grid). An empty matches slice yields nil.
+//
+// Algorithm:
+//
+//	widest = max(len(m)) for m in matches
+//	cell   = widest + 2 (the trailing gap is the column separator)
+//	cols   = max(1, gridCols / cell)
+//	rows   = ceil(len(matches) / cols)
+//	row[r] = strings.Join(matches[r], matches[r+rows], ...), each padded to cell
+//
+// gridCols <= 0 is treated as a 1-column fallback (a degenerate terminal
+// where nothing fits) -- still readable, never panics.
+func FormatColumns(gridCols int, matches []string) []string {
+	if len(matches) == 0 {
+		return nil
+	}
+	widest := 0
+	for _, m := range matches {
+		if len(m) > widest {
+			widest = len(m)
+		}
+	}
+	cell := widest + 2
+	// cell is always >= 2 (empty match -> widest=0, cell=2) so gridCols/cell
+	// can be 0 only when gridCols < cell; in that case (and the gridCols<=0
+	// degenerate case) we fall back to a single column.
+	cols := 1
+	if gridCols >= cell {
+		cols = gridCols / cell
+	}
+	rows := (len(matches) + cols - 1) / cols
+	out := make([]string, rows)
+	var b strings.Builder
+	for r := 0; r < rows; r++ {
+		b.Reset()
+		// Collect the indices of the cells that actually exist on this row.
+		// The LAST one of those is rendered un-padded so we don't paint
+		// trailing spaces over empty grid cells.
+		lastCol := -1
+		for c := 0; c < cols; c++ {
+			if c*rows+r < len(matches) {
+				lastCol = c
+			}
+		}
+		for c := 0; c <= lastCol; c++ {
+			idx := c*rows + r
+			m := matches[idx]
+			b.WriteString(m)
+			if c < lastCol {
+				for i := len(m); i < cell; i++ {
+					b.WriteByte(' ')
+				}
+			}
+		}
+		out[r] = b.String()
+	}
+	return out
+}

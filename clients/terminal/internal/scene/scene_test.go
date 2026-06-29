@@ -231,24 +231,134 @@ func TestHandleKeyTabSingleMatch(t *testing.T) {
 	}
 }
 
-// TestHandleKeyTabMultiMatch: typing "r" + Tab in command position has
-// two matches (rm, rmdir) -- Line should stay "r" but the matches should
-// be painted into the grid below the prompt.
-func TestHandleKeyTabMultiMatch(t *testing.T) {
+// TestHandleKeyTabMultiMatchLCPExtends: typing "b" + Tab in command
+// position has multiple matches (base32, base64, basename) whose longest
+// common prefix "base" is LONGER than the typed target -- bash silently
+// extends the line to "base" rather than printing the menu. We assert
+// Shell.Line grew to "base" and the grid does NOT show a separate
+// "basename" candidate row (no menu was drawn).
+func TestHandleKeyTabMultiMatchLCPExtends(t *testing.T) {
 	s := newSceneWithVFS(t, nil)
-	s.HandleKey("r")
+	s.HandleKey("b")
 	if !s.HandleKey("Tab") {
-		t.Fatal("Tab on 'r' should signal a change (printed menu)")
+		t.Fatal("Tab on 'b' should signal a change (LCP extension)")
 	}
-	if string(s.Shell.Line) != "r" {
-		t.Fatalf("Shell.Line = %q, want unchanged %q", string(s.Shell.Line), "r")
+	if string(s.Shell.Line) != "base" {
+		t.Fatalf("Shell.Line = %q, want LCP-extended %q", string(s.Shell.Line), "base")
+	}
+	// No menu should have been printed: the candidate row "basename" must
+	// not appear on the grid yet (only after a second Tab would the menu
+	// come up). We grep for "basename" specifically because "base" alone is
+	// now the edit-line prefix and will of course be on the screen.
+	grid := gridString(s)
+	if strings.Contains(grid, "basename") {
+		t.Fatal("grid unexpectedly contains 'basename' -- menu was drawn instead of LCP extension")
+	}
+}
+
+// TestHandleKeyTabMultiMatchMenu: after LCP-extending to "rm", a second
+// Tab cannot make further progress (LCP == Target) so it falls through
+// to the column-packed menu. Both "rm" and "rmdir" should appear on the
+// grid; Shell.Line must stay "rm".
+func TestHandleKeyTabMultiMatchMenu(t *testing.T) {
+	s := newSceneWithVFS(t, nil)
+	for _, k := range []string{"r", "m"} {
+		s.HandleKey(k)
+	}
+	if !s.HandleKey("Tab") {
+		t.Fatal("Tab on 'rm' should signal a change (menu draw)")
+	}
+	if string(s.Shell.Line) != "rm" {
+		t.Fatalf("Shell.Line = %q, want unchanged %q", string(s.Shell.Line), "rm")
 	}
 	grid := gridString(s)
 	if !strings.Contains(grid, "rm") {
-		t.Fatal("grid missing 'rm' candidate after multi-match Tab")
+		t.Fatal("grid missing 'rm' candidate after menu Tab")
 	}
 	if !strings.Contains(grid, "rmdir") {
-		t.Fatal("grid missing 'rmdir' candidate after multi-match Tab")
+		t.Fatal("grid missing 'rmdir' candidate after menu Tab")
+	}
+}
+
+// TestHandleKeyTabMultiMatchColumnPack: when matches DON'T share a prefix
+// longer than target, the menu uses column-packed layout. Seed a /scratch
+// directory with three same-prefix-truncated files (foo.txt, foobar.txt,
+// baz.txt) so the target "/scratch/" yields matches with no shared LCP
+// past Target. Assert that the menu appears AND lays out on ONE row when
+// the grid is wide enough to hold all three side-by-side.
+func TestHandleKeyTabMultiMatchColumnPack(t *testing.T) {
+	s := newSceneWithVFS(t, func(v sharedvfs.VFS) {
+		if err := v.Mkdir("/scratch"); err != nil {
+			t.Fatal(err)
+		}
+		for _, p := range []string{"/scratch/foo.txt", "/scratch/foobar.txt", "/scratch/baz.txt"} {
+			if err := v.Write(p, []byte("x")); err != nil {
+				t.Fatal(err)
+			}
+		}
+	})
+	for _, k := range []string{"c", "a", "t", " ", "/", "s", "c", "r", "a", "t", "c", "h", "/"} {
+		s.HandleKey(k)
+	}
+	if !s.HandleKey("Tab") {
+		t.Fatal("Tab on 'cat /scratch/' should signal a change (menu draw)")
+	}
+	if string(s.Shell.Line) != "cat /scratch/" {
+		t.Fatalf("Shell.Line = %q, want unchanged %q", string(s.Shell.Line), "cat /scratch/")
+	}
+	grid := gridString(s)
+	for _, want := range []string{"foo.txt", "foobar.txt", "baz.txt"} {
+		if !strings.Contains(grid, want) {
+			t.Fatalf("grid missing %q candidate after column-packed Tab", want)
+		}
+	}
+}
+
+// TestHandleKeyTabLCPThenMenu: replicates the bash UX flow from the
+// playwright probe -- "cat /scratch/f" + Tab autocompletes (LCP) to
+// "cat /scratch/foo" (no menu), then a second Tab prints the foo.txt /
+// foobar.txt menu.
+func TestHandleKeyTabLCPThenMenu(t *testing.T) {
+	s := newSceneWithVFS(t, func(v sharedvfs.VFS) {
+		if err := v.Mkdir("/scratch"); err != nil {
+			t.Fatal(err)
+		}
+		for _, p := range []string{"/scratch/foo.txt", "/scratch/foobar.txt", "/scratch/baz.txt"} {
+			if err := v.Write(p, []byte("x")); err != nil {
+				t.Fatal(err)
+			}
+		}
+	})
+	for _, k := range []string{"c", "a", "t", " ", "/", "s", "c", "r", "a", "t", "c", "h", "/", "f"} {
+		s.HandleKey(k)
+	}
+	// First Tab: LCP "/scratch/foo" > target "/scratch/f" -> extend to
+	// "cat /scratch/foo", no menu.
+	if !s.HandleKey("Tab") {
+		t.Fatal("first Tab should LCP-extend")
+	}
+	if string(s.Shell.Line) != "cat /scratch/foo" {
+		t.Fatalf("after first Tab, Shell.Line = %q, want %q",
+			string(s.Shell.Line), "cat /scratch/foo")
+	}
+	gridAfter1 := gridString(s)
+	if strings.Contains(gridAfter1, "foobar.txt") {
+		t.Fatal("first Tab unexpectedly drew the menu (saw 'foobar.txt')")
+	}
+	// Second Tab: matches are foo.txt + foobar.txt, LCP "/scratch/foo"
+	// equals Target -> column-packed menu.
+	if !s.HandleKey("Tab") {
+		t.Fatal("second Tab should draw menu")
+	}
+	if string(s.Shell.Line) != "cat /scratch/foo" {
+		t.Fatalf("after second Tab, Shell.Line = %q, want unchanged %q",
+			string(s.Shell.Line), "cat /scratch/foo")
+	}
+	gridAfter2 := gridString(s)
+	for _, want := range []string{"foo.txt", "foobar.txt"} {
+		if !strings.Contains(gridAfter2, want) {
+			t.Fatalf("grid missing %q candidate after second-Tab menu", want)
+		}
 	}
 }
 

@@ -180,19 +180,18 @@ func (s *State) ExecuteForTest(line string) []string {
 // (left/right arrows do nothing); we still pass it explicitly so a future
 // arrow-key wiring can pipe a real cursor through unchanged.
 //
-// Outcomes (mirroring bash):
+// Outcomes (mirroring bash with show-all-if-ambiguous):
 //
 //   - 0 matches: ring a soft "no change" (return false) -- the user sees
 //     the line untouched.
 //   - 1 match:   splice the match in place of the partial word, advancing
 //     the grid cursor for each new byte.
-//   - >1 match:  print the candidates on a fresh row, then re-paint the
+//   - >1 matches AND longest common prefix extends beyond Target:
+//     autocomplete to that prefix WITHOUT listing -- exactly what
+//     `fo` -> `foo` looks like when matches are foo.txt + foobar.txt.
+//   - >1 matches AND no further common prefix: print the candidates in
+//     column-packed rows (Bash readline default), then re-paint the
 //     prompt + the unchanged edit line so the user can keep typing.
-//
-// Multi-match policy: print one match per row. A future iteration may
-// column-pack to fit; v0 is row-per-match because rendering columns in the
-// monospace grid requires knowing the grid width AND padding each cell,
-// and the simpler shape is always readable.
 func (s *State) handleTab() bool {
 	line := string(s.Shell.Line)
 	cursor := len(line)
@@ -201,29 +200,22 @@ func (s *State) handleTab() bool {
 	case 0:
 		return false
 	case 1:
-		// Replace the partial word with the match. Because the cursor was
-		// at end-of-line, the new bytes are appended; we extend Shell.Line
-		// and Print each new byte to advance the grid cursor identically.
-		add := r.Matches[0][len(r.Target):]
-		if add == "" {
-			return false
-		}
-		for i := 0; i < len(add); i++ {
-			b := add[i]
-			s.Shell.Line = append(s.Shell.Line, b)
-			s.Grid.Print(b)
-		}
-		return true
+		return s.extendLine(r.Matches[0][len(r.Target):])
 	default:
-		// Multi-match: drop to a new row, print the matches one-per-row,
-		// then re-paint the prompt + the in-progress line so the user's
-		// editing state is intact. We deliberately do NOT auto-extend by
-		// the longest common prefix in v0 -- bash does, but it complicates
-		// the "matches all share the target" edge-case, and the user can
-		// always type one more character + Tab again.
+		// Try to advance by the longest common prefix first. If the LCP is
+		// strictly longer than the target the user has typed, just extend
+		// the line up to that prefix -- bash does this silently before ever
+		// printing the menu, and it dramatically reduces redraw noise when
+		// the user is one keystroke away from disambiguating.
+		lcp := complete.LongestCommonPrefix(r.Matches)
+		if len(lcp) > len(r.Target) {
+			return s.extendLine(lcp[len(r.Target):])
+		}
+		// LCP didn't make progress -- show the menu in column-packed form
+		// then redraw the prompt + the unchanged edit line.
 		s.Grid.CRLF()
-		for _, m := range r.Matches {
-			s.Grid.PrintString(m)
+		for _, row := range complete.FormatColumns(s.Grid.Cols, r.Matches) {
+			s.Grid.PrintString(row)
 			s.Grid.CRLF()
 		}
 		s.writePrompt()
@@ -235,4 +227,21 @@ func (s *State) handleTab() bool {
 		}
 		return true
 	}
+}
+
+// extendLine appends add to Shell.Line and paints each new byte into the
+// grid (advancing the cursor identically to a user typing the bytes). It is
+// the shared core of both single-match autocompletion and the multi-match
+// "advance by longest common prefix" path. Returns false when add is empty
+// (no change to signal -- the caller still owes the user a no-op).
+func (s *State) extendLine(add string) bool {
+	if add == "" {
+		return false
+	}
+	for i := 0; i < len(add); i++ {
+		b := add[i]
+		s.Shell.Line = append(s.Shell.Line, b)
+		s.Grid.Print(b)
+	}
+	return true
 }
