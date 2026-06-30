@@ -1,0 +1,18 @@
+/* Adwaita Dark — a condensed @define-color palette extracted from
+ * libadwaita's _defaults-dark.scss. See adwaita-light.css for the
+ * trademark + licensing note. */
+
+@define-color window_bg_color   #242424;
+@define-color window_fg_color   #ffffff;
+@define-color view_bg_color     #1e1e1e;
+@define-color view_fg_color     #ffffff;
+@define-color headerbar_bg_color #303030;
+@define-color headerbar_fg_color #ffffff;
+@define-color card_bg_color     rgba(255, 255, 255, 0.08);
+@define-color accent_bg_color   #3584e4;
+@define-color accent_fg_color   #ffffff;
+@define-color destructive_bg_color #c01c28;
+@define-color success_color     #26a269;
+@define-color warning_color     #cd9309;
+@define-color error_color       #c01c28;
+@define-color borders           rgba(255, 255, 255, 0.15);

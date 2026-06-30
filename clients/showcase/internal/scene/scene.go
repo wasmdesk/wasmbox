@@ -50,16 +50,23 @@ type State struct {
 func New(w, h int) *State {
 	s := &State{W: w, H: h, theme: toolkit.DefaultLight()}
 
-	// MenuBar.
+	// MenuBar — the View menu is built from the embedded GTK themes so
+	// the user can flip palettes live (validates the toolkit's
+	// LoadGTKTheme end-to-end).
+	themeItems := make([]toolkit.MenuItem, 0, 8)
+	for _, t := range Themes() {
+		picked := t // capture loop var
+		themeItems = append(themeItems, toolkit.MenuItem{
+			Label:  picked.Name,
+			Action: func() { s.theme = picked.Theme },
+		})
+	}
 	s.menuBar = toolkit.NewMenuBar()
 	s.menuBar.Names = []string{"File", "Edit", "View", "Help"}
 	s.menuBar.Menus = []*toolkit.Menu{
 		buildMenu([]toolkit.MenuItem{{Label: "New"}, {Label: "Open"}, {Separator: true}, {Label: "Quit"}}),
 		buildMenu([]toolkit.MenuItem{{Label: "Cut"}, {Label: "Copy"}, {Label: "Paste"}}),
-		buildMenu([]toolkit.MenuItem{
-			{Label: "Light Theme", Action: func() { s.theme = toolkit.DefaultLight() }},
-			{Label: "Dark Theme", Action: func() { s.theme = toolkit.DefaultDark() }},
-		}),
+		buildMenu(themeItems),
 		buildMenu([]toolkit.MenuItem{{Label: "About"}}),
 	}
 	s.menuBar.SetBounds(toolkit.Rect{X: 0, Y: 0, W: w, H: toolkit.MenuBarH})

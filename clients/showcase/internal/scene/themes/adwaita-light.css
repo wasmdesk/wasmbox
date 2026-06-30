@@ -1,0 +1,21 @@
+/* Adwaita Light — a condensed @define-color palette extracted from
+ * libadwaita's _defaults-light.scss. The toolkit's LoadGTKTheme only
+ * reads @define-color declarations, so a 30-line subset suffices to
+ * theme every widget. Trademarks (the name "Adwaita") belong to the
+ * GNOME project; this file is a palette-only derivation under the
+ * libadwaita LGPL-2.1+ source. */
+
+@define-color window_bg_color   #fafafa;
+@define-color window_fg_color   rgba(0, 0, 6, 0.8);
+@define-color view_bg_color     #ffffff;
+@define-color view_fg_color     rgb(0, 0, 6);
+@define-color headerbar_bg_color #ebebeb;
+@define-color headerbar_fg_color rgba(0, 0, 6, 0.8);
+@define-color card_bg_color     rgba(0, 0, 6, 0.04);
+@define-color accent_bg_color   #3584e4;
+@define-color accent_fg_color   #ffffff;
+@define-color destructive_bg_color #e01b24;
+@define-color success_color     #2ec27e;
+@define-color warning_color     #e5a50a;
+@define-color error_color       #e01b24;
+@define-color borders           rgba(0, 0, 6, 0.15);

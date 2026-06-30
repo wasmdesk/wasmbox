@@ -4,6 +4,7 @@ package scene
 
 import (
 	"testing"
+	"testing/fstest"
 
 	"github.com/wasmdesk/toolkit"
 )
@@ -125,21 +126,104 @@ func TestInsideRect(t *testing.T) {
 	}
 }
 
-func TestViewMenuThemeActions(t *testing.T) {
-	// Light/Dark theme actions on the View menu must fire when invoked.
+func TestViewMenuThemePicker(t *testing.T) {
+	// The View menu is built from Themes() — verify (a) every embedded
+	// theme produced a menu item, (b) clicking any item switches the
+	// scene theme to the matching palette, (c) at least Default Light
+	// + Default Dark are present (the bare-toolkit fallback).
 	s := New(surfaceW, surfaceH)
 	viewMenu := s.menuBar.Menus[2]
-	// View menu items: [Light Theme, Dark Theme].
-	viewMenu.Items[1].Action() // dark
-	if s.theme == toolkit.DefaultLight() {
-		// pointer equality won't hold; check via Background instead.
+	themes := Themes()
+	if len(viewMenu.Items) != len(themes) {
+		t.Fatalf("view menu has %d items, want %d (one per theme)", len(viewMenu.Items), len(themes))
 	}
-	if s.theme.Background == toolkit.DefaultLight().Background {
-		t.Fatal("Dark theme action must change theme")
+	// Sanity: first two are the toolkit defaults.
+	if viewMenu.Items[0].Label != "Default Light" {
+		t.Fatalf("first theme should be Default Light, got %q", viewMenu.Items[0].Label)
 	}
-	viewMenu.Items[0].Action() // light
-	if s.theme.Background != toolkit.DefaultLight().Background {
-		t.Fatal("Light theme action must restore light")
+	if viewMenu.Items[1].Label != "Default Dark" {
+		t.Fatalf("second theme should be Default Dark, got %q", viewMenu.Items[1].Label)
+	}
+	// Click each entry + check scene.theme.Background matches the
+	// parsed theme's background (palette swap is observable).
+	for i, entry := range themes {
+		viewMenu.Items[i].Action()
+		if s.theme.Background != entry.Theme.Background {
+			t.Fatalf("after clicking %q the scene theme background did not match: got %+v want %+v",
+				entry.Name, s.theme.Background, entry.Theme.Background)
+		}
+	}
+}
+
+func TestThemesIncludesEmbeddedGTKThemes(t *testing.T) {
+	// The 4 .css fixtures under themes/ MUST be picked up by Themes()
+	// in addition to the 2 toolkit defaults — otherwise a build that
+	// silently lost the embed directive would still pass the menu
+	// shape check above.
+	themes := Themes()
+	want := map[string]bool{
+		"Default Light":   false,
+		"Default Dark":    false,
+		"Adwaita Light":   false,
+		"Adwaita Dark":    false,
+		"Solarized Light": false,
+		"Solarized Dark":  false,
+	}
+	for _, th := range themes {
+		want[th.Name] = true
+	}
+	for n, ok := range want {
+		if !ok {
+			t.Errorf("Themes() did not expose %q", n)
+		}
+	}
+}
+
+func TestThemesFromFSMissingDir(t *testing.T) {
+	// ReadDir on a non-existent dir falls back to the 2 toolkit defaults.
+	got := themesFromFS(fstest.MapFS{}, "no-such-dir")
+	if len(got) != 2 {
+		t.Fatalf("missing dir should still yield 2 defaults, got %d", len(got))
+	}
+}
+
+func TestThemesFromFSSkipsNonCSSAndSubdirs(t *testing.T) {
+	// A themes/ dir with a subdirectory, a README, an unparseable CSS,
+	// an unreadable file (won't actually surface here — embed.FS path
+	// is exercised by the real Themes() call) and one valid CSS.
+	fsys := fstest.MapFS{
+		"themes/README.md":      {Data: []byte("not a theme")},
+		"themes/sub/inside.css": {Data: []byte("@define-color window_bg_color #112233;")},
+		"themes/empty.css":      {Data: []byte("")},                                       // LoadGTKTheme errors on empty → skipped
+		"themes/good.css":       {Data: []byte("@define-color window_bg_color #445566;")}, // parses
+	}
+	got := themesFromFS(fsys, "themes")
+	// Defaults + "Good" = 3 entries. README.md skipped (not .css),
+	// sub/ skipped (IsDir), empty.css skipped (LoadGTKTheme error).
+	if len(got) != 3 {
+		t.Fatalf("want 3 entries (2 defaults + Good), got %d: %v", len(got), got)
+	}
+	if got[2].Name != "Good" {
+		t.Fatalf("want third entry Good, got %q", got[2].Name)
+	}
+	if got[2].Theme.Background.R != 0x44 {
+		t.Fatalf("Good theme background not parsed: %+v", got[2].Theme.Background)
+	}
+}
+
+func TestPrettify(t *testing.T) {
+	cases := []struct{ in, want string }{
+		{"adwaita-light.css", "Adwaita Light"},
+		{"x.css", "X"},
+		{"foo-bar-baz.css", "Foo Bar Baz"},
+		{".css", ""},
+		{"-leading.css", " Leading"},   // empty first part survives
+		{"trailing-.css", "Trailing "}, // empty last part survives
+	}
+	for _, c := range cases {
+		if got := prettify(c.in); got != c.want {
+			t.Errorf("prettify(%q) = %q, want %q", c.in, got, c.want)
+		}
 	}
 }
 

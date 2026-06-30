@@ -1,0 +1,16 @@
+/* Solarized Light — a popular alternative palette (Ethan Schoonover,
+ * MIT). Maps Solarized's base palette onto the GTK4 @define-color
+ * names. The accent is the canonical Solarized blue (#268bd2). */
+
+@define-color window_bg_color   #fdf6e3;
+@define-color window_fg_color   #586e75;
+@define-color view_bg_color     #eee8d5;
+@define-color view_fg_color     #073642;
+@define-color card_bg_color     #fdf6e3;
+@define-color accent_bg_color   #268bd2;
+@define-color accent_fg_color   #ffffff;
+@define-color borders           #93a1a1;
+@define-color headerbar_bg_color #eee8d5;
+@define-color success_color     #859900;
+@define-color warning_color     #b58900;
+@define-color error_color       #dc322f;
