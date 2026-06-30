@@ -398,10 +398,19 @@ class WindowManager
     # Dom-window descriptor: opens a real VS Code / vscodium running on a
     # local code-server inside a wasmbox window via an iframe overlay.
     # The compositor paints the chrome (titlebar/close/resize) on the
-    # canvas; the body is the iframe at body-rect. Operator must have
-    # code-server listening on the URL below (default brew install:
-    # `code-server --auth none --bind-addr 127.0.0.1:8443`).
-    "vscode"    => { dom: "http://127.0.0.1:8443/", w: 1100, h: 700, title: "VS Code" },
+    # canvas; the body is the iframe at body-rect.
+    #
+    # The URL is SAME-ORIGIN (relative path "/code-server/"): wasmbox sets
+    # Cross-Origin-Embedder-Policy: require-corp for SAB, and a direct
+    # cross-origin iframe to 127.0.0.1:8443 would be blocked because
+    # code-server sends no CORP header. The cmd/serve reverse-proxy mounts
+    # the upstream under /code-server/ when -code-server-url (or
+    # $WASMBOX_CODE_SERVER_URL) is set, making the iframe same-origin.
+    # Operator must have code-server listening AND start the wasmbox
+    # serve with the proxy config:
+    #   code-server --auth none --bind-addr 127.0.0.1:8443
+    #   WASMBOX_CODE_SERVER_URL=http://127.0.0.1:8443 wasmdesk-up
+    "vscode"    => { dom: "/code-server/", w: 1100, h: 700, title: "VS Code" },
   }.freeze
 
   LAYOUT_SEP = "\t"
