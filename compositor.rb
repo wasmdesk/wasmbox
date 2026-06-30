@@ -395,6 +395,13 @@ class WindowManager
     # hello client but pulls it from the registry instead of from disk; it
     # is what the Playwright OCI probe drives via wasmboxSpawnFromOCI.
     "hello-oci" => { oci: "hello:latest" },
+    # Dom-window descriptor: opens a real VS Code / vscodium running on a
+    # local code-server inside a wasmbox window via an iframe overlay.
+    # The compositor paints the chrome (titlebar/close/resize) on the
+    # canvas; the body is the iframe at body-rect. Operator must have
+    # code-server listening on the URL below (default brew install:
+    # `code-server --auth none --bind-addr 127.0.0.1:8443`).
+    "vscode"    => { dom: "http://127.0.0.1:8443/", w: 1100, h: 700, title: "VS Code" },
   }.freeze
 
   LAYOUT_SEP = "\t"
@@ -706,6 +713,24 @@ class WindowManager
     return nil unless desc.is_a?(Hash)
     ref = desc[:oci]
     ref.nil? ? nil : ref.to_s
+  end
+
+  # Map a launchable app id to its dom-window descriptor (url + initial
+  # geometry + title), or nil when the id is unknown OR when the descriptor
+  # is one of the other shapes. Returns a Hash with :url / :w / :h / :title
+  # all guaranteed non-nil; the :launch dispatcher hands it to
+  # spawn_dom_window which validates further.
+  def launchable_dom(app)
+    desc = LAUNCHABLE[app.to_s]
+    return nil unless desc.is_a?(Hash)
+    url = desc[:dom]
+    return nil if url.nil?
+    {
+      url:   url.to_s,
+      w:     (desc[:w] || 1100).to_i,
+      h:     (desc[:h] || 700).to_i,
+      title: (desc[:title] || app.to_s),
+    }
   end
 
   # Generic "is this id launchable" probe — true if either shape is present.
@@ -1567,14 +1592,18 @@ class Compositor
       # Validated launch: route by descriptor shape.
       #   String      → wasmboxSpawnWorker(url) via spawn_external
       #   {oci: ref}  → wasmboxSpawnFromOCI(ref) via spawn_external_oci
+      #   {dom: url}  → spawn_dom_window (iframe overlay)
       # The registry guarantees the descriptor is trusted; handle_client_message
       # already dropped unknown ids.
-      url = @wm.launchable_url(msg[:app])
-      if !url.nil?
-        spawn_external(url)
-      else
-        ref = @wm.launchable_oci(msg[:app])
-        spawn_external_oci(ref) unless ref.nil?
+      static_url = @wm.launchable_url(msg[:app])
+      oci_ref    = @wm.launchable_oci(msg[:app])
+      dom_desc   = @wm.launchable_dom(msg[:app])
+      if !static_url.nil?
+        spawn_external(static_url)
+      elsif !oci_ref.nil?
+        spawn_external_oci(oci_ref)
+      elsif !dom_desc.nil?
+        spawn_dom_window(dom_desc[:url], dom_desc[:w], dom_desc[:h], dom_desc[:title])
       end
     when :closed
       # handle_client_message already removed the window; tell the worker.
