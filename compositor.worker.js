@@ -636,8 +636,62 @@ self.addEventListener("message", async (ev) => {
       // listener attached up front, JS spawn finishes asynchronously).
       globalThis.wasmboxSpawnExternalOCI(String(m.ref));
       return;
+
+    case B.M2C_SPAWN_DOM_WINDOW:
+      // Dom-window spawn relay. The compositor creates a DOMWindow class
+      // instance (chrome on canvas, body = iframe overlaid on top); when
+      // the compositor positions / resizes / closes the window it posts
+      // C2M_IFRAME_* back to the main thread, which maintains the actual
+      // <iframe> DOM element.
+      globalThis.wasmboxSpawnDOMWindowInternal(String(m.url),
+        parseInt(m.w, 10) || 800,
+        parseInt(m.h, 10) || 600,
+        m.title ? String(m.title) : "dom window");
+      return;
   }
 });
+
+// --- dom-window helpers used by Ruby --------------------------------------
+// The compositor's WindowManager calls these via JS.global.call(...) to
+// (1) request the spawn of a new DOMWindow + (2) tell the main thread to
+// reposition / detach the iframe overlay. The main thread side lives in
+// index.html.
+//
+// `wasmboxSpawnDOMWindowInternal` is invoked from the M2C_SPAWN_DOM_WINDOW
+// relay above; it dispatches a `wasmbox-spawn-dom-window` CustomEvent on
+// the bus the compositor listens on (same pattern as wasmboxSpawnExternal).
+
+globalThis.wasmboxSpawnDOMWindowInternal = function (url, w, h, title) {
+  function dispatch() {
+    const bus = fakeDocument.getElementById("__wasmbox_bus");
+    if (!bus) { setTimeout(dispatch, 16); return; }
+    bus.dispatchEvent(new CustomEvent("wasmbox-spawn-dom-window", {
+      detail: { url: url, w: w, h: h, title: title },
+    }));
+  }
+  dispatch();
+};
+
+// Compositor calls these to drive the iframe overlay on the main thread.
+// Each is a one-shot postMessage; the main thread index.html owns the
+// actual DOM manipulation.
+globalThis.wasmboxIframeAttach = function (windowID, url, x, y, w, h) {
+  self.postMessage({
+    type: B.C2M_IFRAME_ATTACH,
+    window_id: windowID, url: url,
+    x: x | 0, y: y | 0, w: w | 0, h: h | 0,
+  });
+};
+globalThis.wasmboxIframeMove = function (windowID, x, y, w, h) {
+  self.postMessage({
+    type: B.C2M_IFRAME_MOVE,
+    window_id: windowID,
+    x: x | 0, y: y | 0, w: w | 0, h: h | 0,
+  });
+};
+globalThis.wasmboxIframeDetach = function (windowID) {
+  self.postMessage({ type: B.C2M_IFRAME_DETACH, window_id: windowID });
+};
 
 // Route a dom_event message to the right shim target. Synthesises an event
 // object whose fields cover everything compositor.rb reads through e.get(...):

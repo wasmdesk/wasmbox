@@ -287,6 +287,43 @@ class ExternalWindow < Window
 end
 
 # ---------------------------------------------------------------------------
+# DOMWindow — a window whose chrome is painted by the compositor (titlebar,
+# borders, resize grip, close button) but whose BODY is a real HTML <iframe>
+# overlaid on top of the canvas at the body-rect. Used to embed browser-only
+# apps (code-server / vscodium, jupyter, ...) inside a wasmbox window while
+# keeping the desktop's WM semantics: the user can drag/resize/raise/close
+# the iframe-bearing window like any other.
+#
+# Lifecycle:
+#   - spawn_dom: WindowManager appends a DOMWindow + calls
+#     JS.global.call("wasmboxIframeAttach", id, url, body_x, body_y, body_w, body_h)
+#   - Compositor.draw_window: skips fill_rect for dom_window? bodies (the
+#     iframe paints itself) and instead calls "wasmboxIframeMove" with the
+#     current body rect so the overlay tracks the WM-managed position.
+#   - close_window: calls "wasmboxIframeDetach" to remove the overlay.
+#
+# The class is pure-Ruby + only references JS lazily at the integration
+# points, so unit tests can construct + mutate a DOMWindow without booting
+# a browser.
+# ---------------------------------------------------------------------------
+class DOMWindow < Window
+  attr_accessor :url
+
+  def initialize(id, title, x, y, w, h, url, role = "window")
+    super(id, title, x, y, w, h, "#000000", role)
+    @url = url
+  end
+
+  def dom? = true
+end
+
+# Default predicate so non-DOM windows (Window + ExternalWindow) answer
+# `dom?` without exploding on the dispatch site that just asks the question.
+class Window
+  def dom? = false
+end
+
+# ---------------------------------------------------------------------------
 # WindowManager — stacking order, focus policy and placement. Pure logic,
 # fully exercisable without a browser. Also routes external-client messages
 # (handle_client_message) — that's all pure dispatch, no JS.
@@ -749,6 +786,27 @@ class WindowManager
     @cascade += 1
     fill = PALETTE[(@next_id - 1) % PALETTE.length]
     win = Window.new(@next_id, title, x, y, w, h, fill)
+    win.workspace = @active_workspace
+    @stack.push(win)
+    focus(win)
+    apply_saved(win)
+    win
+  end
+
+  # spawn_dom is the dom-window twin of #spawn: same cascade placement +
+  # focus + saved-layout restore, but produces a DOMWindow whose body
+  # is a real <iframe> the main thread overlays on the canvas. Used by
+  # Compositor#spawn_dom_window (which then calls wasmboxIframeAttach
+  # to materialise the iframe element).
+  def spawn_dom(title, w, h, url)
+    @next_id += 1
+    step = 28
+    base_x = 60
+    base_y = 60
+    x = base_x + (@cascade % 6) * step
+    y = base_y + (@cascade % 6) * step
+    @cascade += 1
+    win = DOMWindow.new(@next_id, title, x, y, w, h, url)
     win.workspace = @active_workspace
     @stack.push(win)
     focus(win)
@@ -1404,8 +1462,32 @@ class Compositor
       ref = e.get("detail")
       spawn_external_oci(ref.to_s)
     end
+    @bus.on("wasmbox-spawn-dom-window") do |e|
+      detail = e.get("detail")
+      url = detail.get("url").to_s
+      w = detail.get("w").to_i
+      h = detail.get("h").to_i
+      title = detail.get("title").to_s
+      spawn_dom_window(url, w, h, title)
+    end
     @worker_seq = 0
     @workers_by_id = {}
+  end
+
+  # spawn_dom_window creates a DOMWindow (chrome on the canvas, iframe body
+  # overlaid by the main thread) at the next default placement. Calls
+  # wasmboxIframeAttach on the JS side so the main thread materialises the
+  # actual <iframe> element at the window's body-rect coordinates. The WM
+  # keeps the window in its stack like any other; subsequent drags/resizes
+  # republish the new body-rect via wasmboxIframeMove inside draw_window.
+  def spawn_dom_window(url, w, h, title)
+    w = 800 if w <= 0
+    h = 600 if h <= 0
+    title = "dom window" if title.nil? || title.empty?
+    win = @wm.spawn_dom(title, w, h, url)
+    body = win.body_rect
+    JS.global.call("wasmboxIframeAttach", win.id, url, body[0], body[1], body[2], body[3])
+    win
   end
 
   # Create a Web Worker for `worker_url`, wire its `message` listener to a
@@ -1701,8 +1783,14 @@ class Compositor
   end
 
   # Tell a client its window is going away. Safe to call with an in-process
-  # window — only external windows carry a worker ref.
+  # window — only external windows carry a worker ref. For dom-windows the
+  # body iframe lives in the main-thread DOM (not a worker), so we instead
+  # post C2M_IFRAME_DETACH so the overlay manager removes the element.
   def notify_closed(win, reason)
+    if win.dom?
+      JS.global.call("wasmboxIframeDetach", win.id)
+      return nil
+    end
     return nil unless win.external?
     return nil unless win.worker
     msg = JS.global.call("wasmboxMakeObject",
@@ -2315,8 +2403,14 @@ class Compositor
     return if win.shaded?
 
     # Client body. In-process windows paint a solid fill; external windows
-    # blit their SharedArrayBuffer through a cached ImageData view.
-    if win.external?
+    # blit their SharedArrayBuffer through a cached ImageData view; dom
+    # windows do NOT paint a body -- the body is a real <iframe> the main
+    # thread overlays on the canvas at the body-rect coords, and we just
+    # republish those coords every frame so the iframe tracks the WM.
+    if win.dom?
+      bx, by, bw, bh = win.body_rect
+      JS.global.call("wasmboxIframeMove", win.id, bx, by, bw, bh)
+    elsif win.external?
       blit_external(win)
     else
       fill_rect(win.body_rect, win.fill)

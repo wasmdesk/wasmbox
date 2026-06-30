@@ -148,8 +148,71 @@ worker.addEventListener("message", (ev) => {
     case B.C2M_STORAGE_REMOVE:
       try { localStorage.removeItem(m.key); } catch (_) { /* private mode */ }
       return;
+    case B.C2M_IFRAME_ATTACH:
+      iframeAttach(m.window_id, m.url, m.x, m.y, m.w, m.h);
+      return;
+    case B.C2M_IFRAME_MOVE:
+      iframeMove(m.window_id, m.x, m.y, m.w, m.h);
+      return;
+    case B.C2M_IFRAME_DETACH:
+      iframeDetach(m.window_id);
+      return;
   }
 });
+
+// --- iframe overlay manager -----------------------------------------------
+// A wasmbox "dom-window" is a window whose chrome is painted by the Ruby
+// compositor into the canvas, but whose BODY is a real <iframe> overlaid on
+// top of the canvas at the body-rect. Used to embed browser-only apps
+// (code-server / vscodium, jupyter, ...) inside a wasmbox window while
+// keeping the desktop's WM semantics (drag, raise, close).
+//
+// The compositor (a Web Worker) can't touch the DOM directly; it posts
+// C2M_IFRAME_{ATTACH,MOVE,DETACH} messages and we materialise <iframe>
+// elements here on the main thread.
+const iframeOverlays = new Map(); // window_id -> HTMLIFrameElement
+function iframeOverlayContainer() {
+  let c = document.getElementById("__wasmbox_iframes");
+  if (!c) {
+    c = document.createElement("div");
+    c.id = "__wasmbox_iframes";
+    // Container is purely positional -- it spans the whole viewport, and
+    // each iframe is absolutely positioned within. Pointer-events:none so
+    // mouse activity in the EMPTY container area passes through to the
+    // canvas (the WM); the iframes themselves set pointer-events:auto.
+    c.style.cssText = "position:fixed;inset:0;pointer-events:none;z-index:50;";
+    document.body.appendChild(c);
+  }
+  return c;
+}
+function iframeAttach(windowID, url, x, y, w, h) {
+  const old = iframeOverlays.get(windowID);
+  if (old) old.remove();
+  const iframe = document.createElement("iframe");
+  iframe.src = url;
+  iframe.dataset.windowId = String(windowID);
+  iframe.style.cssText = "position:absolute;border:0;pointer-events:auto;background:#111;";
+  iframe.style.left = x + "px";
+  iframe.style.top = y + "px";
+  iframe.style.width = w + "px";
+  iframe.style.height = h + "px";
+  iframeOverlayContainer().appendChild(iframe);
+  iframeOverlays.set(windowID, iframe);
+}
+function iframeMove(windowID, x, y, w, h) {
+  const iframe = iframeOverlays.get(windowID);
+  if (!iframe) return;
+  iframe.style.left = x + "px";
+  iframe.style.top = y + "px";
+  iframe.style.width = w + "px";
+  iframe.style.height = h + "px";
+}
+function iframeDetach(windowID) {
+  const iframe = iframeOverlays.get(windowID);
+  if (!iframe) return;
+  iframe.remove();
+  iframeOverlays.delete(windowID);
+}
 
 // --- DOM event relay ------------------------------------------------------
 // Forward the events compositor.rb listens for. The compositor's shim
@@ -233,6 +296,22 @@ globalThis.wasmboxSpawnExternal = function (url) {
 // not own the OCI loader -- it only forwards the ref.
 globalThis.wasmboxSpawnFromOCI = function (ref) {
   worker.postMessage({ type: B.M2C_SPAWN_FROM_OCI, ref: String(ref) });
+};
+
+// Public hook for spawning a "dom-window" (compositor-managed chrome,
+// iframe body). Used to embed browser-only apps (code-server / vscodium,
+// jupyter) inside a wasmbox window. The compositor creates a DOMWindow,
+// then posts iframe_attach back to materialise the actual <iframe>
+// element in the page DOM via the overlay manager above.
+//   wasmboxSpawnDOMWindow("https://example.com/", 900, 600, "Example")
+globalThis.wasmboxSpawnDOMWindow = function (url, w, h, title) {
+  worker.postMessage({
+    type: B.M2C_SPAWN_DOM_WINDOW,
+    url: String(url),
+    w: parseInt(w, 10) || 800,
+    h: parseInt(h, 10) || 600,
+    title: title ? String(title) : "",
+  });
 };
 </script>
 </body>

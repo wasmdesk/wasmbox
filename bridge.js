@@ -55,6 +55,12 @@ const WASMBOX_BRIDGE = Object.freeze({
   M2C_DOM_EVENT:         "dom_event",
   M2C_SPAWN_EXTERNAL:    "spawn_external",
   M2C_SPAWN_FROM_OCI:    "spawn_from_oci",
+  // Spawn a "dom-window" (chrome painted by the compositor, body
+  // hosted as a real <iframe> over the canvas). Used for embedding
+  // browser-only apps (code-server, jupyter, etc.) -- see
+  // C2M_IFRAME_* for the compositor->main side of the protocol.
+  //   { type:"spawn_dom_window", url, w, h, title? }
+  M2C_SPAWN_DOM_WINDOW:  "spawn_dom_window",
 
   // compositor -> main
   C2M_READY:             "ready",
@@ -62,6 +68,17 @@ const WASMBOX_BRIDGE = Object.freeze({
   C2M_CONSOLE:           "console",
   C2M_STORAGE_SET:       "storage_set",
   C2M_STORAGE_REMOVE:    "storage_remove",
+  // dom-window iframe overlays (step E). The compositor owns the
+  // decoration + z-order; the body of a dom window is a real <iframe>
+  // sitting OVER the canvas at the window's body-rect. Used to embed
+  // browser-only apps (code-server / vscodium, jupyter, etc.) inside
+  // a wasmbox window while keeping the desktop's WM semantics.
+  //   { type:"iframe_attach", window_id, url, x, y, w, h }
+  //   { type:"iframe_move",   window_id, x, y, w, h }
+  //   { type:"iframe_detach", window_id }
+  C2M_IFRAME_ATTACH:     "iframe_attach",
+  C2M_IFRAME_MOVE:       "iframe_move",
+  C2M_IFRAME_DETACH:     "iframe_detach",
 
   // dom_event.target values
   TARGET_WINDOW: "window",
