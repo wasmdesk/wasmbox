@@ -40,6 +40,14 @@ func main() {
 	// proxy serves under the same origin so CORP doesn't apply + injects the
 	// COOP/COEP headers the page also gets.
 	codeServerURL := flag.String("code-server-url", "", "reverse-proxy this upstream under /code-server/ (e.g. http://127.0.0.1:8443); also reads $WASMBOX_CODE_SERVER_URL when the flag is empty so the wasmdesk-up orchestrator can opt-in without growing its command line")
+	// -default-frame=NAME redirects bare "/" + "/index.html" to
+	// "/?frame=NAME" so an instance dedicated to one decoration style
+	// (e.g. wasmdesk-up's port-8081 instance that used to spawn
+	// wasmaqua-serve) lands users on the right look without the URL
+	// query-param dance. NAME is forwarded verbatim — the Ruby
+	// compositor's FrameRegistry validates it; an unknown name falls
+	// back to OpenboxFrame at the Ruby boot.
+	defaultFrame := flag.String("default-frame", "", "redirect / to /?frame=NAME so the default landing page uses that Frame preset (e.g. -default-frame=aqua reproduces the legacy wasmaqua-serve experience)")
 	flag.Parse()
 	if *codeServerURL == "" {
 		*codeServerURL = os.Getenv("WASMBOX_CODE_SERVER_URL")
@@ -82,6 +90,18 @@ func main() {
 	}
 
 	handler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// -default-frame redirect: bare "/" or "/index.html" without an
+		// existing ?frame= query gets bounced to "/?frame=NAME" so the
+		// landing page renders with the operator's chosen Frame. Done
+		// BEFORE setting headers — the redirect is a fresh response.
+		if *defaultFrame != "" && (r.Method == http.MethodGet || r.Method == http.MethodHead) {
+			if (r.URL.Path == "/" || r.URL.Path == "/index.html") && r.URL.Query().Get("frame") == "" {
+				q := r.URL.Query()
+				q.Set("frame", *defaultFrame)
+				http.Redirect(w, r, "/?"+q.Encode(), http.StatusTemporaryRedirect)
+				return
+			}
+		}
 		h := w.Header()
 		// Required for crossOriginIsolated → SharedArrayBuffer to be usable.
 		// Withheld under -no-coi so coi-serviceworker.js must supply them, the
