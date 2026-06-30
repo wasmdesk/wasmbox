@@ -1,13 +1,15 @@
-// Command rbtest runs the pure-Ruby half of compositor.rb (Theme, Window,
-// ExternalWindow, WindowManager) on the native go-embedded-ruby interpreter
-// and asserts the step-B window-manager logic — message dispatch, external
-// window registration, damage merging, input translation — behaves correctly.
+// Command rbtest runs the pure-Ruby half of the compositor source (Theme,
+// Frame, Window, ExternalWindow, WindowManager, Menu) on the native
+// go-embedded-ruby interpreter and asserts the step-B window-manager logic —
+// message dispatch, external window registration, damage merging, input
+// translation — behaves correctly.
 //
-// The JS-touching Compositor class plus the boot block at the bottom of
-// compositor.rb are deliberately skipped: the test loads only the bytes BEFORE
-// `class Compositor`, then appends a Ruby assertion script. This way the same
-// file that ships inside wasmbox.wasm is the file under test — no shadow copy
-// to drift from.
+// The compositor source is split across compositor/*.rb so each file stays
+// under ~1k lines. rbtest loads the pure-WM files (01_theme through 05_menu
+// in alphabetic / dependency order) and SKIPS the JS-touching files
+// (06_core.rb is the Compositor class which talks to the canvas; 07_boot.rb
+// spawns clients). This way the same files that ship inside wasmbox.wasm are
+// the files under test — no shadow copy to drift from.
 //
 // Exit code is 0 on success, 1 on any failed assertion (Ruby `raise`s and the
 // Go wrapper surfaces the error). `task test` invokes it.
@@ -22,36 +24,32 @@ import (
 	"flag"
 	"fmt"
 	"os"
+	"path/filepath"
+	"sort"
 	"strings"
 
 	ruby "github.com/go-embedded-ruby/ruby"
 )
 
-// splitMarker is the first line of the Compositor class definition. Everything
-// before it is the pure WM half (safe off-wasm); everything from it onward
-// touches the JS bridge.
-const splitMarker = "class Compositor"
+// pureWMPrefix is the file-name prefix range that contains the pure-WM half
+// (off-wasm safe). Files whose name starts ABOVE this prefix touch the JS
+// bridge and are excluded. With the 0N_ numeric prefix naming convention,
+// "06_" and beyond is JS-touching; "00_".."05_" is pure-WM.
+const pureWMUpperExcl = "06_"
 
 func main() {
-	path := flag.String("rb", "compositor.rb", "path to compositor.rb (relative to cwd)")
-	raw := flag.Bool("raw", false, "run -rb file as-is without splitting on `class Compositor` or appending the WM test script (debug aid)")
+	dir := flag.String("dir", "compositor", "path to the compositor/ directory containing 0N_*.rb files")
+	raw := flag.Bool("raw", false, "load ALL compositor/*.rb (incl. JS-touching files) WITHOUT appending the WM test script (debug aid)")
 	flag.Parse()
-	src, err := os.ReadFile(*path)
+	pure, err := loadPureWM(*dir, *raw)
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "rbtest: read %s: %v\n", *path, err)
+		fmt.Fprintf(os.Stderr, "rbtest: load %s: %v\n", *dir, err)
 		os.Exit(2)
 	}
-	compositorRB := string(src)
 	var script string
 	if *raw {
-		script = compositorRB
+		script = pure
 	} else {
-		idx := strings.Index(compositorRB, splitMarker)
-		if idx < 0 {
-			fmt.Fprintln(os.Stderr, "rbtest: cannot locate `class Compositor` in compositor.rb")
-			os.Exit(2)
-		}
-		pure := compositorRB[:idx]
 		script = pure + "\n" + testScript
 	}
 	var out bytes.Buffer
@@ -63,6 +61,44 @@ func main() {
 	// Pass-through Ruby's stdout so test reports show.
 	os.Stdout.Write(out.Bytes())
 	fmt.Println("rbtest: PASS")
+}
+
+// loadPureWM walks dir, picks every .rb file whose name sorts BELOW
+// pureWMUpperExcl (so 01_theme through 05_menu, skipping 06_core +
+// 07_boot), and concatenates them in alphabetic order — the same order
+// main.go's embed.FS loader uses, so the test's view of the program is
+// identical to the wasm's view. When raw is true ALL .rb files are loaded
+// (debug aid for inspecting the full program).
+func loadPureWM(dir string, raw bool) (string, error) {
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return "", err
+	}
+	names := make([]string, 0, len(entries))
+	for _, e := range entries {
+		if e.IsDir() {
+			continue
+		}
+		n := e.Name()
+		if !strings.HasSuffix(n, ".rb") {
+			continue
+		}
+		if !raw && n >= pureWMUpperExcl {
+			continue
+		}
+		names = append(names, n)
+	}
+	sort.Strings(names)
+	var sb strings.Builder
+	for _, n := range names {
+		b, err := os.ReadFile(filepath.Join(dir, n))
+		if err != nil {
+			return "", err
+		}
+		sb.Write(b)
+		sb.WriteByte('\n')
+	}
+	return sb.String(), nil
 }
 
 // testScript exercises the pure WM logic. Each `assert` raises on failure so

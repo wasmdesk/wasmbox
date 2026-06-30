@@ -1,13 +1,13 @@
 # Taskfile for wasmbox — https://taskfile.dev
 #
 #   task            # list the available tasks
-#   task build      # build wasmbox.wasm (embeds compositor.rb) + hello client + wasm_exec.js
+#   task build      # build wasmbox.wasm (embeds compositor/*.rb) + hello client + wasm_exec.js
 #   task serve      # build, then serve http://localhost:8080/ with COOP/COEP
 #   task test       # run native Go + Ruby unit tests
 #   task clean      # remove the build artifacts
 #
 # wasmbox is a Go module that imports the pure-Go (CGO=0) go-embedded-ruby
-# interpreter and bakes compositor.rb into the wasm with //go:embed. Step B
+# interpreter and bakes compositor/*.rb into the wasm with //go:embed. Step B
 # adds an external-client path: a Web Worker hosting a separate Go/wasm client
 # (clients/hello) talking to the compositor through postMessage +
 # SharedArrayBuffer. SAB needs COOP/COEP, which python3 -m http.server does
@@ -168,11 +168,15 @@ tasks:
       - task -d "{{.ENGINE_DIR}}" oci-push
 
   build:compositor:
-    desc: Build wasmbox.wasm (embeds compositor.rb)
+    desc: Build wasmbox.wasm (embeds compositor/*.rb)
     env:
       GOWORK: "off"
       GOOS: js
       GOARCH: wasm
+    sources:
+      - main.go
+      - bridge.go
+      - compositor/*.rb
     cmds:
       - go build -o wasmbox.wasm .
       - cp "$(go env GOROOT)/lib/wasm/wasm_exec.js" ./wasm_exec.js 2>/dev/null || cp "$(go env GOROOT)/misc/wasm/wasm_exec.js" ./wasm_exec.js
