@@ -967,5 +967,27 @@ res = wmlh.handle_client_message({ type: "hello", title: "bad", w: 200, h: 150,
 badw = wmlh.last_registered
 assert_eq(badw.lock_aspect, 0.0, "hello.lock_aspect = 0 stays 0 (defensive)")
 
+# ---- Frame strategy + FrameRegistry ----------------------------------
+# Default frame is OpenboxFrame.
+assert(Frame.current.is_a?(OpenboxFrame), "default Frame.current is OpenboxFrame")
+# Registry roundtrip: every name in TABLE returns a Frame instance.
+FrameRegistry.names.each do |n|
+  f = FrameRegistry[n]
+  assert(!f.nil?, "FrameRegistry[#{n.inspect}] is not nil")
+  assert(f.is_a?(Frame), "FrameRegistry[#{n.inspect}] is a Frame")
+end
+# Unknown name falls back to OpenboxFrame.
+assert(FrameRegistry["nope"].is_a?(OpenboxFrame), "unknown name -> OpenboxFrame fallback")
+# Themed frames carry the palette they were built from.
+assert(FrameRegistry["openbox-juno"].is_a?(ThemedOpenboxFrame), "openbox-juno -> ThemedOpenboxFrame")
+assert(FrameRegistry["aqua-whitesur-light"].is_a?(ThemedAquaFrame), "aqua-whitesur-light -> ThemedAquaFrame")
+# Layout differences: Aqua has 3 buttons + max, Openbox has 2 + no max.
+ofc = OpenboxFrame.new
+afc = AquaFrame.new
+assert(!ofc.has_maximize?, "OpenboxFrame has no maximize button")
+assert(afc.has_maximize?,  "AquaFrame has the maximize button")
+# 16 frame combos exposed via the registry (2 plain + 14 themed).
+assert_eq(FrameRegistry.names.length, 16, "FrameRegistry exposes 16 frames")
+
 puts "rbtest: ran all pure-WM assertions"
 `
