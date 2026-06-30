@@ -226,19 +226,30 @@ globalThis.window = fakeWindow;
 globalThis.document = fakeDocument;
 globalThis.localStorage = fakeStorage;
 
-// requestAnimationFrame polyfill: dedicated workers in Chromium do not expose
-// rAF (Firefox does in some builds, but we cannot rely on it). The Ruby render
-// loop calls JS.raf which dispatches to globalThis.requestAnimationFrame, so a
-// setTimeout-backed implementation at ~60 Hz keeps the loop ticking.
-if (typeof globalThis.requestAnimationFrame !== "function") {
-  globalThis.requestAnimationFrame = function (cb) {
-    const t = performance.now();
-    return setTimeout(() => cb(t), 16);
-  };
-}
-if (typeof globalThis.cancelAnimationFrame !== "function") {
-  globalThis.cancelAnimationFrame = function (id) { clearTimeout(id); };
-}
+// requestAnimationFrame: UNCONDITIONALLY backed by setTimeout(16) in this
+// worker, regardless of whether the host browser also exposes a native
+// worker-side rAF. Why force the override even where native rAF exists:
+//
+//   - Chromium dedicated Workers do NOT expose rAF -> the polyfill is the
+//     only option there.
+//   - WebKit dedicated Workers behave like Chromium for our purposes -> same.
+//   - Firefox 105+ DOES expose rAF in Workers, but its cadence is yoked to
+//     the page's own animation-frame loop, which is in turn gated on the
+//     OffscreenCanvas's compositor-side display rhythm. Empirically that
+//     pipeline coalesces frames during a busy WASM run (e.g. a 180 MB OCI
+//     pak fetch). The visible failure was the Quake loading bar appearing
+//     to FREEZE for multi-second stretches in Firefox while updating
+//     smoothly in Chromium + WebKit. With the setTimeout(16) override, the
+//     Ruby compositor re-blits at a steady ~60 Hz on every browser, so the
+//     animation cadence is browser-independent.
+//
+// Regression test: scratchpad/probe-loadingbar-xbrowser.mjs fails on
+// Firefox when this override is removed; passes on all three when present.
+globalThis.requestAnimationFrame = function (cb) {
+  const t = performance.now();
+  return setTimeout(() => cb(t), 16);
+};
+globalThis.cancelAnimationFrame = function (id) { clearTimeout(id); };
 
 // --- helpers shared with the page (used to live in index.html) ------------
 // Spawn a child Web Worker by URL and hand it a dedicated MessageChannel.
