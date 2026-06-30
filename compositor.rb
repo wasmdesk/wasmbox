@@ -1348,6 +1348,7 @@ module RootMenu
     "hello"     => "Hello (wasm)",
     "quake"     => "Quake",
     "hello-oci" => "Hello (OCI)",
+    "vscode"    => "VS Code",
   }.freeze
 
   # IDs the root menu intentionally OMITS from the Applications submenu. The

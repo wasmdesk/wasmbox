@@ -90,6 +90,8 @@ const (
 	GlyphFiles
 	// GlyphHello draws a smile arc — the hello stub client's mark.
 	GlyphHello
+	// GlyphCode draws angle brackets "< >" — used by the vscode launcher.
+	GlyphCode
 )
 
 // Geometry constants, in surface pixels. The toolbar hugs the bottom of the
@@ -161,6 +163,7 @@ func DefaultApps() []App {
 		{Id: "editor", Glyph: GlyphEditor, Label: "Editor"},
 		{Id: "files", Glyph: GlyphFiles, Label: "Files"},
 		{Id: "hello", Glyph: GlyphHello, Label: "Hello"},
+		{Id: "vscode", Glyph: GlyphCode, Label: "VS Code"},
 	}
 }
 
@@ -644,6 +647,8 @@ func drawGlyph(s *State, buf []byte, g Glyph, x, y, w, h int) {
 		drawGlyphFiles(s, buf, x, y, w, h, ink)
 	case GlyphHello:
 		drawGlyphHello(s, buf, x, y, w, h, ink)
+	case GlyphCode:
+		drawGlyphCode(s, buf, x, y, w, h, ink)
 	default:
 		// Unknown glyph: paint a solid square so the slot is still visible.
 		for j := 0; j < h; j++ {
@@ -714,6 +719,35 @@ func drawGlyphHello(s *State, buf []byte, x, y, w, h int, ink [3]uint8) {
 	// Two eyes.
 	setPixel(s, buf, cx-r/2, cy-r/2, ink)
 	setPixel(s, buf, cx+r/2, cy-r/2, ink)
+}
+
+// drawGlyphCode paints "< >" angle-brackets centred in (x, y, w, h) -- the
+// near-universal "code" icon. Each bracket is a 3-segment chevron from a
+// vertical midpoint, mirrored across the box. Inset by 2 px so it sits
+// inside the button border.
+func drawGlyphCode(s *State, buf []byte, x, y, w, h int, ink [3]uint8) {
+	cy := y + h/2
+	armH := h/2 - 3
+	if armH < 2 {
+		armH = 2
+	}
+	armW := w/4 - 1
+	if armW < 2 {
+		armW = 2
+	}
+	// Left angle bracket "<": apex at (x+2, cy), opens to the right.
+	leftX := x + 2
+	for t := 0; t <= armH; t++ {
+		setPixel(s, buf, leftX+t, cy-t, ink)
+		setPixel(s, buf, leftX+t, cy+t, ink)
+	}
+	// Right angle bracket ">": apex at (x+w-3, cy), opens to the left.
+	rightX := x + w - 3
+	for t := 0; t <= armH; t++ {
+		setPixel(s, buf, rightX-t, cy-t, ink)
+		setPixel(s, buf, rightX-t, cy+t, ink)
+	}
+	_ = armW
 }
 
 func abs(i int) int {

@@ -19,10 +19,10 @@ func newBuf(s *State) []byte { return make([]byte, 4*s.W*s.H) }
 
 func TestNewHasDefaults(t *testing.T) {
 	s := New(tW, tH)
-	if got, want := len(s.Apps), 4; got != want {
+	if got, want := len(s.Apps), 5; got != want {
 		t.Fatalf("default apps = %d, want %d", got, want)
 	}
-	want := []string{"terminal", "editor", "files", "hello"}
+	want := []string{"terminal", "editor", "files", "hello", "vscode"}
 	for i, a := range s.Apps {
 		if a.Id != want[i] {
 			t.Fatalf("app[%d].Id = %q, want %q", i, a.Id, want[i])
@@ -112,7 +112,7 @@ func TestIconbarButtonRectClampsHeight(t *testing.T) {
 // A click at the center of button i must HitTest to i, and the resulting
 // Apps[i].Id must be the documented launch string ("terminal"/"editor"/etc).
 func TestClickAtButtonCenterDispatchesExpectedApp(t *testing.T) {
-	cases := []string{"terminal", "editor", "files", "hello"}
+	cases := []string{"terminal", "editor", "files", "hello", "vscode"}
 	s := New(tW, tH)
 	if got, want := len(s.Apps), len(cases); got != want {
 		t.Fatalf("apps = %d, want %d", got, want)
@@ -306,7 +306,7 @@ func TestSetters(t *testing.T) {
 // Each glyph + the default branch (unknown glyph) must paint at least one
 // pixel of ink inside its tile.
 func TestEachGlyphPaints(t *testing.T) {
-	glyphs := []Glyph{GlyphTerminal, GlyphEditor, GlyphFiles, GlyphHello, Glyph(99)}
+	glyphs := []Glyph{GlyphTerminal, GlyphEditor, GlyphFiles, GlyphHello, GlyphCode, Glyph(99)}
 	for _, g := range glyphs {
 		s := New(tW, tH)
 		buf := newBuf(s)
