@@ -11,6 +11,9 @@
 /clients/code/code.wasm
 /clients/showcase/showcase.wasm
 /bin/
+# Stray binaries from `go build` in the cmd/serve dir (Taskfile uses
+# bin/wasmbox-serve; this catches accidental top-level builds).
+/serve
 
 # OCI pack prep artifacts (materialised by `task ociapps:prep:<app>`).
 # clients/dock/sdk.js + clients/dock/wasm_exec.js are committed because the
