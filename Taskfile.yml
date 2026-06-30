@@ -45,7 +45,7 @@ tasks:
 
   build:
     desc: Build wasmbox.wasm + hello + dock + terminal + files + code clients + copy wasm_exec.js
-    deps: [build:compositor, build:hello, build:dock, build:terminal, build:files, build:code, build:serve]
+    deps: [build:compositor, build:hello, build:dock, build:terminal, build:files, build:code, build:showcase, build:serve]
 
   build:all:
     desc: Build everything incl. the external go-quake1 + wasmdock clients
@@ -203,6 +203,18 @@ tasks:
     generates:
       - clients/dock/dock.wasm
 
+  build:showcase:
+    desc: Build the toolkit-showcase external client (clients/showcase/showcase.wasm)
+    env:
+      GOWORK: "off"
+      GOOS: js
+      GOARCH: wasm
+      CGO_ENABLED: "0"
+    cmds:
+      - go build -o clients/showcase/showcase.wasm ./clients/showcase
+    generates:
+      - clients/showcase/showcase.wasm
+
   build:terminal:
     desc: Build the terminal placeholder external client (clients/terminal/terminal.wasm)
     env:
@@ -270,8 +282,8 @@ tasks:
   clean:
     desc: Remove the build artifacts
     cmds:
-      - rm -f wasmbox.wasm wasm_exec.js clients/hello/hello.wasm clients/dock/dock.wasm clients/terminal/terminal.wasm clients/files/files.wasm clients/code/code.wasm
-      - rm -f clients/hello/sdk.js clients/hello/wasm_exec.js
+      - rm -f wasmbox.wasm wasm_exec.js clients/hello/hello.wasm clients/dock/dock.wasm clients/terminal/terminal.wasm clients/files/files.wasm clients/code/code.wasm clients/showcase/showcase.wasm
+      - rm -f clients/hello/sdk.js clients/hello/wasm_exec.js clients/showcase/sdk.js clients/showcase/wasm_exec.js
       - rm -f clients/terminal/sdk.js clients/terminal/wasm_exec.js
       - rm -f clients/files/sdk.js clients/files/wasm_exec.js
       - rm -f clients/code/sdk.js clients/code/wasm_exec.js
@@ -337,6 +349,22 @@ tasks:
     deps: [build:dock]
     cmds:
       - 'echo "ociapps:prep:dock: nothing to do -- sdk.js + wasm_exec.js are committed in clients/dock/"'
+
+  ociapps:prep:showcase:
+    desc: Materialise the wasm_exec.js + sdk.js + .wasm clients/showcase needs for an OCI pack.
+    deps: [build:showcase]
+    cmds:
+      - cp clients/sdk/sdk.js clients/showcase/sdk.js
+      - |
+        root="$(go env GOROOT)"
+        if [ -f "$root/lib/wasm/wasm_exec.js" ]; then
+          cp "$root/lib/wasm/wasm_exec.js" clients/showcase/wasm_exec.js
+        else
+          cp "$root/misc/wasm/wasm_exec.js" clients/showcase/wasm_exec.js
+        fi
+    generates:
+      - clients/showcase/sdk.js
+      - clients/showcase/wasm_exec.js
 
   ociapps:prep:terminal:
     desc: Materialise the wasm_exec.js + sdk.js + .wasm clients/terminal needs for an OCI pack.

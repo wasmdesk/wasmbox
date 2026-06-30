@@ -385,6 +385,11 @@ class WindowManager
     # Bundled hello client (the wasm "Hello, wasmbox!" demo). Same descriptor
     # shape as terminal/files; the root menu exposes it as "Hello (wasm)".
     "hello"     => "clients/hello/worker.js",
+    # Toolkit showcase: a single wasmbox window holding the wasmdesk/toolkit
+    # widget set (MenuBar + Toolbar + Notebook with one tab per family +
+    # Statusbar). Acts as both a smoke test for the toolkit and a live API
+    # reference users can poke from inside the compositor.
+    "showcase"  => "clients/showcase/worker.js",
     # Bundled quake client (pure-Go Quake 1, from the sibling go-quake1 repo).
     # The wasm is huge (~190 MB) and may not be built locally, but the worker.js
     # is part of the wasmbox tree, so the descriptor is always safe — the worker
@@ -1357,6 +1362,7 @@ module RootMenu
     "hello-oci" => "Hello (OCI)",
     "vscode"    => "VS Code",
     "loom"      => "Loom",
+    "showcase"  => "Toolkit Showcase",
   }.freeze
 
   # IDs the root menu intentionally OMITS from the Applications submenu. The

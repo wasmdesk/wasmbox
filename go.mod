@@ -23,6 +23,7 @@ require (
 	github.com/go-ruby-marshal/marshal v0.0.0-20260622114304-27ed1baddd9f // indirect
 	github.com/go-ruby-parser/parser v0.0.0-20260623170906-753af1b3721a // indirect
 	github.com/go-ruby-regexp/regexp v0.0.0-20260622075631-3a277cf71b81 // indirect
+	github.com/wasmdesk/toolkit v0.0.0-20260630153034-3f5966623b5d // indirect
 )
 
 // wasmdesk/coreutils is not yet pushed (per development order: coreutils
