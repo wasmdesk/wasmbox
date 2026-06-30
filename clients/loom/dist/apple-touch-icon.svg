@@ -1,0 +1,29 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 180 180" width="180" height="180" role="img" aria-label="loom">
+  <title>loom — app icon (dark theme, white tile)</title>
+  <!-- weft apple-touch parity, white bg for dark UIs -->
+  <rect width="180" height="180" rx="36" ry="36" fill="#ffffff"/>
+  <g transform="translate(18,18) scale(0.5625)">
+    <g fill="none" stroke-linecap="round" stroke-width="26" stroke="#172445">
+      <line x1="98"  y1="40" x2="98"  y2="216"/>
+      <line x1="158" y1="40" x2="158" y2="216"/>
+      <line x1="40"  y1="98"  x2="216" y2="98"/>
+      <line x1="40"  y1="158" x2="216" y2="158"/>
+    </g>
+    <g fill="none" stroke-linecap="round" stroke-width="22">
+      <line x1="98"  y1="40" x2="98"  y2="216" stroke="#CE412B"/>
+      <line x1="158" y1="40" x2="158" y2="216" stroke="#00ADD8"/>
+      <line x1="40"  y1="98"  x2="216" y2="98"  stroke="#00599C"/>
+      <line x1="40"  y1="158" x2="216" y2="158" stroke="#3FA535"/>
+    </g>
+    <g fill="none" stroke-linecap="butt">
+      <line x1="98"  y1="76"  x2="98"  y2="120" stroke="#172445" stroke-width="26"/>
+      <line x1="98"  y1="76"  x2="98"  y2="120" stroke="#CE412B" stroke-width="22"/>
+      <line x1="158" y1="136" x2="158" y2="180" stroke="#172445" stroke-width="26"/>
+      <line x1="158" y1="136" x2="158" y2="180" stroke="#00ADD8" stroke-width="22"/>
+      <line x1="136" y1="98"  x2="180" y2="98"  stroke="#172445" stroke-width="26"/>
+      <line x1="136" y1="98"  x2="180" y2="98"  stroke="#00599C" stroke-width="22"/>
+      <line x1="76"  y1="158" x2="120" y2="158" stroke="#172445" stroke-width="26"/>
+      <line x1="76"  y1="158" x2="120" y2="158" stroke="#3FA535" stroke-width="22"/>
+    </g>
+  </g>
+</svg>

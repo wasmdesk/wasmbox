@@ -106,6 +106,20 @@ func main() {
 			codeProxy.ServeHTTP(w, r)
 			return
 		}
+		// /loom/* serves the pre-built weft-loom Svelte/CodeMirror SPA
+		// from clients/loom/dist. The SPA was built with Vite
+		// `--base=/loom/` so every asset reference is already
+		// prefix-correct. No proxy needed; collab/compile WS to the
+		// upstream weft-loom-server is opt-in via wasmdesk-up's
+		// orchestrator (and not yet plumbed).
+		if strings.HasPrefix(r.URL.Path, "/loom/") || r.URL.Path == "/loom" {
+			r.URL.Path = strings.TrimPrefix(r.URL.Path, "/loom")
+			if r.URL.Path == "" {
+				r.URL.Path = "/"
+			}
+			http.StripPrefix("", http.FileServer(http.Dir("clients/loom/dist"))).ServeHTTP(w, r)
+			return
+		}
 		fs.ServeHTTP(w, r)
 	})
 

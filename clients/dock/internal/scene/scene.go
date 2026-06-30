@@ -92,6 +92,8 @@ const (
 	GlyphHello
 	// GlyphCode draws angle brackets "< >" — used by the vscode launcher.
 	GlyphCode
+	// GlyphLoom draws a 4-strand weave mark — used by the loom launcher.
+	GlyphLoom
 )
 
 // Geometry constants, in surface pixels. The toolbar hugs the bottom of the
@@ -164,6 +166,7 @@ func DefaultApps() []App {
 		{Id: "files", Glyph: GlyphFiles, Label: "Files"},
 		{Id: "hello", Glyph: GlyphHello, Label: "Hello"},
 		{Id: "vscode", Glyph: GlyphCode, Label: "VS Code"},
+		{Id: "loom", Glyph: GlyphLoom, Label: "Loom"},
 	}
 }
 
@@ -649,6 +652,8 @@ func drawGlyph(s *State, buf []byte, g Glyph, x, y, w, h int) {
 		drawGlyphHello(s, buf, x, y, w, h, ink)
 	case GlyphCode:
 		drawGlyphCode(s, buf, x, y, w, h, ink)
+	case GlyphLoom:
+		drawGlyphLoom(s, buf, x, y, w, h, ink)
 	default:
 		// Unknown glyph: paint a solid square so the slot is still visible.
 		for j := 0; j < h; j++ {
@@ -748,6 +753,35 @@ func drawGlyphCode(s *State, buf []byte, x, y, w, h int, ink [3]uint8) {
 		setPixel(s, buf, rightX-t, cy+t, ink)
 	}
 	_ = armW
+}
+
+// drawGlyphLoom paints loom's 4-strand "weave" mark -- 4 horizontal warp
+// threads + 4 vertical weft threads crossed in the centre. Echoes the
+// openweft brand mark + reads as "fabric / weave" at icon size.
+func drawGlyphLoom(s *State, buf []byte, x, y, w, h int, ink [3]uint8) {
+	if w < 6 || h < 6 {
+		// Fallback for tiny boxes: a simple grid.
+		for j := 0; j < h; j += 2 {
+			for i := 0; i < w; i++ {
+				setPixel(s, buf, x+i, y+j, ink)
+			}
+		}
+		return
+	}
+	// 4 horizontal warps spaced evenly across the height.
+	for i := 0; i < 4; i++ {
+		ly := y + 2 + i*((h-4)/3)
+		for lx := x + 1; lx < x+w-1; lx++ {
+			setPixel(s, buf, lx, ly, ink)
+		}
+	}
+	// 4 vertical wefts spaced evenly across the width.
+	for i := 0; i < 4; i++ {
+		lx := x + 2 + i*((w-4)/3)
+		for ly := y + 1; ly < y+h-1; ly++ {
+			setPixel(s, buf, lx, ly, ink)
+		}
+	}
 }
 
 func abs(i int) int {

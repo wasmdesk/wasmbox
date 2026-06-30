@@ -411,6 +411,13 @@ class WindowManager
     #   code-server --auth none --bind-addr 127.0.0.1:8443
     #   WASMBOX_CODE_SERVER_URL=http://127.0.0.1:8443 wasmdesk-up
     "vscode"    => { dom: "/code-server/", w: 1100, h: 700, title: "VS Code" },
+    # Loom: openweft's collaborative editor (Svelte 5 + CodeMirror 6 +
+    # Yjs). Built once with `vite build --base=/loom/` from
+    # weft-loom-server/web, the dist is copied into clients/loom/dist
+    # and mounted same-origin under /loom/* by cmd/serve. Opens as a
+    # dom-window iframe. Compile/collab WS to the upstream
+    # weft-loom-server is opt-in and not yet wired.
+    "loom"      => { dom: "/loom/", w: 1200, h: 800, title: "Loom" },
   }.freeze
 
   LAYOUT_SEP = "\t"
@@ -1349,6 +1356,7 @@ module RootMenu
     "quake"     => "Quake",
     "hello-oci" => "Hello (OCI)",
     "vscode"    => "VS Code",
+    "loom"      => "Loom",
   }.freeze
 
   # IDs the root menu intentionally OMITS from the Applications submenu. The
