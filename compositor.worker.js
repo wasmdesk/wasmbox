@@ -424,6 +424,29 @@ globalThis.wasmboxBlitFromSAB = function (ctx, slot, dx, dy, sx, sy, sw, sh) {
     s1 = Atomics.load(slot.seq, 0);
     if (s1 & 1) return;
   }
+  // Per-slot OffscreenCanvas for the source-over composite (so the dock's
+  // transparent corners do not paint black). Identical to the main-thread
+  // version, just using OffscreenCanvas instead of an HTMLCanvasElement.
+  if (!slot.canvas) {
+    slot.canvas = new OffscreenCanvas(slot.w, slot.h);
+    slot.octx = slot.canvas.getContext("2d");
+  }
+  // SAB→ImageData copy is the expensive step (360+ TypedArray.subarray() views
+  // per frame for a 480×360 surface, plus a putImageData). The compositor's
+  // render loop calls us unconditionally every rAF tick because draw_desktop
+  // repaints the canvas background each frame; we must re-present, but we only
+  // need to RE-COPY when the client has actually committed new pixels.
+  // slot.lastSeq remembers the seq we last copied from; matching seq means the
+  // SAB bytes are unchanged → skip the copy + putImageData and just re-present
+  // the cached OffscreenCanvas. This bounds the per-idle-window cost to one
+  // drawImage instead of W×H bytes + W subarrays + putImageData per frame.
+  // Without this, Firefox's GC could not keep up with the JS-side allocation
+  // churn when a large external window (e.g. clients/showcase at 480×360) is
+  // open, and memory grew unboundedly in idle.
+  if (slot.seq && slot.lastSeq === s1) {
+    ctx.drawImage(slot.canvas, sx, sy, sw, sh, dx + sx, dy + sy, sw, sh);
+    return;
+  }
   const dst = slot.image.data;
   for (let row = 0; row < sh; row++) {
     const srcOff = (sy + row) * stride + sx * 4;
@@ -433,14 +456,8 @@ globalThis.wasmboxBlitFromSAB = function (ctx, slot, dx, dy, sx, sy, sw, sh) {
   // The copy landed in our private ImageData; only present it if the client did
   // not write during the copy (so a torn copy is discarded, never blitted).
   if (slot.seq && Atomics.load(slot.seq, 0) !== s1) return;
-  // Per-slot OffscreenCanvas for the source-over composite (so the dock's
-  // transparent corners do not paint black). Identical to the main-thread
-  // version, just using OffscreenCanvas instead of an HTMLCanvasElement.
-  if (!slot.canvas) {
-    slot.canvas = new OffscreenCanvas(slot.w, slot.h);
-    slot.octx = slot.canvas.getContext("2d");
-  }
   slot.octx.putImageData(slot.image, 0, 0, sx, sy, sw, sh);
+  slot.lastSeq = s1;
   ctx.drawImage(slot.canvas, sx, sy, sw, sh, dx + sx, dy + sy, sw, sh);
 };
 
@@ -460,6 +477,19 @@ globalThis.wasmboxBlitFromSABScaled = function (ctx, slot, sx, sy, sw, sh, dx, d
     s1 = Atomics.load(slot.seq, 0);
     if (s1 & 1) return;
   }
+  if (!slot.canvas) {
+    slot.canvas = new OffscreenCanvas(slot.w, slot.h);
+    slot.octx = slot.canvas.getContext("2d");
+  }
+  // Same seq-cache trick as wasmboxBlitFromSAB: when the client has not
+  // committed new pixels, skip the SAB→ImageData copy + putImageData and
+  // re-present the cached OffscreenCanvas. See the long comment in
+  // wasmboxBlitFromSAB for the motivation (Firefox GC pressure with idle
+  // windows).
+  if (slot.seq && slot.lastSeq === s1) {
+    ctx.drawImage(slot.canvas, 0, 0, slot.w, slot.h, dx, dy, dw, dh);
+    return;
+  }
   const dst = slot.image.data;
   for (let row = 0; row < sh; row++) {
     const srcOff = (sy + row) * stride + sx * 4;
@@ -467,16 +497,13 @@ globalThis.wasmboxBlitFromSABScaled = function (ctx, slot, sx, sy, sw, sh, dx, d
     dst.set(slot.src.subarray(srcOff, srcOff + sw * 4), dstOff);
   }
   if (slot.seq && Atomics.load(slot.seq, 0) !== s1) return;
-  if (!slot.canvas) {
-    slot.canvas = new OffscreenCanvas(slot.w, slot.h);
-    slot.octx = slot.canvas.getContext("2d");
-  }
   // Refresh the damaged region in our private OffscreenCanvas at native size,
   // then stretch the WHOLE native surface into the window's on-screen rect.
   // (Partial scale-mapping would be cheaper but accumulates fringe artifacts
   // on integer rounding -- redrawing the whole surface keeps the present
   // visually correct for any scale, at the cost of one extra drawImage.)
   slot.octx.putImageData(slot.image, 0, 0, sx, sy, sw, sh);
+  slot.lastSeq = s1;
   ctx.drawImage(slot.canvas, 0, 0, slot.w, slot.h, dx, dy, dw, dh);
 };
 

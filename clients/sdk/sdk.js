@@ -209,11 +209,30 @@
 
     // Tell the compositor "I have new pixels". `damage` defaults to the full
     // surface, which is what naive clients want.
+    //
+    // seq is ALWAYS advanced by commit(), even when no per-pixel paint op
+    // (putPixel/fillRect/...) ran this frame, because that is the signal the
+    // compositor's blit cache uses to detect "new content available". Clients
+    // that fill the SAB in bulk via js.CopyBytesToJS (the typical Go-wasm
+    // pattern -- see clients/hello + clients/showcase) bypass _beginPaint so
+    // without this, seq would stay at 0 forever and the cache would
+    // incorrectly de-duplicate genuinely new frames.
+    //   - If a paint op opened the window (seq odd): one bump closes it
+    //     (odd -> even). seq advances by 1.
+    //   - If no paint op ran (seq even): fake the pair (even -> odd -> even).
+    //     The brief odd window may race with a compositor rAF tick — that
+    //     tick skips the blit and the next tick (16 ms later) catches up;
+    //     no torn frame is presented, only one frame of visual latency in
+    //     the worst case.
     commit(damage) {
       if (this.windowId === null) return;
-      // Close the seqlock write window (odd -> even) so the compositor may read
-      // a complete frame. Only flips if a paint op opened it this frame.
-      if ((Atomics.load(this.seq, 0) & 1) === 1) Atomics.add(this.seq, 0, 1);
+      const s = Atomics.load(this.seq, 0);
+      if (s & 1) {
+        Atomics.add(this.seq, 0, 1);
+      } else {
+        Atomics.add(this.seq, 0, 1);
+        Atomics.add(this.seq, 0, 1);
+      }
       const d = damage || { x: 0, y: 0, w: this.w, h: this.h };
       send({
         type: "commit",
