@@ -156,7 +156,7 @@ func TestViewMenuThemePicker(t *testing.T) {
 }
 
 func TestThemesIncludesEmbeddedGTKThemes(t *testing.T) {
-	// The 4 .css fixtures under themes/ MUST be picked up by Themes()
+	// Every .css fixture under themes/ MUST be picked up by Themes()
 	// in addition to the 2 toolkit defaults — otherwise a build that
 	// silently lost the embed directive would still pass the menu
 	// shape check above.
@@ -168,6 +168,9 @@ func TestThemesIncludesEmbeddedGTKThemes(t *testing.T) {
 		"Adwaita Dark":    false,
 		"Solarized Light": false,
 		"Solarized Dark":  false,
+		"Juno":            false,
+		"Whitesur Light":  false,
+		"Whitesur Dark":   false,
 	}
 	for _, th := range themes {
 		want[th.Name] = true

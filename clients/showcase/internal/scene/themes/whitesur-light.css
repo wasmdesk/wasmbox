@@ -1,0 +1,23 @@
+/* WhiteSur Light — macOS Big Sur-styled GTK theme by Vince Liu.
+ * https://www.gnome-look.org/p/1403328 ·
+ * https://github.com/vinceliuice/WhiteSur-gtk-theme (GPL-3.0).
+ *
+ * Hand-resolved from src/sass/_colors.scss (LIGHT variant, DEFAULT
+ * accent #0860F2). The WhiteSur theme is one of the most-downloaded
+ * GTK themes on gnome-look.org; pairing it with wasmbox's --frame=aqua
+ * reproduces a near-pixel-accurate Big Sur look (Aqua window chrome
+ * around WhiteSur widget palette). */
+
+@define-color window_bg_color   #f5f5f5;
+@define-color window_fg_color   #242424;
+@define-color view_bg_color     #ffffff;
+@define-color view_fg_color     #363636;
+@define-color card_bg_color     #fbfbfb;
+@define-color headerbar_bg_color #ebebeb;
+@define-color accent_bg_color   #0860F2;
+@define-color accent_fg_color   #ffffff;
+@define-color borders           rgba(0, 0, 0, 0.12);
+@define-color destructive_bg_color #ED5F5D;
+@define-color warning_color     #F3BA4B;
+@define-color success_color     #79B757;
+@define-color error_color       #ED5F5D;

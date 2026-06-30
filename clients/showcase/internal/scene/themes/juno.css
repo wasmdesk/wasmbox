@@ -1,0 +1,25 @@
+/* Juno — modern flat dark theme by Eliver Lara, inspired by VSCode
+ * editor schemes. https://www.gnome-look.org/p/1280977 ·
+ * https://github.com/EliverLara/Juno (GPL-3.0).
+ *
+ * The upstream Juno theme is SCSS-templated (the actual @define-color
+ * declarations are interpolated from $variant + a palette of SCSS
+ * variables). The values below are hand-resolved from
+ * gtk-3.0/_colors.scss + _colors-public.scss for the DARK variant (the
+ * primary one — Juno is fundamentally a dark theme; the light variant
+ * exists but is rarely used). Teal accent (#00A9A5) is the canonical
+ * Juno highlight. */
+
+@define-color window_bg_color   #1E282C;
+@define-color window_fg_color   #fefefe;
+@define-color view_bg_color     #213036;
+@define-color view_fg_color     #fefefe;
+@define-color card_bg_color     #1A2429;
+@define-color headerbar_bg_color #1A2429;
+@define-color accent_bg_color   #00A9A5;
+@define-color accent_fg_color   #fefefe;
+@define-color borders           #131C20;
+@define-color destructive_bg_color #FF5370;
+@define-color warning_color     #FFCB6B;
+@define-color success_color     #C3E88D;
+@define-color error_color       #FF5370;

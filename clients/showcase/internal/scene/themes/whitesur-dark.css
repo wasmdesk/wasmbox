@@ -1,0 +1,20 @@
+/* WhiteSur Dark — macOS Big Sur (dark mode)-styled GTK theme by Vince
+ * Liu. See whitesur-light.css for the trademark/licensing note.
+ *
+ * Hand-resolved from src/sass/_colors.scss (DARK variant, DEFAULT
+ * accent #0860F2; the `darker` flag is FALSE so $bg_color uses the
+ * #333333 path, not the #282828 path). */
+
+@define-color window_bg_color   #333333;
+@define-color window_fg_color   #dedede;
+@define-color view_bg_color     #242424;
+@define-color view_fg_color     #dadada;
+@define-color card_bg_color     #2c2c2c;
+@define-color headerbar_bg_color #1f1f1f;
+@define-color accent_bg_color   #0860F2;
+@define-color accent_fg_color   #ffffff;
+@define-color borders           rgba(255, 255, 255, 0.12);
+@define-color destructive_bg_color #ED5F5D;
+@define-color warning_color     #F3BA4B;
+@define-color success_color     #79B757;
+@define-color error_color       #ED5F5D;
