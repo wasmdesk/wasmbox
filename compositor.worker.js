@@ -226,19 +226,20 @@ globalThis.window = fakeWindow;
 globalThis.document = fakeDocument;
 globalThis.localStorage = fakeStorage;
 
-// WASMBOX_CHROME selects the window-decoration style the Ruby compositor
-// applies at boot. Sourced from (in priority order): a ?chrome=NAME URL
+// WASMBOX_FRAME selects the window-decoration style ("frame", the
+// UI/UX "chrome" without the browser-name overlap) the Ruby compositor
+// applies at boot. Sourced from (in priority order): a ?frame=NAME URL
 // query param on the host page, then a value the page bootstrap stashed
-// via self.WASMBOX_CHROME before importScripts'ing this file, then the
+// via self.WASMBOX_FRAME before importScripts'ing this file, then the
 // default "openbox" (the historic wasmbox look). Known names live in
-// ChromeRegistry::TABLE in compositor.rb — currently "openbox" and "aqua"
+// FrameRegistry::TABLE in compositor.rb — currently "openbox" and "aqua"
 // (the latter subsumes the sibling wasmaqua project).
 try {
   const url = new URL(self.location.href);
-  const fromQuery = url.searchParams.get("chrome");
-  globalThis.WASMBOX_CHROME = fromQuery || self.WASMBOX_CHROME || "openbox";
+  const fromQuery = url.searchParams.get("frame");
+  globalThis.WASMBOX_FRAME = fromQuery || self.WASMBOX_FRAME || "openbox";
 } catch (_) {
-  globalThis.WASMBOX_CHROME = self.WASMBOX_CHROME || "openbox";
+  globalThis.WASMBOX_FRAME = self.WASMBOX_FRAME || "openbox";
 }
 
 // requestAnimationFrame: UNCONDITIONALLY backed by setTimeout(16) in this

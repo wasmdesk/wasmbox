@@ -19,8 +19,8 @@
 # ---------------------------------------------------------------------------
 # Theme — Openbox-minimal decorations (the default look).
 #
-# Chrome variants (see Chrome class below) override the geometry + paint
-# methods that read these constants; new colour names go into the chrome
+# Frame variants (see Frame class below) override the geometry + paint
+# methods that read these constants; new colour names go into the frame
 # itself, not here, so this module stays the Openbox baseline.
 # ---------------------------------------------------------------------------
 module Theme
@@ -50,38 +50,39 @@ module Theme
 end
 
 # ---------------------------------------------------------------------------
-# Chrome — window-decoration strategy.
+# Frame — window-decoration strategy ("chrome" in UI/UX vocabulary,
+# renamed here to avoid the browser-name overlap).
 #
-# Encapsulates the geometry + paint of a window's titlebar, close/minimize/
-# maximize buttons, frame border + resize grip. Window#*_rect methods
-# delegate to the current chrome's *_rect methods; Compositor#draw_window
-# delegates the chrome paint to the current chrome's #paint method.
+# Encapsulates the geometry + paint of a window's titlebar,
+# close/minimize/maximize buttons, frame border + resize grip.
+# Window#*_rect methods delegate to the current frame's *_rect methods;
+# Compositor#draw_window delegates the frame paint to the current
+# frame's #paint method.
 #
 # Two presets ship in-tree:
-#   - OpenboxChrome (the default): single close-X box on the RIGHT, a
+#   - OpenboxFrame (the default): single close-X box on the RIGHT, a
 #     minimize "_" box left of close, no maximize. 22 px flat titlebar.
 #     The look the wasmbox compositor.rb has always had.
-#   - AquaChrome: three "traffic-light" circle buttons on the LEFT
-#     (red close / yellow minimize / green maximize), 28 px flat titlebar
-#     with a centred title + a 1 px bottom hairline. The look the
-#     sibling wasmaqua project shipped as a fork — now subsumed by
-#     selecting WASMBOX_CHROME=aqua at boot.
+#   - AquaFrame: three "traffic-light" circle buttons on the LEFT
+#     (red close / yellow minimize / green maximize), 28 px flat
+#     titlebar with a centred title + a 1 px bottom hairline. The look
+#     the sibling wasmaqua project shipped as a fork — now subsumed by
+#     selecting WASMBOX_FRAME=aqua at boot.
 #
-# The chrome lives in CompositorBoot.chrome and is wired AT BOOT TIME
-# from the WASMBOX_CHROME environment variable (or the equivalent CLI
-# flag in cmd/serve / wasmdesk-up). Hot-swap is supported via
-# Chrome.current = ChromeRegistry[name] for live theming.
+# The active frame is picked AT BOOT TIME from the WASMBOX_FRAME
+# environment variable (or the ?frame= URL query param). Hot-swap is
+# supported via Frame.current = FrameRegistry[name] for live theming.
 # ---------------------------------------------------------------------------
-class Chrome
-  # The default chrome (overridden by the boot wire).
+class Frame
+  # The default frame (overridden by the boot wire).
   @@current = nil
   def self.current
-    @@current ||= OpenboxChrome.new
+    @@current ||= OpenboxFrame.new
   end
   def self.current=(c) ; @@current = c ; end
 
   # The window-geometry hooks. Default impls reuse Theme:: constants so a
-  # chrome that wants the Openbox geometry can just inherit OpenboxChrome.
+  # chrome that wants the Openbox geometry can just inherit OpenboxFrame.
 
   # Titlebar height in pixels — read by Window#frame_top + Compositor#draw.
   def title_h ; Theme::TITLE_H ; end
@@ -95,7 +96,7 @@ class Chrome
 
   # Per-button geometry hooks. Each receives the Window + returns
   # [x, y, w, h]. The default impls below are the Openbox geometry; the
-  # AquaChrome overrides them to left-anchor the 3 traffic-light buttons.
+  # AquaFrame overrides them to left-anchor the 3 traffic-light buttons.
   def close_rect(win)
     return [win.x, win.y, 0, 0] unless win.decorated?
     pad = (title_h - Theme::CLOSE_SZ) / 2
@@ -109,7 +110,7 @@ class Chrome
     [cx - Theme::MIN_SZ - pad, cy, Theme::MIN_SZ, Theme::MIN_SZ]
   end
 
-  # No maximize in Openbox; AquaChrome overrides.
+  # No maximize in Openbox; AquaFrame overrides.
   def maximize_rect(win) ; [win.x, win.y, 0, 0] ; end
 
   # Resize grip + frame extents — shared across chromes.
@@ -136,9 +137,9 @@ class Chrome
   def paint(_ctx, _win, _active, _host) ; raise NotImplementedError ; end
 end
 
-# OpenboxChrome — the existing wasmbox look. Geometry inherits Chrome
+# OpenboxFrame — the existing wasmbox look. Geometry inherits Chrome
 # defaults; paint reproduces what Compositor#draw_window used to inline.
-class OpenboxChrome < Chrome
+class OpenboxFrame < Frame
   def paint(ctx, win, active, host)
     # Titlebar.
     host.fill_rect(titlebar_rect(win), active ? Theme::TITLE_ACTIVE : Theme::TITLE_INACTIVE)
@@ -182,11 +183,11 @@ class OpenboxChrome < Chrome
   end
 end
 
-# AquaChrome — three traffic-light buttons on the LEFT, 28 px flat
+# AquaFrame — three traffic-light buttons on the LEFT, 28 px flat
 # titlebar with centred title, 1 px bottom hairline. Verbatim port of
 # the chrome from the sibling wasmaqua project (which becomes a pure
 # preset of wasmbox once this lands).
-class AquaChrome < Chrome
+class AquaFrame < Frame
   # Aqua-specific colour + size table — kept on the chrome rather than in
   # the top-level Theme module so adding more chromes doesn't pollute the
   # Openbox baseline.
@@ -295,19 +296,19 @@ class AquaChrome < Chrome
   end
 end
 
-# ChromeRegistry — name → chrome instance lookup. Picked at boot via the
-# WASMBOX_CHROME env var (see compositor boot at the bottom of this file).
+# FrameRegistry — name → chrome instance lookup. Picked at boot via the
+# WASMBOX_FRAME env var (see compositor boot at the bottom of this file).
 # Adding a new chrome is one map entry below; users can also assign
-# Chrome.current = MyChrome.new directly to plug a custom subclass without
+# Frame.current = MyChrome.new directly to plug a custom subclass without
 # touching the registry.
-module ChromeRegistry
+module FrameRegistry
   TABLE = {
-    "openbox" => -> { OpenboxChrome.new },
-    "aqua"    => -> { AquaChrome.new },
+    "openbox" => -> { OpenboxFrame.new },
+    "aqua"    => -> { AquaFrame.new },
   }
   def self.[](name)
     builder = TABLE[name.to_s]
-    builder ? builder.call : OpenboxChrome.new
+    builder ? builder.call : OpenboxFrame.new
   end
   def self.names ; TABLE.keys ; end
 end
@@ -377,24 +378,24 @@ class Window
   def decorated? = !panel? && !popup?
 
   # Outer frame (decoration included): the titlebar sits above the body. The
-  # titlebar height comes from the current chrome (OpenboxChrome = 22 px,
-  # AquaChrome = 28 px, custom chromes set their own). For a panel there is
+  # titlebar height comes from the current chrome (OpenboxFrame = 22 px,
+  # AquaFrame = 28 px, custom chromes set their own). For a panel there is
   # no titlebar, so the frame top is the body top.
-  def frame_top = decorated? ? @y - Chrome.current.title_h : @y
+  def frame_top = decorated? ? @y - Frame.current.title_h : @y
   def right     = @x + @w
   def bottom    = @y + @h
 
   # Rectangles, each as [x, y, w, h]. Panels carry no decoration rectangles
   # so the titlebar / close / resize hit-rects collapse to empty (zero-size)
   # and the frame equals the body. All decorated-window geometry delegates
-  # to the current Chrome strategy; Window itself only owns body_rect.
-  def titlebar_rect = Chrome.current.titlebar_rect(self)
+  # to the current Frame strategy; Window itself only owns body_rect.
+  def titlebar_rect = Frame.current.titlebar_rect(self)
   def body_rect     = [@x, @y, @w, @h]
-  def close_rect    = Chrome.current.close_rect(self)
-  def minimize_rect = Chrome.current.minimize_rect(self)
-  def maximize_rect = Chrome.current.maximize_rect(self)
-  def resize_rect   = Chrome.current.resize_rect(self)
-  def frame_rect    = Chrome.current.frame_rect(self)
+  def close_rect    = Frame.current.close_rect(self)
+  def minimize_rect = Frame.current.minimize_rect(self)
+  def maximize_rect = Frame.current.maximize_rect(self)
+  def resize_rect   = Frame.current.resize_rect(self)
+  def frame_rect    = Frame.current.frame_rect(self)
 
   def hit?(rect, px, py)
     rx, ry, rw, rh = rect
@@ -409,7 +410,7 @@ class Window
   def on_titlebar?(px, py)= decorated? ? hit?(titlebar_rect, px, py) : false
   def on_close?(px, py)   = decorated? ? hit?(close_rect, px, py) : false
   def on_minimize?(px, py)= decorated? ? hit?(minimize_rect, px, py) : false
-  def on_maximize?(px, py)= (decorated? && Chrome.current.has_maximize?) ? hit?(maximize_rect, px, py) : false
+  def on_maximize?(px, py)= (decorated? && Frame.current.has_maximize?) ? hit?(maximize_rect, px, py) : false
   def on_resize?(px, py)  = decorated? ? hit?(resize_rect, px, py) : false
 
   def move_to(nx, ny)
@@ -2663,7 +2664,7 @@ class Compositor
     end
 
     active = win.focused?
-    chrome = Chrome.current
+    chrome = Frame.current
 
     # Chrome-owned titlebar + buttons. The current chrome handles all paint
     # ops for the bar (background, hairline, title text, close/min/max
@@ -2786,13 +2787,13 @@ end
 # attach to the canvas and run.
 # ---------------------------------------------------------------------------
 # Chrome picker: compositor.worker.js stashes the requested chrome name on
-# `self.WASMBOX_CHROME` BEFORE the Ruby program boots (read from a URL
-# query param ?chrome=aqua, or the WASMBOX_CHROME env passed via the page
-# bootstrap). Unknown names fall back to OpenboxChrome — never break the
+# `self.WASMBOX_FRAME` BEFORE the Ruby program boots (read from a URL
+# query param ?chrome=aqua, or the WASMBOX_FRAME env passed via the page
+# bootstrap). Unknown names fall back to OpenboxFrame — never break the
 # default.
-chrome_name = JS.global.get("WASMBOX_CHROME").to_s
+chrome_name = JS.global.get("WASMBOX_FRAME").to_s
 chrome_name = "openbox" if chrome_name.nil? || chrome_name.empty? || chrome_name == "undefined"
-Chrome.current = ChromeRegistry[chrome_name]
+Frame.current = FrameRegistry[chrome_name]
 JS.log("rbgo compositor: chrome=#{chrome_name}")
 
 wm = WindowManager.new

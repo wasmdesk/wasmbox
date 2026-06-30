@@ -103,14 +103,15 @@ try {
   throw e;
 }
 
-// Forward the page's ?chrome=NAME query param into the worker URL so
+// Forward the page's ?frame=NAME query param into the worker URL so
 // compositor.worker.js can read it via self.location.searchParams and
-// expose it as globalThis.WASMBOX_CHROME for the Ruby boot. Without
+// expose it as globalThis.WASMBOX_FRAME for the Ruby boot. Without
 // this the worker's URL would lose the query string (workers are
 // constructed from a script URL that does not inherit the page's
-// search params).
-const pageChrome = new URLSearchParams(self.location.search).get("chrome");
-const workerURL = pageChrome ? "compositor.worker.js?chrome=" + encodeURIComponent(pageChrome) : "compositor.worker.js";
+// search params). "frame" is the UI/UX "chrome" term, renamed to
+// avoid the browser-name overlap.
+const pageFrame = new URLSearchParams(self.location.search).get("frame");
+const workerURL = pageFrame ? "compositor.worker.js?frame=" + encodeURIComponent(pageFrame) : "compositor.worker.js";
 const worker = new Worker(workerURL, { type: "classic" });
 
 // Boot the compositor: send the canvas + the initial viewport + the current
