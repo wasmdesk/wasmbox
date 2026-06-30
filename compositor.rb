@@ -17,7 +17,11 @@
 # be unit-tested natively (the JS module is a no-op off-wasm).
 
 # ---------------------------------------------------------------------------
-# Theme — Openbox-minimal decorations.
+# Theme — Openbox-minimal decorations (the default look).
+#
+# Chrome variants (see Chrome class below) override the geometry + paint
+# methods that read these constants; new colour names go into the chrome
+# itself, not here, so this module stays the Openbox baseline.
 # ---------------------------------------------------------------------------
 module Theme
   DESKTOP        = "#11131a"
@@ -43,6 +47,269 @@ module Theme
   GRIP      = 14 # resize-corner side
   MIN_W     = 90
   MIN_H     = 60
+end
+
+# ---------------------------------------------------------------------------
+# Chrome — window-decoration strategy.
+#
+# Encapsulates the geometry + paint of a window's titlebar, close/minimize/
+# maximize buttons, frame border + resize grip. Window#*_rect methods
+# delegate to the current chrome's *_rect methods; Compositor#draw_window
+# delegates the chrome paint to the current chrome's #paint method.
+#
+# Two presets ship in-tree:
+#   - OpenboxChrome (the default): single close-X box on the RIGHT, a
+#     minimize "_" box left of close, no maximize. 22 px flat titlebar.
+#     The look the wasmbox compositor.rb has always had.
+#   - AquaChrome: three "traffic-light" circle buttons on the LEFT
+#     (red close / yellow minimize / green maximize), 28 px flat titlebar
+#     with a centred title + a 1 px bottom hairline. The look the
+#     sibling wasmaqua project shipped as a fork — now subsumed by
+#     selecting WASMBOX_CHROME=aqua at boot.
+#
+# The chrome lives in CompositorBoot.chrome and is wired AT BOOT TIME
+# from the WASMBOX_CHROME environment variable (or the equivalent CLI
+# flag in cmd/serve / wasmdesk-up). Hot-swap is supported via
+# Chrome.current = ChromeRegistry[name] for live theming.
+# ---------------------------------------------------------------------------
+class Chrome
+  # The default chrome (overridden by the boot wire).
+  @@current = nil
+  def self.current
+    @@current ||= OpenboxChrome.new
+  end
+  def self.current=(c) ; @@current = c ; end
+
+  # The window-geometry hooks. Default impls reuse Theme:: constants so a
+  # chrome that wants the Openbox geometry can just inherit OpenboxChrome.
+
+  # Titlebar height in pixels — read by Window#frame_top + Compositor#draw.
+  def title_h ; Theme::TITLE_H ; end
+
+  # Frame border width (the stroke around the whole window).
+  def border_w ; Theme::BORDER ; end
+
+  # Does this chrome show a maximize button? When false, Window#maximize_rect
+  # returns a zero-sized rect + the compositor skips painting it.
+  def has_maximize? ; false ; end
+
+  # Per-button geometry hooks. Each receives the Window + returns
+  # [x, y, w, h]. The default impls below are the Openbox geometry; the
+  # AquaChrome overrides them to left-anchor the 3 traffic-light buttons.
+  def close_rect(win)
+    return [win.x, win.y, 0, 0] unless win.decorated?
+    pad = (title_h - Theme::CLOSE_SZ) / 2
+    [win.right - Theme::CLOSE_SZ - pad, win.frame_top + pad, Theme::CLOSE_SZ, Theme::CLOSE_SZ]
+  end
+
+  def minimize_rect(win)
+    return [win.x, win.y, 0, 0] unless win.decorated?
+    pad = (title_h - Theme::MIN_SZ) / 2
+    cx, cy, _cw, _ch = close_rect(win)
+    [cx - Theme::MIN_SZ - pad, cy, Theme::MIN_SZ, Theme::MIN_SZ]
+  end
+
+  # No maximize in Openbox; AquaChrome overrides.
+  def maximize_rect(win) ; [win.x, win.y, 0, 0] ; end
+
+  # Resize grip + frame extents — shared across chromes.
+  def resize_rect(win)
+    return [win.x, win.y, 0, 0] unless win.decorated?
+    return [win.x, win.y, 0, 0] if win.shaded
+    [win.right - Theme::GRIP, win.bottom - Theme::GRIP, Theme::GRIP, Theme::GRIP]
+  end
+
+  def titlebar_rect(win)
+    win.decorated? ? [win.x, win.frame_top, win.w, title_h] : [win.x, win.y, 0, 0]
+  end
+
+  def frame_rect(win)
+    return [win.x, win.y, win.w, win.h] unless win.decorated?
+    return [win.x, win.frame_top, win.w, title_h] if win.shaded
+    [win.x, win.frame_top, win.w, win.h + title_h]
+  end
+
+  # paint(ctx, win, active, host) is the chrome's visual; it owns all the
+  # ctx draw calls for the titlebar, buttons, border + resize grip. `host`
+  # is the Compositor (used for fill_rect/stroke_rect helpers + the @ctx).
+  # Implemented per subclass.
+  def paint(_ctx, _win, _active, _host) ; raise NotImplementedError ; end
+end
+
+# OpenboxChrome — the existing wasmbox look. Geometry inherits Chrome
+# defaults; paint reproduces what Compositor#draw_window used to inline.
+class OpenboxChrome < Chrome
+  def paint(ctx, win, active, host)
+    # Titlebar.
+    host.fill_rect(titlebar_rect(win), active ? Theme::TITLE_ACTIVE : Theme::TITLE_INACTIVE)
+    tx, ty, _tw, _th = titlebar_rect(win)
+    host.text(win.title, tx + 6, ty + 15, Theme::TITLE_TEXT)
+    # Close box (× glyph).
+    cx, cy, cw, ch = close_rect(win)
+    host.fill_rect(close_rect(win), Theme::CLOSE_BG)
+    ctx.set("strokeStyle", Theme::CLOSE_GLYPH)
+    ctx.set("lineWidth", 1.5)
+    ctx.call("beginPath")
+    ctx.call("moveTo", cx + 3, cy + 3)
+    ctx.call("lineTo", cx + cw - 3, cy + ch - 3)
+    ctx.call("moveTo", cx + cw - 3, cy + 3)
+    ctx.call("lineTo", cx + 3, cy + ch - 3)
+    ctx.call("stroke")
+    # Minimize box ("_" glyph).
+    mx, my, mw, mh = minimize_rect(win)
+    host.fill_rect(minimize_rect(win), Theme::CLOSE_BG)
+    ctx.set("strokeStyle", active ? Theme::CLOSE_GLYPH : Theme::BORDER_INACTIVE)
+    ctx.set("lineWidth", 1.5)
+    ctx.call("beginPath")
+    ctx.call("moveTo", mx + 3,      my + mh - 4)
+    ctx.call("lineTo", mx + mw - 3, my + mh - 4)
+    ctx.call("stroke")
+  end
+
+  def paint_frame(ctx, win, active, host)
+    # Resize grip + 1px frame border. Called by Compositor after the body
+    # paints (so the grip + border land on top).
+    rx, ry, rw, rh = resize_rect(win)
+    ctx.set("strokeStyle", Theme::RESIZE_GRIP)
+    ctx.set("lineWidth", 1)
+    ctx.call("beginPath")
+    ctx.call("moveTo", rx + rw, ry + rh * 0.4)
+    ctx.call("lineTo", rx + rw * 0.4, ry + rh)
+    ctx.call("moveTo", rx + rw, ry + rh * 0.75)
+    ctx.call("lineTo", rx + rw * 0.75, ry + rh)
+    ctx.call("stroke")
+    host.stroke_rect(frame_rect(win), active ? Theme::BORDER_ACTIVE : Theme::BORDER_INACTIVE, Theme::BORDER)
+  end
+end
+
+# AquaChrome — three traffic-light buttons on the LEFT, 28 px flat
+# titlebar with centred title, 1 px bottom hairline. Verbatim port of
+# the chrome from the sibling wasmaqua project (which becomes a pure
+# preset of wasmbox once this lands).
+class AquaChrome < Chrome
+  # Aqua-specific colour + size table — kept on the chrome rather than in
+  # the top-level Theme module so adding more chromes doesn't pollute the
+  # Openbox baseline.
+  TITLE_H        = 28
+  BTN_R          = 6
+  BTN_DIAM       = BTN_R * 2
+  BTN_GAP        = 8
+  TITLE_ACTIVE   = "#ECECEC"
+  TITLE_INACTIVE = "#E3E3E3"
+  TITLE_BORDER   = "#BFBFBF"
+  TITLE_TEXT_ON  = "#3C3C43"
+  TITLE_TEXT_OFF = "#9B9B9F"
+  CLOSE_RED      = "#FF5F57"
+  CLOSE_RED_OUT  = "#E0443E"
+  MIN_YELLOW     = "#FEBC2E"
+  MIN_YELLOW_OUT = "#E0A12B"
+  MAX_GREEN      = "#28C840"
+  MAX_GREEN_OUT  = "#23A93A"
+  BORDER_ACTIVE  = "#A9A9A9"
+  BORDER_INACTIVE= "#CFCFCF"
+  RESIZE_GRIP    = "#9B9B9F"
+  SHADOW         = "#999999"
+  BORDER_W       = 1
+
+  def title_h ; TITLE_H ; end
+  def border_w ; BORDER_W ; end
+  def has_maximize? ; true ; end
+
+  def close_rect(win)
+    return [win.x, win.y, 0, 0] unless win.decorated?
+    cy = win.frame_top + (TITLE_H - BTN_DIAM) / 2
+    [win.x + BTN_GAP, cy, BTN_DIAM, BTN_DIAM]
+  end
+
+  def minimize_rect(win)
+    return [win.x, win.y, 0, 0] unless win.decorated?
+    cx, cy, _cw, _ch = close_rect(win)
+    [cx + BTN_DIAM + BTN_GAP, cy, BTN_DIAM, BTN_DIAM]
+  end
+
+  def maximize_rect(win)
+    return [win.x, win.y, 0, 0] unless win.decorated?
+    cx, cy, _cw, _ch = minimize_rect(win)
+    [cx + BTN_DIAM + BTN_GAP, cy, BTN_DIAM, BTN_DIAM]
+  end
+
+  def paint(ctx, win, active, host)
+    tx, ty, tw, _th = titlebar_rect(win)
+    host.fill_rect(titlebar_rect(win), active ? TITLE_ACTIVE : TITLE_INACTIVE)
+    # 1 px hairline at the bottom of the titlebar.
+    ctx.set("strokeStyle", TITLE_BORDER)
+    ctx.set("lineWidth", 1)
+    ctx.call("beginPath")
+    ctx.call("moveTo", tx,        ty + TITLE_H - 0.5)
+    ctx.call("lineTo", tx + tw,   ty + TITLE_H - 0.5)
+    ctx.call("stroke")
+    # Centred title text.
+    ctx.set("font", "12px -apple-system, BlinkMacSystemFont, 'SF Pro Text', 'Helvetica Neue', Helvetica, Arial, sans-serif")
+    ctx.set("textAlign", "center")
+    ctx.set("textBaseline", "middle")
+    ctx.set("fillStyle", active ? TITLE_TEXT_ON : TITLE_TEXT_OFF)
+    ctx.call("fillText", win.title, tx + tw / 2, ty + TITLE_H / 2 + 1)
+    ctx.set("textAlign", "left")
+    ctx.set("textBaseline", "alphabetic")
+    # Three traffic-light buttons.
+    draw_traffic_light(ctx, close_rect(win),    CLOSE_RED,  CLOSE_RED_OUT,  active)
+    draw_traffic_light(ctx, minimize_rect(win), MIN_YELLOW, MIN_YELLOW_OUT, active)
+    draw_traffic_light(ctx, maximize_rect(win), MAX_GREEN,  MAX_GREEN_OUT,  active)
+  end
+
+  def paint_frame(ctx, win, active, host)
+    rx, ry, rw, rh = resize_rect(win)
+    ctx.set("strokeStyle", RESIZE_GRIP)
+    ctx.set("lineWidth", 1)
+    ctx.call("beginPath")
+    ctx.call("moveTo", rx + rw, ry + rh * 0.4)
+    ctx.call("lineTo", rx + rw * 0.4, ry + rh)
+    ctx.call("moveTo", rx + rw, ry + rh * 0.75)
+    ctx.call("lineTo", rx + rw * 0.75, ry + rh)
+    ctx.call("stroke")
+    # Faked 1 px drop shadow on the right + bottom of the frame.
+    fx, fy, fw, fh = frame_rect(win)
+    host.fill_rect([fx + fw,     fy + 1, 1, fh], SHADOW)
+    host.fill_rect([fx + 1, fy + fh,     fw, 1], SHADOW)
+    host.stroke_rect(frame_rect(win), active ? BORDER_ACTIVE : BORDER_INACTIVE, BORDER_W)
+  end
+
+  # (rbgo's mruby has no `private` keyword; helpers below are
+  # convention-only — callers stay inside the class.)
+
+  def draw_traffic_light(ctx, rect, fill_colour, outline_colour, active)
+    bx, by, bw, bh = rect
+    cx = bx + bw / 2.0
+    cy = by + bh / 2.0
+    fc = active ? fill_colour    : "#C7C7CC"
+    oc = active ? outline_colour : "#B0B0B5"
+    ctx.set("fillStyle", fc)
+    ctx.call("beginPath")
+    ctx.call("arc", cx, cy, BTN_R, 0, 6.283185307179586)
+    ctx.call("fill")
+    ctx.set("strokeStyle", oc)
+    ctx.set("lineWidth", 1)
+    ctx.call("beginPath")
+    ctx.call("arc", cx, cy, BTN_R - 0.5, 0, 6.283185307179586)
+    ctx.call("stroke")
+  end
+end
+
+# ChromeRegistry — name → chrome instance lookup. Picked at boot via the
+# WASMBOX_CHROME env var (see compositor boot at the bottom of this file).
+# Adding a new chrome is one map entry below; users can also assign
+# Chrome.current = MyChrome.new directly to plug a custom subclass without
+# touching the registry.
+module ChromeRegistry
+  TABLE = {
+    "openbox" => -> { OpenboxChrome.new },
+    "aqua"    => -> { AquaChrome.new },
+  }
+  def self.[](name)
+    builder = TABLE[name.to_s]
+    builder ? builder.call : OpenboxChrome.new
+  end
+  def self.names ; TABLE.keys ; end
 end
 
 # ---------------------------------------------------------------------------
@@ -109,51 +376,25 @@ class Window
   # draggable, focusable. Panels and popups carry no decoration.
   def decorated? = !panel? && !popup?
 
-  # Outer frame (decoration included): the titlebar sits above the body. For a
-  # panel there is no titlebar, so the frame top is the body top.
-  def frame_top = decorated? ? @y - Theme::TITLE_H : @y
+  # Outer frame (decoration included): the titlebar sits above the body. The
+  # titlebar height comes from the current chrome (OpenboxChrome = 22 px,
+  # AquaChrome = 28 px, custom chromes set their own). For a panel there is
+  # no titlebar, so the frame top is the body top.
+  def frame_top = decorated? ? @y - Chrome.current.title_h : @y
   def right     = @x + @w
   def bottom    = @y + @h
 
-  # Rectangles, each as [x, y, w, h]. Panels carry no decoration rectangles, so
-  # the titlebar / close / resize hit-rects collapse to empty (zero-size) and
-  # the frame equals the body.
-  def titlebar_rect = decorated? ? [@x, frame_top, @w, Theme::TITLE_H] : [@x, @y, 0, 0]
+  # Rectangles, each as [x, y, w, h]. Panels carry no decoration rectangles
+  # so the titlebar / close / resize hit-rects collapse to empty (zero-size)
+  # and the frame equals the body. All decorated-window geometry delegates
+  # to the current Chrome strategy; Window itself only owns body_rect.
+  def titlebar_rect = Chrome.current.titlebar_rect(self)
   def body_rect     = [@x, @y, @w, @h]
-
-  def close_rect
-    return [@x, @y, 0, 0] unless decorated?
-    pad = (Theme::TITLE_H - Theme::CLOSE_SZ) / 2
-    [right - Theme::CLOSE_SZ - pad, frame_top + pad, Theme::CLOSE_SZ, Theme::CLOSE_SZ]
-  end
-
-  # Minimize-box rect: a 14x14 button (Theme::MIN_SZ side) placed just LEFT of
-  # the close box in the titlebar, with the same vertical padding. Openbox
-  # paints a single horizontal bar near the bottom of this box (the "_" glyph)
-  # to signal "fold this window into the dock". Panels carry no decoration so
-  # this collapses to an empty (zero-size) rect, same as close_rect.
-  def minimize_rect
-    return [@x, @y, 0, 0] unless decorated?
-    pad = (Theme::TITLE_H - Theme::MIN_SZ) / 2
-    cx, cy, _cw, _ch = close_rect
-    [cx - Theme::MIN_SZ - pad, cy, Theme::MIN_SZ, Theme::MIN_SZ]
-  end
-
-  def resize_rect
-    return [@x, @y, 0, 0] unless decorated?
-    return [@x, @y, 0, 0] if @shaded   # a rolled-up window has no body to resize
-    [right - Theme::GRIP, bottom - Theme::GRIP, Theme::GRIP, Theme::GRIP]
-  end
-
-  # The whole decorated extent, used for "did the click land on me at all?".
-  # For an undecorated surface (panel / popup) the extent is just the body; for a
-  # shaded (rolled-up) window the extent is just the titlebar (the body is gone,
-  # so clicks in that area fall through to whatever is behind it).
-  def frame_rect
-    return [@x, @y, @w, @h] unless decorated?
-    return [@x, frame_top, @w, Theme::TITLE_H] if @shaded
-    [@x, frame_top, @w, @h + Theme::TITLE_H]
-  end
+  def close_rect    = Chrome.current.close_rect(self)
+  def minimize_rect = Chrome.current.minimize_rect(self)
+  def maximize_rect = Chrome.current.maximize_rect(self)
+  def resize_rect   = Chrome.current.resize_rect(self)
+  def frame_rect    = Chrome.current.frame_rect(self)
 
   def hit?(rect, px, py)
     rx, ry, rw, rh = rect
@@ -163,10 +404,12 @@ class Window
   def contains?(px, py)   = hit?(frame_rect, px, py)
   # Only a decorated window is draggable, closable-by-box, minimizable or
   # resizable; for panels and popups every decoration hit-test reports "no hit"
-  # so those gestures can never start.
+  # so those gestures can never start. on_maximize? returns false unless the
+  # chrome opts in via has_maximize? (Aqua does, Openbox doesn't).
   def on_titlebar?(px, py)= decorated? ? hit?(titlebar_rect, px, py) : false
   def on_close?(px, py)   = decorated? ? hit?(close_rect, px, py) : false
   def on_minimize?(px, py)= decorated? ? hit?(minimize_rect, px, py) : false
+  def on_maximize?(px, py)= (decorated? && Chrome.current.has_maximize?) ? hit?(maximize_rect, px, py) : false
   def on_resize?(px, py)  = decorated? ? hit?(resize_rect, px, py) : false
 
   def move_to(nx, ny)
@@ -2420,39 +2663,16 @@ class Compositor
     end
 
     active = win.focused?
+    chrome = Chrome.current
 
-    # Titlebar.
-    fill_rect(win.titlebar_rect, active ? Theme::TITLE_ACTIVE : Theme::TITLE_INACTIVE)
-    tx, ty, _tw, _th = win.titlebar_rect
-    text(win.title, tx + 6, ty + 15, Theme::TITLE_TEXT)
+    # Chrome-owned titlebar + buttons. The current chrome handles all paint
+    # ops for the bar (background, hairline, title text, close/min/max
+    # glyphs). Both Openbox and Aqua chromes implement this method.
+    chrome.paint(@ctx, win, active, self)
 
-    # Close box.
-    cx, cy, cw, ch = win.close_rect
-    fill_rect(win.close_rect, Theme::CLOSE_BG)
-    @ctx.set("strokeStyle", Theme::CLOSE_GLYPH)
-    @ctx.set("lineWidth", 1.5)
-    @ctx.call("beginPath")
-    @ctx.call("moveTo", cx + 3, cy + 3)
-    @ctx.call("lineTo", cx + cw - 3, cy + ch - 3)
-    @ctx.call("moveTo", cx + cw - 3, cy + 3)
-    @ctx.call("lineTo", cx + 3, cy + ch - 3)
-    @ctx.call("stroke")
-
-    # Minimize box (left of the close box). Openbox draws this as a small box
-    # with a single horizontal bar near the bottom — the "_" glyph. When the
-    # window is inactive the face is the same neutral CLOSE_BG but the bar ink
-    # is lighter so the button reads as muted.
-    mx, my, mw, mh = win.minimize_rect
-    fill_rect(win.minimize_rect, Theme::CLOSE_BG)
-    @ctx.set("strokeStyle", active ? Theme::CLOSE_GLYPH : Theme::BORDER_INACTIVE)
-    @ctx.set("lineWidth", 1.5)
-    @ctx.call("beginPath")
-    @ctx.call("moveTo", mx + 3,      my + mh - 4)
-    @ctx.call("lineTo", mx + mw - 3, my + mh - 4)
-    @ctx.call("stroke")
-
-    # Shaded ("rolled up"): only the titlebar + its boxes are drawn — no body,
-    # no resize grip. The body area shows whatever sits behind the window.
+    # Shaded ("rolled up"): only the titlebar + its buttons are drawn — no body,
+    # no resize grip, no border. The body area shows whatever sits behind the
+    # window.
     return if win.shaded?
 
     # Client body. In-process windows paint a solid fill; external windows
@@ -2469,19 +2689,10 @@ class Compositor
       fill_rect(win.body_rect, win.fill)
     end
 
-    # Resize grip (bottom-right), drawn as two short diagonals.
-    rx, ry, rw, rh = win.resize_rect
-    @ctx.set("strokeStyle", Theme::RESIZE_GRIP)
-    @ctx.set("lineWidth", 1)
-    @ctx.call("beginPath")
-    @ctx.call("moveTo", rx + rw, ry + rh * 0.4)
-    @ctx.call("lineTo", rx + rw * 0.4, ry + rh)
-    @ctx.call("moveTo", rx + rw, ry + rh * 0.75)
-    @ctx.call("lineTo", rx + rw * 0.75, ry + rh)
-    @ctx.call("stroke")
-
-    # 1px decoration border around the whole frame.
-    stroke_rect(win.frame_rect, active ? Theme::BORDER_ACTIVE : Theme::BORDER_INACTIVE, Theme::BORDER)
+    # Chrome-owned frame chrome: resize grip + 1px border (Openbox), plus
+    # the faked 1px drop shadow + slightly heavier border on Aqua. Painted
+    # AFTER the body so it lands on top.
+    chrome.paint_frame(@ctx, win, active, self)
   end
 
   # Blit an external window's SharedArrayBuffer onto the canvas. Chrome forbids
@@ -2571,8 +2782,19 @@ class Compositor
 end
 
 # ---------------------------------------------------------------------------
-# Boot: build the WM, spawn a few clients, attach to the canvas and run.
+# Boot: pick the window-decoration chrome, build the WM, spawn a few clients,
+# attach to the canvas and run.
 # ---------------------------------------------------------------------------
+# Chrome picker: compositor.worker.js stashes the requested chrome name on
+# `self.WASMBOX_CHROME` BEFORE the Ruby program boots (read from a URL
+# query param ?chrome=aqua, or the WASMBOX_CHROME env passed via the page
+# bootstrap). Unknown names fall back to OpenboxChrome — never break the
+# default.
+chrome_name = JS.global.get("WASMBOX_CHROME").to_s
+chrome_name = "openbox" if chrome_name.nil? || chrome_name.empty? || chrome_name == "undefined"
+Chrome.current = ChromeRegistry[chrome_name]
+JS.log("rbgo compositor: chrome=#{chrome_name}")
+
 wm = WindowManager.new
 comp = Compositor.new(wm)
 comp.restore_layout # localStorage -> wm.saved_layout, before the spawns apply it
