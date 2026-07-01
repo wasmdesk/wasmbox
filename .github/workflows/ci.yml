@@ -154,6 +154,20 @@ jobs:
           WASMBOX_BASE_URL: "http://127.0.0.1:8137"
         run: node probe-shade.mjs
 
+      - name: Run headless Frame-matrix probe (16 frames boot + paint + hash-distinct)
+        working-directory: test
+        env:
+          WASMBOX_BASE_URL: "http://127.0.0.1:8137/"
+        run: node probe-frame-matrix.mjs
+
+      - name: Run headless Firefox memory-leak probe (compositor 60Hz blit fix)
+        working-directory: test
+        env:
+          WASMBOX_BASE_URL: "http://127.0.0.1:8137/"
+          IDLE_SECONDS: "15"
+          MAX_GROWTH_MB: "8"
+        run: node probe-firefox-leak.mjs chromium
+
       - name: Stop the server
         if: always()
         run: |
