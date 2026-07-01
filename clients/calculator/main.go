@@ -48,10 +48,17 @@ func main() {
 			return nil
 		}
 		ev := args[0]
-		if ev.Get("kind").String() == "mousedown" {
-			x := ev.Get("x").Int()
-			y := ev.Get("y").Int()
-			if state.HandleMouse(x, y) {
+		switch ev.Get("kind").String() {
+		case "mousedown":
+			if state.HandleMouse(ev.Get("x").Int(), ev.Get("y").Int()) {
+				render()
+			}
+		case "keydown":
+			if state.HandleKey(ev.Get("key").String()) {
+				render()
+			}
+		case "char":
+			if state.HandleChar(ev.Get("text").String()) {
 				render()
 			}
 		}

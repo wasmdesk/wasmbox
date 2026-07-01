@@ -102,6 +102,54 @@ func (s *State) HandleMouse(x, y int) bool {
 	return false
 }
 
+// HandleKey maps a keyboard event's Code string to the equivalent
+// calculator key + calls press(). Returns true if the key mapped to
+// an action (and the scene should re-render), false otherwise.
+//
+// Supported:
+//   - "0".."9"        → digit entry
+//   - "."             → decimal
+//   - "+" / "-" / "*" / "/" → binary ops
+//   - "Enter" / "="   → evaluate
+//   - "Escape" / "Delete" / "c" / "C" → clear
+//   - "Backspace"     → also clears (pocket calculator has no backspace)
+//   - "%"             → percent
+//   - single-char letters map to the corresponding calculator label
+//     when the label is exactly the character (e.g. "C" for clear)
+func (s *State) HandleKey(code string) bool {
+	switch code {
+	case "0", "1", "2", "3", "4", "5", "6", "7", "8", "9":
+		s.press(code)
+		return true
+	case ".":
+		s.press(".")
+		return true
+	case "+", "-", "*", "/":
+		s.press(code)
+		return true
+	case "Enter", "=":
+		s.press("=")
+		return true
+	case "Escape", "Delete", "Backspace", "c", "C":
+		s.press("C")
+		return true
+	case "%":
+		s.press("%")
+		return true
+	}
+	return false
+}
+
+// HandleChar is the printable-character sibling of HandleKey. Some
+// SDKs deliver digits as keydown Codes, others as char events —
+// support both routes.
+func (s *State) HandleChar(text string) bool {
+	if text == "" {
+		return false
+	}
+	return s.HandleKey(text)
+}
+
 // press applies one key. Split out so scene_test can drive the model
 // directly without going through a synthetic mouse-hit-test.
 func (s *State) press(key string) {

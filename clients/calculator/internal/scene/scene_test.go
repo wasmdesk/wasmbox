@@ -226,6 +226,90 @@ func TestPressAfterOpNegateNoOp(t *testing.T) {
 	}
 }
 
+func TestHandleKeyDigits(t *testing.T) {
+	s := New(surfaceW, surfaceH)
+	for _, k := range []string{"1", "2", "3"} {
+		if !s.HandleKey(k) {
+			t.Fatalf("HandleKey(%q) should return true", k)
+		}
+	}
+	if s.display.Text != "123" {
+		t.Fatalf("after 1,2,3 digits: %q", s.display.Text)
+	}
+}
+
+func TestHandleKeyOps(t *testing.T) {
+	s := New(surfaceW, surfaceH)
+	s.HandleKey("2")
+	s.HandleKey("+")
+	s.HandleKey("3")
+	s.HandleKey("Enter") // Enter = "="
+	if s.display.Text != "5" {
+		t.Fatalf("2+3<Enter>: %q", s.display.Text)
+	}
+	// "=" also works.
+	s.HandleKey("*")
+	s.HandleKey("4")
+	s.HandleKey("=")
+	if s.display.Text != "20" {
+		t.Fatalf("5*4=: %q", s.display.Text)
+	}
+}
+
+func TestHandleKeyClearAliases(t *testing.T) {
+	// Escape, Delete, Backspace, c, C all clear.
+	for _, k := range []string{"Escape", "Delete", "Backspace", "c", "C"} {
+		s := New(surfaceW, surfaceH)
+		s.HandleKey("4")
+		s.HandleKey("2")
+		s.HandleKey(k)
+		if s.display.Text != "0" {
+			t.Fatalf("clear via %q: display=%q, want 0", k, s.display.Text)
+		}
+	}
+}
+
+func TestHandleKeyPercentAndDecimal(t *testing.T) {
+	s := New(surfaceW, surfaceH)
+	s.HandleKey("5")
+	s.HandleKey("0")
+	s.HandleKey("%")
+	if s.display.Text != "0.5" {
+		t.Fatalf("50%%: %q", s.display.Text)
+	}
+	// Decimal directly.
+	s2 := New(surfaceW, surfaceH)
+	s2.HandleKey("3")
+	s2.HandleKey(".")
+	s2.HandleKey("1")
+	if s2.display.Text != "3.1" {
+		t.Fatalf("3.1: %q", s2.display.Text)
+	}
+}
+
+func TestHandleKeyUnknownReturnsFalse(t *testing.T) {
+	s := New(surfaceW, surfaceH)
+	if s.HandleKey("F1") {
+		t.Fatal("unknown key should return false")
+	}
+	if s.HandleKey("") {
+		t.Fatal("empty key should return false")
+	}
+}
+
+func TestHandleCharForwards(t *testing.T) {
+	s := New(surfaceW, surfaceH)
+	if !s.HandleChar("7") {
+		t.Fatal("HandleChar(7) should return true")
+	}
+	if s.display.Text != "7" {
+		t.Fatalf("after char 7: %q", s.display.Text)
+	}
+	if s.HandleChar("") {
+		t.Fatal("HandleChar empty should return false")
+	}
+}
+
 func TestPressDotAfterFreshOp(t *testing.T) {
 	// After 5 + . → display becomes "0.".
 	s := New(surfaceW, surfaceH)
