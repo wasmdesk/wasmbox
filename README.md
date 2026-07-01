@@ -20,20 +20,45 @@
 ---
 
 `wasmbox` is a self-contained browser demo: a **Wayland-inspired, single-instance
-compositor** with an **Openbox-style window-manager policy**, written entirely in
-**pure Ruby** and rendered to a `<canvas>` through the interpreter's interactive
-JS bridge. The Ruby program owns the desktop — it composites window surfaces,
-maintains the stacking order, applies focus and placement policy, draws minimal
-decorations, and runs its own `requestAnimationFrame` render loop.
+compositor** with an **Openbox-style window-manager policy** (Aqua-style + others
+selectable at boot), written entirely in **pure Ruby** and rendered to a `<canvas>`
+through the interpreter's interactive JS bridge. The Ruby program owns the desktop —
+it composites window surfaces, maintains the stacking order, applies focus and
+placement policy, draws minimal decorations, and runs its own
+`requestAnimationFrame` render loop.
 
 It runs in one WebAssembly instance of the pure-Go (CGO=0)
-[`rbgo`](https://github.com/go-embedded-ruby/ruby) interpreter, with `compositor.rb`
-**baked into the wasm binary** via `//go:embed` — there is no server-side code, no
-JavaScript application logic, and nothing fetched at runtime; the page is just a
-loader.
+[`rbgo`](https://github.com/go-embedded-ruby/ruby) interpreter, with the Ruby
+source (split across `compositor/*.rb`) **baked into the wasm binary** via
+`//go:embed` — there is no server-side code, no JavaScript application logic, and
+nothing fetched at runtime; the page is just a loader.
 It builds on `rbgo`'s `JS` bridge (a `JS` module plus `JS::Ref` handles that let
 Ruby reach the DOM and the Canvas 2D context, register event listeners, and
 schedule animation frames).
+
+### Pick a window decoration
+
+Wasmbox ships **16 registered decoration presets** (2 layouts × 7 GTK palettes,
+plus the 2 plain layouts). Pick one via a URL query param:
+
+```
+http://localhost:8080/                              # OpenboxFrame (default)
+http://localhost:8080/?frame=aqua                   # AquaFrame — subsumes wasmaqua
+http://localhost:8080/?frame=aqua-whitesur-light    # Aqua + WhiteSur ≈ macOS Big Sur
+http://localhost:8080/?frame=aqua-whitesur-dark     # ≈ Big Sur dark
+http://localhost:8080/?frame=openbox-juno           # Openbox + Juno teal palette
+http://localhost:8080/?frame=aqua-adwaita-{light,dark}
+http://localhost:8080/?frame=openbox-solarized-{light,dark}
+```
+
+Or run `wasmbox-serve -default-frame=NAME` to make a whole instance default to
+one preset (bare `/` 307-redirects to `/?frame=NAME`). The 16-entry registry
+lives in [`compositor/02_frame.rb`](compositor/02_frame.rb) — adding a new
+frame is one entry in `FrameRegistry::TABLE`.
+
+The sibling [`wasmdesk/wasmaqua`](https://github.com/wasmdesk/wasmaqua) repo is
+**archived** as of 2026-06-30 — its macOS-Aqua chrome is now the `AquaFrame`
+preset here.
 
 ## What it is
 
