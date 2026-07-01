@@ -33,6 +33,10 @@
 # Agent/CI test harness deps
 /test/node_modules/
 
+# Frame-matrix probe snapshot output — regenerated on every run,
+# useful for local eyeballing, not for the tree.
+/test/frame-matrix-out/
+
 # Taskfile internal cache (per-task input/output checksums for
 # `sources:` / `generates:` dependency tracking — local-only, no
 # value to anyone else).
