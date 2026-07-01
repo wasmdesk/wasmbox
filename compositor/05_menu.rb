@@ -106,6 +106,7 @@ module RootMenu
     "vscode"    => "VS Code",
     "loom"      => "Loom",
     "showcase"  => "Toolkit Showcase",
+    "calculator" => "Calculator",
   }.freeze
 
   # IDs the root menu intentionally OMITS from the Applications submenu. The

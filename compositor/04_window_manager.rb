@@ -57,6 +57,11 @@ class WindowManager
     # Statusbar). Acts as both a smoke test for the toolkit and a live API
     # reference users can poke from inside the compositor.
     "showcase"  => "clients/showcase/worker.js",
+    # Toolkit calculator: a small focused consumer of wasmdesk/toolkit
+    # (display Entry + 5×4 Grid of Buttons). Same wire protocol as every
+    # other client; validates the toolkit at tighter scope than the
+    # multi-tab showcase.
+    "calculator" => "clients/calculator/worker.js",
     # Bundled quake client (pure-Go Quake 1, from the sibling go-quake1 repo).
     # The wasm is huge (~190 MB) and may not be built locally, but the worker.js
     # is part of the wasmbox tree, so the descriptor is always safe — the worker
