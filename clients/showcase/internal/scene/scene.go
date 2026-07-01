@@ -41,6 +41,17 @@ type State struct {
 	// tests (Frame menu clicks become no-ops there — the tests still
 	// assert the menu shape).
 	setFrame func(name string)
+
+	// activeFrame is the showcase's local idea of "which Frame
+	// registry entry is currently active", used only to prefix the
+	// Frame menu items with "* " (matching the root-menu convention).
+	// Seeded from the page URL's ?frame= param at boot via
+	// SetActiveFrame, updated on every Frame-menu click. Not
+	// authoritative — if the user swaps the frame via the compositor's
+	// root menu, this local value drifts until the next Frame-menu
+	// interaction. Acceptable trade-off: "the marker is right 90 %
+	// of the time" beats "no marker at all".
+	activeFrame string
 	entry       *toolkit.Entry
 	textView    *toolkit.TextView
 	tree        *toolkit.TreeView
@@ -78,34 +89,26 @@ func New(w, h int) *State {
 	}
 	// Frame menu: one entry per compositor FrameRegistry name.
 	// Populated eagerly from the well-known 16 names (matches
-	// wasmbox/compositor/02_frame.rb FrameRegistry::TABLE). The
-	// Action calls the SetFrameSetter — a callback the main.go
-	// wires to the SDK's setFrame, which posts a set_frame wire
-	// message the compositor handles. If no setter is wired (native
-	// unit tests), the Action is a no-op so tests can still exercise
-	// the menu shape.
-	frameItems := make([]toolkit.MenuItem, 0, len(frameNames))
-	for _, n := range frameNames {
-		picked := n
-		frameItems = append(frameItems, toolkit.MenuItem{
-			Label: picked,
-			Action: func() {
-				if s.setFrame != nil {
-					s.setFrame(picked)
-				}
-			},
-		})
-	}
+	// wasmbox/compositor/02_frame.rb FrameRegistry::TABLE). Initial
+	// build uses no active marker; main.go calls SetActiveFrame after
+	// scene.New to seed the marker from the URL's ?frame= param
+	// (which is what actually drove the compositor's boot Frame pick).
+	// A placeholder Menu goes in the slot so the SetActiveFrame
+	// rebuild has a menu to overwrite.
 	s.menuBar = toolkit.NewMenuBar()
 	s.menuBar.Names = []string{"File", "Edit", "View", "Frame", "Help"}
 	s.menuBar.Menus = []*toolkit.Menu{
 		buildMenu([]toolkit.MenuItem{{Label: "New"}, {Label: "Open"}, {Separator: true}, {Label: "Quit"}}),
 		buildMenu([]toolkit.MenuItem{{Label: "Cut"}, {Label: "Copy"}, {Label: "Paste"}}),
 		buildMenu(themeItems),
-		buildMenu(frameItems),
+		buildMenu(nil), // placeholder — filled by SetActiveFrame below
 		buildMenu([]toolkit.MenuItem{{Label: "About"}}),
 	}
 	s.menuBar.SetBounds(toolkit.Rect{X: 0, Y: 0, W: w, H: toolkit.MenuBarH})
+	// Seed the Frame menu with no active marker (empty string ≠ any
+	// registered frame name → no "* " prefix). main.go overrides
+	// this at boot with the URL's ?frame= value.
+	s.SetActiveFrame("")
 
 	// Toolbar.
 	s.toolbar = toolkit.NewToolbar([]toolkit.ToolbarItem{
@@ -174,7 +177,7 @@ func New(w, h int) *State {
 	s.notebook.SetBounds(toolkit.Rect{X: 0, Y: bodyY, W: w, H: bodyH})
 
 	s.status = toolkit.NewStatusbar([]string{
-		"34 widgets", "100% cov", "theme: Default Light", "wasmdesk/toolkit",
+		"35 widgets", "100% cov", "theme: Default Light", "frame: openbox",
 	})
 	s.status.SetBounds(toolkit.Rect{X: 0, Y: h - statusH, W: w, H: statusH})
 
@@ -210,6 +213,40 @@ func buildMenu(items []toolkit.MenuItem) *toolkit.Menu {
 // (which posts a set_frame wire message to the compositor). Nil is
 // a valid value (native unit tests take the no-op path).
 func (s *State) SetFrameSetter(fn func(name string)) { s.setFrame = fn }
+
+// SetActiveFrame records the currently-active Frame name so the
+// Frame menu can mark it with "* " AND the status bar's frame
+// segment stays in sync. Called by main.go at boot with the URL's
+// ?frame= value (or "openbox" fallback). Also called on every
+// Frame-menu click. Rebuilds the Frame menu + updates status
+// segment[3] so the marker + readout paint on the next Draw.
+func (s *State) SetActiveFrame(name string) {
+	s.activeFrame = name
+	if s.status != nil {
+		s.status.SetSegment(3, "frame: "+name)
+	}
+	if s.menuBar == nil || len(s.menuBar.Menus) < 4 {
+		return
+	}
+	items := make([]toolkit.MenuItem, 0, len(frameNames))
+	for _, n := range frameNames {
+		picked := n
+		label := picked
+		if picked == s.activeFrame {
+			label = "* " + picked
+		}
+		items = append(items, toolkit.MenuItem{
+			Label: label,
+			Action: func() {
+				if s.setFrame != nil {
+					s.setFrame(picked)
+				}
+				s.SetActiveFrame(picked)
+			},
+		})
+	}
+	s.menuBar.Menus[3] = toolkit.NewMenu(items)
+}
 
 // frameNames mirrors the compositor's FrameRegistry::TABLE key order
 // (wasmbox/compositor/02_frame.rb). Kept in sync manually — a

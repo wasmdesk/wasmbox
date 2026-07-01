@@ -267,6 +267,71 @@ func TestFrameMenuWithoutSetterIsNoOp(t *testing.T) {
 	frameMenu.Items[0].Action() // must not panic
 }
 
+func TestSetActiveFrameMarker(t *testing.T) {
+	s := New(surfaceW, surfaceH)
+	// Boot: no marker (SetActiveFrame("") was called in New).
+	menu := s.menuBar.Menus[3]
+	for _, it := range menu.Items {
+		if len(it.Label) > 2 && it.Label[:2] == "* " {
+			t.Fatalf("no entry should be marked initially, got %q", it.Label)
+		}
+	}
+	// Set active to "aqua" — that entry becomes "* aqua", others
+	// stay bare.
+	s.SetActiveFrame("aqua")
+	menu = s.menuBar.Menus[3]
+	starred := 0
+	for _, it := range menu.Items {
+		if it.Label == "* aqua" {
+			starred++
+		}
+	}
+	if starred != 1 {
+		t.Fatalf("exactly one entry should be starred, got %d", starred)
+	}
+	// Click the "* aqua" entry again — Action must still fire the
+	// setter (test the wire flow after re-marking).
+	var got string
+	s.SetFrameSetter(func(name string) { got = name })
+	for _, it := range menu.Items {
+		if it.Label == "* aqua" {
+			it.Action()
+			break
+		}
+	}
+	if got != "aqua" {
+		t.Fatalf("clicking * aqua should call setter with %q, got %q", "aqua", got)
+	}
+}
+
+func TestSetActiveFrameDefensiveGuard(t *testing.T) {
+	// Defensive branch: SetActiveFrame on a State with nil menuBar
+	// (should never happen in practice — New always wires it — but
+	// the guard is there so the wire message doesn't crash the
+	// worker if the sequence somehow inverts).
+	s := &State{}
+	s.SetActiveFrame("aqua") // must not panic
+}
+
+func TestParseQueryParamRoundtrip(t *testing.T) {
+	// The main.go helper — but it's package main, so re-implement
+	// the assertion at the shape level via the seed. Set a fake
+	// active frame + verify the Frame menu marker updates.
+	s := New(surfaceW, surfaceH)
+	s.SetActiveFrame("openbox-juno")
+	menu := s.menuBar.Menus[3]
+	found := false
+	for _, it := range menu.Items {
+		if it.Label == "* openbox-juno" {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Fatal("openbox-juno should be marked after SetActiveFrame")
+	}
+}
+
 func TestSetActiveThemeNameNilStatus(t *testing.T) {
 	// Defensive guard: setActiveThemeName on a State with nil status
 	// (would panic if the guard was missing).

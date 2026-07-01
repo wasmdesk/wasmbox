@@ -10,10 +10,33 @@
 package main
 
 import (
+	"strings"
 	"syscall/js"
 
 	"github.com/wasmdesk/wasmbox/clients/showcase/internal/scene"
 )
+
+// parseQueryParam extracts a value from a "?a=1&b=2"-style query
+// string. Returns "" when the key is absent or the string is
+// malformed. Not a URL-decoder — just a splitter (values with
+// %-escapes come through raw, which is fine for the frame= use
+// case where the value is always a bare a-z-hyphen registry key).
+func parseQueryParam(query, key string) string {
+	q := strings.TrimPrefix(query, "?")
+	for _, pair := range strings.Split(q, "&") {
+		if pair == "" {
+			continue
+		}
+		eq := strings.IndexByte(pair, '=')
+		if eq < 0 {
+			continue
+		}
+		if pair[:eq] == key {
+			return pair[eq+1:]
+		}
+	}
+	return ""
+}
 
 func main() {
 	client := js.Global().Get("wasmboxClient")
@@ -41,6 +64,22 @@ func main() {
 	state.SetFrameSetter(func(name string) {
 		client.Call("setFrame", name)
 	})
+
+	// Seed the Frame menu's active marker from the page URL's
+	// ?frame= param — same source the compositor read at boot.
+	// Falls back to "openbox" when unset. Best-effort: if the URL
+	// or query API is unavailable in this worker context, skip
+	// (the menu just has no marker until the user clicks).
+	if loc := js.Global().Get("location"); !loc.IsUndefined() {
+		if search := loc.Get("search"); !search.IsUndefined() {
+			s := search.String()
+			frameName := parseQueryParam(s, "frame")
+			if frameName == "" {
+				frameName = "openbox"
+			}
+			state.SetActiveFrame(frameName)
+		}
+	}
 
 	render := func() {
 		scene.Render(state, local)
