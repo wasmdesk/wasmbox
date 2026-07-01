@@ -34,6 +34,14 @@ func main() {
 	local := make([]byte, 4*w*h)
 	state := scene.New(w, h)
 
+	// Wire the "swap compositor Frame" callback so the showcase's
+	// Frame menu can ask the compositor to re-decorate every window
+	// live. The SDK's setFrame method posts a set_frame wire message
+	// the WindowManager arm accepts; no client-side re-render needed.
+	state.SetFrameSetter(func(name string) {
+		client.Call("setFrame", name)
+	})
+
 	render := func() {
 		scene.Render(state, local)
 		js.CopyBytesToJS(pixels, local)

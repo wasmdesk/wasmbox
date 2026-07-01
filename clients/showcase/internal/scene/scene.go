@@ -35,6 +35,12 @@ type State struct {
 	radioA      *toolkit.RadioButton
 	radioB      *toolkit.RadioButton
 	dropdown    *toolkit.DropDown
+
+	// setFrame is the SDK-wired callback the Frame menu invokes to
+	// post a set_frame message to the compositor. Nil in native unit
+	// tests (Frame menu clicks become no-ops there — the tests still
+	// assert the menu shape).
+	setFrame func(name string)
 	entry       *toolkit.Entry
 	textView    *toolkit.TextView
 	tree        *toolkit.TreeView
@@ -70,12 +76,33 @@ func New(w, h int) *State {
 			},
 		})
 	}
+	// Frame menu: one entry per compositor FrameRegistry name.
+	// Populated eagerly from the well-known 16 names (matches
+	// wasmbox/compositor/02_frame.rb FrameRegistry::TABLE). The
+	// Action calls the SetFrameSetter — a callback the main.go
+	// wires to the SDK's setFrame, which posts a set_frame wire
+	// message the compositor handles. If no setter is wired (native
+	// unit tests), the Action is a no-op so tests can still exercise
+	// the menu shape.
+	frameItems := make([]toolkit.MenuItem, 0, len(frameNames))
+	for _, n := range frameNames {
+		picked := n
+		frameItems = append(frameItems, toolkit.MenuItem{
+			Label: picked,
+			Action: func() {
+				if s.setFrame != nil {
+					s.setFrame(picked)
+				}
+			},
+		})
+	}
 	s.menuBar = toolkit.NewMenuBar()
-	s.menuBar.Names = []string{"File", "Edit", "View", "Help"}
+	s.menuBar.Names = []string{"File", "Edit", "View", "Frame", "Help"}
 	s.menuBar.Menus = []*toolkit.Menu{
 		buildMenu([]toolkit.MenuItem{{Label: "New"}, {Label: "Open"}, {Separator: true}, {Label: "Quit"}}),
 		buildMenu([]toolkit.MenuItem{{Label: "Cut"}, {Label: "Copy"}, {Label: "Paste"}}),
 		buildMenu(themeItems),
+		buildMenu(frameItems),
 		buildMenu([]toolkit.MenuItem{{Label: "About"}}),
 	}
 	s.menuBar.SetBounds(toolkit.Rect{X: 0, Y: 0, W: w, H: toolkit.MenuBarH})
@@ -176,6 +203,29 @@ func New(w, h int) *State {
 
 func buildMenu(items []toolkit.MenuItem) *toolkit.Menu {
 	return toolkit.NewMenu(items)
+}
+
+// SetFrameSetter wires the callback the Frame-menu Actions invoke.
+// Called by main.go with a closure over the SDK's setFrame method
+// (which posts a set_frame wire message to the compositor). Nil is
+// a valid value (native unit tests take the no-op path).
+func (s *State) SetFrameSetter(fn func(name string)) { s.setFrame = fn }
+
+// frameNames mirrors the compositor's FrameRegistry::TABLE key order
+// (wasmbox/compositor/02_frame.rb). Kept in sync manually — a
+// mismatch causes a click on a missing name to be dropped by the
+// compositor's set_frame arm (:ignored result), no crash. Update
+// here when a new frame lands in the compositor.
+var frameNames = []string{
+	"openbox", "aqua",
+	"openbox-adwaita-light", "openbox-adwaita-dark",
+	"openbox-juno",
+	"openbox-whitesur-light", "openbox-whitesur-dark",
+	"openbox-solarized-light", "openbox-solarized-dark",
+	"aqua-adwaita-light", "aqua-adwaita-dark",
+	"aqua-juno",
+	"aqua-whitesur-light", "aqua-whitesur-dark",
+	"aqua-solarized-light", "aqua-solarized-dark",
 }
 
 // setActiveThemeName updates the status bar's theme segment. Called from

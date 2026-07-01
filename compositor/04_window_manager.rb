@@ -839,6 +839,18 @@ class WindowManager
       # skips notify_theme_changed on :ignored so the panel does not spin.
       changed = set_theme(msg[:name].to_s)
       changed.nil? ? :ignored : :theme_changed
+    when "set_frame"
+      # A client (typically the toolkit showcase) asks to swap the window-
+      # decoration Frame preset. Same effect as the root-menu Frame submenu
+      # entry: FrameRegistry.select the picked name IF it exists AND differs
+      # from current. Unknown name or already-active is :ignored. The
+      # compositor's per-frame render() picks up the new Frame.current
+      # on the next rAF tick — no re-blit or re-spawn needed.
+      name = msg[:name].to_s
+      return :ignored unless FrameRegistry.names.include?(name)
+      return :ignored if name == Frame.current_name
+      FrameRegistry.select(name)
+      :frame_changed
     when "set_lock_aspect"
       # A client (e.g. Quake) post-handshake declares an aspect-ratio lock for
       # the interactive resize grip. The compositor's resize_to then snaps

@@ -235,6 +235,38 @@ func TestViewMenuUpdatesStatusThemeSegment(t *testing.T) {
 	}
 }
 
+func TestFrameMenuInvokesSetter(t *testing.T) {
+	// The Frame menu (index 3 in the MenuBar) has one entry per known
+	// FrameRegistry name. Clicking an entry invokes the setFrame
+	// callback wired via SetFrameSetter — the SDK's setFrame method
+	// in production, a spy here.
+	s := New(surfaceW, surfaceH)
+	var got []string
+	s.SetFrameSetter(func(name string) { got = append(got, name) })
+	frameMenu := s.menuBar.Menus[3]
+	if len(frameMenu.Items) != len(frameNames) {
+		t.Fatalf("Frame menu items = %d, want %d", len(frameMenu.Items), len(frameNames))
+	}
+	// Click the 3rd entry (should be "openbox-adwaita-light").
+	frameMenu.Items[2].Action()
+	if len(got) != 1 || got[0] != "openbox-adwaita-light" {
+		t.Fatalf("setter called with %v; want [openbox-adwaita-light]", got)
+	}
+	// Click aqua (index 1).
+	frameMenu.Items[1].Action()
+	if len(got) != 2 || got[1] != "aqua" {
+		t.Fatalf("second click: %v", got)
+	}
+}
+
+func TestFrameMenuWithoutSetterIsNoOp(t *testing.T) {
+	// A scene built without SetFrameSetter (native unit tests) still
+	// has a Frame menu; clicking an item is a no-op.
+	s := New(surfaceW, surfaceH)
+	frameMenu := s.menuBar.Menus[3]
+	frameMenu.Items[0].Action() // must not panic
+}
+
 func TestSetActiveThemeNameNilStatus(t *testing.T) {
 	// Defensive guard: setActiveThemeName on a State with nil status
 	// (would panic if the guard was missing).

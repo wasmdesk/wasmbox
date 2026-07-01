@@ -258,6 +258,18 @@
       send({ type: "request_close", window_id: this.windowId });
     }
 
+    // Ask the compositor to swap the window-decoration Frame preset
+    // (the AquaFrame / OpenboxFrame / themed combos registered in
+    // wasmbox/compositor/02_frame.rb FrameRegistry). Same effect as
+    // the right-click root menu → Frame → <name> entry. Compositor
+    // replies :frame_changed on success, :ignored on unknown name /
+    // already-active. No client-side side-effects — the client keeps
+    // painting its body; only the compositor's chrome around it
+    // changes on the next rAF tick.
+    setFrame(name) {
+      send({ type: "set_frame", name: name });
+    }
+
     // Write a single RGBA pixel into the SAB at (x, y). Bounds-checked; OOB is
     // a no-op so naive clients can scribble freely.
     putPixel(x, y, r, gr, b, a) {

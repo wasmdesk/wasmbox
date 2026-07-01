@@ -1020,5 +1020,27 @@ assert_eq(Frame.current_name, "openbox-juno", "assign_current sets Frame.current
 # Reset to openbox so the marker check downstream stays deterministic.
 FrameRegistry.select("openbox")
 
+# ---- handle_client_message :set_frame arm ------------------------------
+# The showcase (and any future client) can post a set_frame message to
+# swap the compositor's Frame.current live. Same effect as the root-menu
+# Frame submenu.
+wmf2 = WindowManager.new
+FrameRegistry.select("openbox")
+res = wmf2.handle_client_message({ type: "set_frame", name: "aqua" })
+assert_eq(res, :frame_changed, "set_frame to a different valid name yields :frame_changed")
+assert_eq(Frame.current_name, "aqua", "set_frame swapped Frame.current_name")
+# Already-active name is :ignored (no needless work).
+res = wmf2.handle_client_message({ type: "set_frame", name: "aqua" })
+assert_eq(res, :ignored, "set_frame to already-active name is :ignored")
+# Unknown name is :ignored, current unchanged.
+res = wmf2.handle_client_message({ type: "set_frame", name: "no-such-frame" })
+assert_eq(res, :ignored, "set_frame with unknown name is :ignored")
+assert_eq(Frame.current_name, "aqua", "unknown set_frame leaves Frame.current_name untouched")
+# Missing name field: nil.to_s == "" which is not in FrameRegistry.names → :ignored.
+res = wmf2.handle_client_message({ type: "set_frame" })
+assert_eq(res, :ignored, "set_frame with missing name is :ignored")
+# Reset to openbox so downstream state is stable.
+FrameRegistry.select("openbox")
+
 puts "rbtest: ran all pure-WM assertions"
 `
