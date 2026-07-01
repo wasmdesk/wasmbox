@@ -133,6 +133,60 @@ func TestHandleMouseRoutes(t *testing.T) {
 	s.HandleMouse(sr.X+10, sr.Y+5)
 }
 
+func TestHandleKeyCtrlNCreatesDoc(t *testing.T) {
+	s := New(surfaceW, surfaceH)
+	before := len(s.docSet)
+	s.HandleKey("Ctrl+N")
+	if len(s.docSet) != before+1 {
+		t.Fatalf("Ctrl+N should create a doc; docSet %d → %d", before, len(s.docSet))
+	}
+	if s.activeIdx != before {
+		t.Fatalf("Ctrl+N should focus the new doc; activeIdx=%d, want %d", s.activeIdx, before)
+	}
+}
+
+func TestHandleKeyDocSwitchShortcuts(t *testing.T) {
+	s := New(surfaceW, surfaceH)
+	// Start at doc 0. Ctrl+PageDown → doc 1.
+	s.HandleKey("Ctrl+PageDown")
+	if s.activeIdx != 1 {
+		t.Fatalf("Ctrl+PageDown: activeIdx=%d, want 1", s.activeIdx)
+	}
+	// Ctrl+Tab → doc 0 (wraps past end since len=2).
+	s.HandleKey("Ctrl+Tab")
+	if s.activeIdx != 0 {
+		t.Fatalf("Ctrl+Tab wrap: activeIdx=%d, want 0", s.activeIdx)
+	}
+	// Ctrl+PageUp → last doc (wraps back from 0).
+	s.HandleKey("Ctrl+PageUp")
+	if s.activeIdx != len(s.docSet)-1 {
+		t.Fatalf("Ctrl+PageUp wrap: activeIdx=%d, want %d", s.activeIdx, len(s.docSet)-1)
+	}
+	// Ctrl+Shift+Tab: symmetric to PageUp.
+	s.HandleKey("Ctrl+Shift+Tab")
+	// Was at len-1, prev = len-2 = 0 for 2 docs.
+	if s.activeIdx != 0 {
+		t.Fatalf("Ctrl+Shift+Tab: activeIdx=%d, want 0", s.activeIdx)
+	}
+}
+
+func TestNextPrevDocIdxWrap(t *testing.T) {
+	// n=0 defensive branches.
+	if got := nextDocIdx(3, 0); got != 0 {
+		t.Fatalf("nextDocIdx(3, 0) = %d, want 0", got)
+	}
+	if got := prevDocIdx(3, 0); got != 0 {
+		t.Fatalf("prevDocIdx(3, 0) = %d, want 0", got)
+	}
+	// Normal wrap.
+	if got := nextDocIdx(2, 3); got != 0 {
+		t.Fatalf("nextDocIdx(2, 3) = %d, want 0 (wrap)", got)
+	}
+	if got := prevDocIdx(0, 3); got != 2 {
+		t.Fatalf("prevDocIdx(0, 3) = %d, want 2 (wrap)", got)
+	}
+}
+
 func TestHandleKeyRoutesToEditor(t *testing.T) {
 	s := New(surfaceW, surfaceH)
 	// Place cursor mid-buffer so Backspace actually deletes something.

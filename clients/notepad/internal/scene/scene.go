@@ -141,14 +141,54 @@ func (s *State) HandleMouse(x, y int) bool {
 	return true
 }
 
-// HandleKey routes to the editor when focused. Ctrl+S = save.
+// HandleKey routes to the editor when focused. Recognises the app's
+// menu-bar shortcuts before falling through to the editor.
+//
+//	Ctrl+N   → new doc
+//	Ctrl+S   → save current doc
+//	Ctrl+PageDown / Ctrl+Tab      → next doc (wraps)
+//	Ctrl+PageUp   / Ctrl+Shift+Tab → previous doc (wraps)
+//
+// Anything else forwards to the editor's own key dispatch.
 func (s *State) HandleKey(code string) bool {
-	if code == "Ctrl+S" {
+	switch code {
+	case "Ctrl+N":
+		s.newDoc()
+		return true
+	case "Ctrl+S":
 		s.saveDoc()
+		return true
+	case "Ctrl+PageDown", "Ctrl+Tab":
+		s.switchDoc(nextDocIdx(s.activeIdx, len(s.docSet)))
+		return true
+	case "Ctrl+PageUp", "Ctrl+Shift+Tab":
+		s.switchDoc(prevDocIdx(s.activeIdx, len(s.docSet)))
 		return true
 	}
 	s.editor.OnEvent(toolkit.Event{Kind: toolkit.EventKeyDown, Code: code})
 	return true
+}
+
+func nextDocIdx(cur, n int) int {
+	if n <= 0 {
+		return 0
+	}
+	i := cur + 1
+	if i >= n {
+		i = 0
+	}
+	return i
+}
+
+func prevDocIdx(cur, n int) int {
+	if n <= 0 {
+		return 0
+	}
+	i := cur - 1
+	if i < 0 {
+		i = n - 1
+	}
+	return i
 }
 
 // HandleChar forwards printable input to the editor.
