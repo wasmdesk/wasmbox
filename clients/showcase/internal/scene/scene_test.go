@@ -214,6 +214,34 @@ func TestThemesFromFSSkipsNonCSSAndSubdirs(t *testing.T) {
 	}
 }
 
+func TestViewMenuUpdatesStatusThemeSegment(t *testing.T) {
+	// Clicking a View-menu entry must swap BOTH scene.theme AND the
+	// status bar's theme segment. Poor-man's URL-sync — the user sees
+	// which palette is live without needing devtools.
+	s := New(surfaceW, surfaceH)
+	viewMenu := s.menuBar.Menus[2]
+	// Item[1] is Default Dark (see Themes() order).
+	viewMenu.Items[1].Action()
+	if got := s.status.Segments[2]; got != "theme: Default Dark" {
+		t.Fatalf("status[2] after click Default Dark: want %q, got %q",
+			"theme: Default Dark", got)
+	}
+	// Item[2] is Adwaita Dark (alphabetic .css order → adwaita-dark
+	// before adwaita-light).
+	viewMenu.Items[2].Action()
+	if got := s.status.Segments[2]; got != "theme: Adwaita Dark" {
+		t.Fatalf("status[2] after click Adwaita Dark: want %q, got %q",
+			"theme: Adwaita Dark", got)
+	}
+}
+
+func TestSetActiveThemeNameNilStatus(t *testing.T) {
+	// Defensive guard: setActiveThemeName on a State with nil status
+	// (would panic if the guard was missing).
+	s := &State{}
+	s.setActiveThemeName("won't panic")
+}
+
 func TestPrettify(t *testing.T) {
 	cases := []struct{ in, want string }{
 		{"adwaita-light.css", "Adwaita Light"},

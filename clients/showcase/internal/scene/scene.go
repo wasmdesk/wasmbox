@@ -52,13 +52,22 @@ func New(w, h int) *State {
 
 	// MenuBar — the View menu is built from the embedded GTK themes so
 	// the user can flip palettes live (validates the toolkit's
-	// LoadGTKTheme end-to-end).
+	// LoadGTKTheme end-to-end). Each Action also updates the status
+	// bar's "theme:" segment so the user always sees which palette is
+	// active (a poor man's URL-sync — the wire protocol has no set-URL
+	// message + a full worker→compositor→main-thread pipe was
+	// disproportionate for this v0.5 iteration; the status readout
+	// makes the current theme trivially copy-pasteable if the user
+	// wants to bookmark the wasmbox launch URL by hand).
 	themeItems := make([]toolkit.MenuItem, 0, 8)
 	for _, t := range Themes() {
 		picked := t // capture loop var
 		themeItems = append(themeItems, toolkit.MenuItem{
-			Label:  picked.Name,
-			Action: func() { s.theme = picked.Theme },
+			Label: picked.Name,
+			Action: func() {
+				s.theme = picked.Theme
+				s.setActiveThemeName(picked.Name)
+			},
 		})
 	}
 	s.menuBar = toolkit.NewMenuBar()
@@ -138,7 +147,7 @@ func New(w, h int) *State {
 	s.notebook.SetBounds(toolkit.Rect{X: 0, Y: bodyY, W: w, H: bodyH})
 
 	s.status = toolkit.NewStatusbar([]string{
-		"34 widgets", "100% cov", "v0.4", "wasmdesk/toolkit",
+		"34 widgets", "100% cov", "theme: Default Light", "wasmdesk/toolkit",
 	})
 	s.status.SetBounds(toolkit.Rect{X: 0, Y: h - statusH, W: w, H: statusH})
 
@@ -167,6 +176,18 @@ func New(w, h int) *State {
 
 func buildMenu(items []toolkit.MenuItem) *toolkit.Menu {
 	return toolkit.NewMenu(items)
+}
+
+// setActiveThemeName updates the status bar's theme segment. Called from
+// every View-menu Action so the user always sees which palette is live.
+// Segment index 2 is the theme slot (see New()); the status bar is
+// created before the menu Actions run, so this assumes s.status is
+// already wired.
+func (s *State) setActiveThemeName(name string) {
+	if s.status == nil {
+		return
+	}
+	s.status.SetSegment(2, "theme: "+name)
 }
 
 // Render paints the full scene into buf (a 4*W*H RGBA byte slice).
