@@ -738,19 +738,21 @@ labels = root.entries.map { |e| e[:label] }
 assert_eq(labels[0], "Applications", "top-level[0] = Applications")
 assert_eq(labels[1], "Workspaces",   "top-level[1] = Workspaces")
 assert_eq(labels[2], "Theme",        "top-level[2] = Theme")
-# Top-level row 3 is the separator (no label).
-assert_eq(root.entries[3][:separator], true, "top-level[3] is a separator")
-assert_eq(labels[4], "About wasmbox", "top-level[4] = About wasmbox")
-assert_eq(labels[5], "Reload",        "top-level[5] = Reload")
-assert_eq(labels[6], "Exit",          "top-level[6] = Exit")
-# Applications + Workspaces + Theme carry a submenu.
+assert_eq(labels[3], "Frame",        "top-level[3] = Frame")
+# Top-level row 4 is the separator (no label).
+assert_eq(root.entries[4][:separator], true, "top-level[4] is a separator")
+assert_eq(labels[5], "About wasmbox", "top-level[5] = About wasmbox")
+assert_eq(labels[6], "Reload",        "top-level[6] = Reload")
+assert_eq(labels[7], "Exit",          "top-level[7] = Exit")
+# Applications + Workspaces + Theme + Frame each carry a submenu.
 assert(root.entries[0][:submenu].is_a?(Menu), "Applications carries a submenu")
 assert(root.entries[1][:submenu].is_a?(Menu), "Workspaces carries a submenu")
 assert(root.entries[2][:submenu].is_a?(Menu), "Theme carries a submenu")
+assert(root.entries[3][:submenu].is_a?(Menu), "Frame carries a submenu")
 # About/Reload/Exit each carry a :noop action (dismiss-only in v0).
-assert_eq(root.entries[4][:action][0], :noop, "About is a :noop action")
-assert_eq(root.entries[5][:action][0], :noop, "Reload is a :noop action")
-assert_eq(root.entries[6][:action][0], :noop, "Exit is a :noop action")
+assert_eq(root.entries[5][:action][0], :noop, "About is a :noop action")
+assert_eq(root.entries[6][:action][0], :noop, "Reload is a :noop action")
+assert_eq(root.entries[7][:action][0], :noop, "Exit is a :noop action")
 
 # ---- RootMenu.build: Applications submenu lists LAUNCHABLE -----------
 apps = root.entries[0][:submenu]
@@ -988,6 +990,35 @@ assert(!ofc.has_maximize?, "OpenboxFrame has no maximize button")
 assert(afc.has_maximize?,  "AquaFrame has the maximize button")
 # 16 frame combos exposed via the registry (2 plain + 14 themed).
 assert_eq(FrameRegistry.names.length, 16, "FrameRegistry exposes 16 frames")
+
+# ---- RootMenu Frame submenu + FrameRegistry.select ----------------------
+# Frame submenu carries one entry per registry name, in registry order.
+FrameRegistry.select("openbox")
+frame_sub = root.entries[3][:submenu]
+assert_eq(frame_sub.entries.length, FrameRegistry.names.length,
+          "Frame submenu has one entry per FrameRegistry name")
+# Every entry's action is [:frame, "<name>"] with a real registry name.
+frame_sub.entries.each do |e|
+  assert_eq(e[:action][0], :frame, "Frame entry action[0] = :frame")
+  assert(FrameRegistry.names.include?(e[:action][1]), "Frame action id is a known registry name")
+end
+# Active marker: the entry matching Frame.current_name is prefixed with "* ".
+active_labels = frame_sub.entries.map { |e| e[:label] }
+assert(active_labels.include?("* openbox"), "active Frame entry marked with '* '")
+assert(active_labels.include?("aqua"),      "inactive Frame entry has no '* '")
+# Switch via FrameRegistry.select + rebuild — marker follows.
+FrameRegistry.select("aqua")
+assert_eq(Frame.current_name, "aqua", "select updated Frame.current_name")
+assert(Frame.current.is_a?(AquaFrame), "select swapped Frame.current instance")
+sub2 = RootMenu.build_frames
+labels2 = sub2.entries.map { |e| e[:label] }
+assert(labels2.include?("* aqua"), "active marker follows after select")
+assert(labels2.include?("openbox"), "previously-active entry now unmarked")
+# Assign_current path (direct, without FrameRegistry) also updates the name.
+Frame.assign_current("openbox-juno", ThemedOpenboxFrame.new(PALETTES::JUNO))
+assert_eq(Frame.current_name, "openbox-juno", "assign_current sets Frame.current_name")
+# Reset to openbox so the marker check downstream stays deterministic.
+FrameRegistry.select("openbox")
 
 puts "rbtest: ran all pure-WM assertions"
 `

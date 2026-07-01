@@ -838,6 +838,17 @@ class Compositor
       # the already-active name is dropped (set_theme returns nil).
       changed = @wm.set_theme(arg.to_s)
       notify_theme_changed if changed
+    when :frame
+      # Root-menu Frame entry clicked. Swap Frame.current + repaint —
+      # every window's *_rect delegates to Frame.current so the new
+      # decoration appears on the next rAF tick (no client cooperation
+      # needed; Frame is purely compositor-side). Unknown names fall
+      # back to OpenboxFrame via FrameRegistry.select. A URL reload is
+      # NOT needed — this is a pure Ruby swap.
+      name = arg.to_s
+      if FrameRegistry.names.include?(name) && name != Frame.current_name
+        FrameRegistry.select(name)
+      end
     when :focus
       win = @wm.find(arg.to_i)
       if win

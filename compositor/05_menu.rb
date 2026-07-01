@@ -114,12 +114,14 @@ module RootMenu
   # demo, not a user-facing app.
   HIDDEN = ["hello-oci"].freeze
 
-  # Compose the apps + workspaces + themes submenus and the top-level menu.
+  # Compose the apps + workspaces + themes + frames submenus and the
+  # top-level menu.
   def self.build(wm)
     Menu.new([
       { label: "Applications", submenu: build_apps(wm) },
       { label: "Workspaces",   submenu: build_workspaces(wm) },
       { label: "Theme",        submenu: build_themes(wm) },
+      { label: "Frame",        submenu: build_frames },
       { separator: true },
       { label: "About wasmbox", action: [:noop, "about"] },
       { label: "Reload",        action: [:noop, "reload"] },
@@ -171,6 +173,21 @@ module RootMenu
     wm.theme_names.each do |name|
       label = (name == wm.active_theme) ? "* #{name}" : name
       rows << { label: label, action: [:theme, name] }
+    end
+    Menu.new(rows)
+  end
+
+  # Build the Frame submenu — one entry per FrameRegistry name (16 as of
+  # 2026-06-30: 2 plain layouts + 14 layout×palette combos). The active
+  # frame is prefixed with "* " so the user can see which one is live.
+  # Click action is [:frame, "<name>"] — dispatch_menu_action swaps
+  # Frame.current + repaints on the next rAF tick.
+  def self.build_frames
+    rows = []
+    active = Frame.current_name
+    FrameRegistry.names.each do |name|
+      label = (name == active) ? "* #{name}" : name
+      rows << { label: label, action: [:frame, name] }
     end
     Menu.new(rows)
   end

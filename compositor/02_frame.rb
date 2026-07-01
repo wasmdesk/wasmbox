@@ -2,10 +2,32 @@
 class Frame
   # The default frame (overridden by the boot wire).
   @@current = nil
+  # The FrameRegistry name that built the current frame. Used by the
+  # root-menu Frame submenu to mark the active entry with "* ". Nil
+  # until FrameRegistry[] or a manual assign_current call sets it.
+  @@current_name = nil
   def self.current
     @@current ||= OpenboxFrame.new
   end
   def self.current=(c) ; @@current = c ; end
+  # Named-set helper: swap the current frame + remember which registry
+  # name built it. Used by FrameRegistry[] and by the root-menu :frame
+  # dispatch. Direct Frame.current= callers stay compatible — they just
+  # leave @@current_name unset (falls back to the class-name heuristic).
+  def self.assign_current(name, instance)
+    @@current = instance
+    @@current_name = name.to_s
+    instance
+  end
+  def self.current_name
+    return @@current_name unless @@current_name.nil?
+    # Fallback: infer from the class name of whichever instance is set.
+    # "OpenboxFrame" -> "openbox", "AquaFrame" -> "aqua".
+    cls = self.current.class.name.to_s
+    return "openbox" if cls == "OpenboxFrame"
+    return "aqua"    if cls == "AquaFrame"
+    cls
+  end
 
   # The window-geometry hooks. Default impls reuse Theme:: constants so a
   # chrome that wants the Openbox geometry can just inherit OpenboxFrame.
@@ -450,6 +472,13 @@ module FrameRegistry
   def self.[](name)
     builder = TABLE[name.to_s]
     builder ? builder.call : OpenboxFrame.new
+  end
+  # Convenience wrapper: build the named frame + register it as
+  # Frame.current under that name (so Frame.current_name returns the
+  # registry key + the root-menu Frame submenu can mark the active
+  # entry with "* "). Boot code + the :frame dispatch use this.
+  def self.select(name)
+    Frame.assign_current(name, self[name])
   end
   def self.names ; TABLE.keys ; end
 end

@@ -1,10 +1,11 @@
-# query param ?chrome=aqua, or the WASMBOX_FRAME env passed via the page
+# query param ?frame=aqua, or the WASMBOX_FRAME env passed via the page
 # bootstrap). Unknown names fall back to OpenboxFrame — never break the
-# default.
-chrome_name = JS.global.get("WASMBOX_FRAME").to_s
-chrome_name = "openbox" if chrome_name.nil? || chrome_name.empty? || chrome_name == "undefined"
-Frame.current = FrameRegistry[chrome_name]
-JS.log("rbgo compositor: chrome=#{chrome_name}")
+# default. FrameRegistry.select registers the name on Frame.current_name
+# so the root-menu Frame submenu can mark the active entry with "* ".
+frame_name = JS.global.get("WASMBOX_FRAME").to_s
+frame_name = "openbox" if frame_name.nil? || frame_name.empty? || frame_name == "undefined"
+FrameRegistry.select(frame_name)
+JS.log("rbgo compositor: frame=#{frame_name}")
 
 wm = WindowManager.new
 comp = Compositor.new(wm)
