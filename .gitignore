@@ -11,6 +11,7 @@
 /clients/code/code.wasm
 /clients/showcase/showcase.wasm
 /clients/calculator/calculator.wasm
+/clients/notepad/notepad.wasm
 /bin/
 # Stray binaries from `go build` in the cmd/serve dir (Taskfile uses
 # bin/wasmbox-serve; this catches accidental top-level builds).

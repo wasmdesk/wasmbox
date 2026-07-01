@@ -45,7 +45,7 @@ tasks:
 
   build:
     desc: Build wasmbox.wasm + hello + dock + terminal + files + code clients + copy wasm_exec.js
-    deps: [build:compositor, build:hello, build:dock, build:terminal, build:files, build:code, build:showcase, build:calculator, build:serve]
+    deps: [build:compositor, build:hello, build:dock, build:terminal, build:files, build:code, build:showcase, build:calculator, build:notepad, build:serve]
 
   build:all:
     desc: Build everything incl. the external go-quake1 + wasmdock clients
@@ -230,6 +230,18 @@ tasks:
       - go build -o clients/calculator/calculator.wasm ./clients/calculator
     generates:
       - clients/calculator/calculator.wasm
+
+  build:notepad:
+    desc: Build the toolkit-notepad external client (clients/notepad/notepad.wasm)
+    env:
+      GOWORK: "off"
+      GOOS: js
+      GOARCH: wasm
+      CGO_ENABLED: "0"
+    cmds:
+      - go build -o clients/notepad/notepad.wasm ./clients/notepad
+    generates:
+      - clients/notepad/notepad.wasm
 
   build:terminal:
     desc: Build the terminal placeholder external client (clients/terminal/terminal.wasm)

@@ -62,6 +62,10 @@ class WindowManager
     # other client; validates the toolkit at tighter scope than the
     # multi-tab showcase.
     "calculator" => "clients/calculator/worker.js",
+    # Toolkit notepad: multi-doc plain-text editor built on TextView +
+    # ListBox + Toolbar + Notification. A broader toolkit consumer
+    # than the calculator (7 widget families vs 2).
+    "notepad"    => "clients/notepad/worker.js",
     # Bundled quake client (pure-Go Quake 1, from the sibling go-quake1 repo).
     # The wasm is huge (~190 MB) and may not be built locally, but the worker.js
     # is part of the wasmbox tree, so the descriptor is always safe — the worker

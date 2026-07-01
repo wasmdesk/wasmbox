@@ -107,6 +107,7 @@ module RootMenu
     "loom"      => "Loom",
     "showcase"  => "Toolkit Showcase",
     "calculator" => "Calculator",
+    "notepad"    => "Notepad",
   }.freeze
 
   # IDs the root menu intentionally OMITS from the Applications submenu. The
