@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: BSD-3-Clause
 //
 // Package scene renders the Notepad — a multi-doc plain-text editor
-// composed from the wasmdesk/toolkit widgets. Layout (top to bottom):
+// composed from the go-widgets/toolkit widgets. Layout (top to bottom):
 //
 //   +--------------------------------------------------+
 //   | Toolbar   [N] [O] [S]  [C] [X] [V]  [?]           | ← DrawIcon* helpers
@@ -25,7 +25,7 @@ package scene
 import (
 	"strconv"
 
-	"github.com/wasmdesk/toolkit"
+	"github.com/go-widgets/toolkit"
 )
 
 // Doc is one open document. Content persists via TextView.Text() when

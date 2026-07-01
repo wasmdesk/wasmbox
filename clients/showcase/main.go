@@ -1,7 +1,7 @@
 // Command showcase is the wasmdesk/toolkit reference client: a single
 // wasmbox window holding a MenuBar + Toolbar + Notebook of tabs, each
 // tab exercising a different widget family from
-// github.com/wasmdesk/toolkit. Acts as both a smoke test for the
+// github.com/go-widgets/toolkit. Acts as both a smoke test for the
 // toolkit and a live API reference users can poke from inside the
 // wasmdesk compositor.
 //

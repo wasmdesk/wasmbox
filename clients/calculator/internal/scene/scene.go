@@ -12,7 +12,7 @@ package scene
 import (
 	"strconv"
 
-	"github.com/wasmdesk/toolkit"
+	"github.com/go-widgets/toolkit"
 )
 
 // State bundles every widget + the calculator's arithmetic model.

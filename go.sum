@@ -36,6 +36,8 @@ github.com/go-ruby-regexp/regexp v0.0.0-20260622075631-3a277cf71b81 h1:821uMDal5
 github.com/go-ruby-regexp/regexp v0.0.0-20260622075631-3a277cf71b81/go.mod h1:+0nK2X+aCPMO91bPMM/DT1OFUIzFQeoTPGkkOR3kd84=
 github.com/go-task/slim-sprig/v3 v3.0.0 h1:sUs3vkvUymDpBKi3qH1YSqBQk9+9D/8M2mN1vB6EwHI=
 github.com/go-task/slim-sprig/v3 v3.0.0/go.mod h1:W848ghGpv3Qj3dhTPRyJypKRiqCdHZiAzKg9hl15HA8=
+github.com/go-widgets/toolkit v0.0.0-20260701135849-b3ab9e0ca4c0 h1:govU/5/F5ru+j4cllK4KtilNjnNTrTV9EiRT/kmQrgY=
+github.com/go-widgets/toolkit v0.0.0-20260701135849-b3ab9e0ca4c0/go.mod h1:iQoXD6OJxzhKr9TmfcA5rNgEByqpaOLG5Ib9gCNaijk=
 github.com/google/go-cmp v0.7.0 h1:wk8382ETsv4JYUZwIsn6YpYiWiBsYLSJiTsyBybVuN8=
 github.com/google/go-cmp v0.7.0/go.mod h1:pXiqmnSA92OHEEa9HXL2W4E7lf9JzCmGVUdgjX3N/iU=
 github.com/google/pprof v0.0.0-20260402051712-545e8a4df936 h1:EwtI+Al+DeppwYX2oXJCETMO23COyaKGP6fHVpkpWpg=
@@ -44,12 +46,6 @@ github.com/onsi/ginkgo/v2 v2.31.0 h1:GtuJos5DFUV9EerYJo8RhYxosYNGvOdDE5haKq6Grfs
 github.com/onsi/ginkgo/v2 v2.31.0/go.mod h1:+aXOY+vzZ5mu2iI2HpTZUPmM//oQfsNFX6gU9kNcA44=
 github.com/onsi/gomega v1.42.0 h1:CJby8u36xb7v34W78F8WKvqTQP7PCMIPB78IVDB73l4=
 github.com/onsi/gomega v1.42.0/go.mod h1:M/Uqpu/8qTjtzCLUA2zJHX9Iilrau25x1PdoSRbWh5A=
-github.com/wasmdesk/toolkit v0.0.0-20260630153034-3f5966623b5d h1:YzxCdX73TZ43Y1JvTVLJlSpzpqz4ikbeicHymoRAPa0=
-github.com/wasmdesk/toolkit v0.0.0-20260630153034-3f5966623b5d/go.mod h1:rLQUCs2vmLF2EMJ4L6iQ5hV3pCIek/9BTyNWVDSjfRY=
-github.com/wasmdesk/toolkit v0.0.0-20260630163915-73d3612d6d4e h1:ry9bniEGDQYSEj5WfzAmCpej/VWq0rUfPytowUUe0KI=
-github.com/wasmdesk/toolkit v0.0.0-20260630163915-73d3612d6d4e/go.mod h1:rLQUCs2vmLF2EMJ4L6iQ5hV3pCIek/9BTyNWVDSjfRY=
-github.com/wasmdesk/toolkit v0.0.0-20260701105020-5f68090aaa61 h1:qiH0IGQ1iXcQPfB+yB0rxbdMIm5WbGePc6bQHkeG3b4=
-github.com/wasmdesk/toolkit v0.0.0-20260701105020-5f68090aaa61/go.mod h1:rLQUCs2vmLF2EMJ4L6iQ5hV3pCIek/9BTyNWVDSjfRY=
 go.yaml.in/yaml/v3 v3.0.4 h1:tfq32ie2Jv2UxXFdLJdh3jXuOzWiL1fo0bu/FbuKpbc=
 go.yaml.in/yaml/v3 v3.0.4/go.mod h1:DhzuOOF2ATzADvBadXxruRBLzYTpT36CKvDb3+aBEFg=
 golang.org/x/mod v0.37.0 h1:vF1DjpVEshcIqoEaauuHebaLk1O1forxjxBaVn884JQ=

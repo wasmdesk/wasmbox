@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: BSD-3-Clause
 //
-// Package scene renders the wasmdesk/toolkit showcase: one window holding
+// Package scene renders the go-widgets/toolkit showcase: one window holding
 // a MenuBar + Toolbar + a Notebook of tabs, each tab exercising a
 // different widget family. The scene's only purpose is to drive the
 // toolkit end-to-end in production conditions — the wasm main below
@@ -11,7 +11,7 @@
 package scene
 
 import (
-	"github.com/wasmdesk/toolkit"
+	"github.com/go-widgets/toolkit"
 )
 
 // State is the showcase model. The toolkit composition lives here so

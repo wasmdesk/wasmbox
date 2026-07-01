@@ -6,7 +6,7 @@ import (
 	"testing"
 	"testing/fstest"
 
-	"github.com/wasmdesk/toolkit"
+	"github.com/go-widgets/toolkit"
 )
 
 const surfaceW = 480

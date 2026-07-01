@@ -16,7 +16,7 @@ import (
 	"sort"
 	"strings"
 
-	"github.com/wasmdesk/toolkit"
+	"github.com/go-widgets/toolkit"
 )
 
 //go:embed themes/*.css

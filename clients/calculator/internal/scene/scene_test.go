@@ -5,7 +5,7 @@ package scene
 import (
 	"testing"
 
-	"github.com/wasmdesk/toolkit"
+	"github.com/go-widgets/toolkit"
 )
 
 const surfaceW = 260
