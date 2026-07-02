@@ -238,6 +238,27 @@ jobs:
         working-directory: test
         run: node probe-wasmdock-fluxbox.mjs
 
+      - name: Run OCIAppsLoader unit test (parse/manifest/blob-fallback/digest)
+        working-directory: test
+        run: node ociapps-loader.test.mjs
+
+      - name: Run headless spawn-from-OCI probe (canned /v2 manifest + blobs)
+        working-directory: test
+        env:
+          WASMBOX_BASE_URL: "http://127.0.0.1:8137"
+        run: node probe-spawn-from-oci.mjs
+
+      # NOTE: the Quake saved-window-size probe (test/probe-quake-saved-size.mjs)
+      # is intentionally NOT wired here yet. It builds the client from the
+      # public go-quake1/engine sibling in asset-less synthbsp mode (no
+      # copyrighted pak needed), but it asserts the engine renders the SAB at
+      # the SAVED window size -- a fix that currently lives only in unpushed
+      # engine WIP. On public go-quake1/engine main the engine still renders at
+      # the old hardcoded 320x240, so the probe would fail. Enable it (checkout
+      # go-quake1/engine -> build quake.wasm -> run the probe, AFTER the other
+      # probes since autoSpawnIfPresent spawns Quake once the wasm exists) once
+      # that saved-size fix lands on engine main.
+
       - name: Stop the server
         if: always()
         run: |

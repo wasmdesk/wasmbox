@@ -9,12 +9,12 @@
 //     auto-spawn at the default 800x600 and the worker console should
 //     report "fb=800x600 source=default". The compositor's persisted
 //     layout record for "quake (wasm)" should also be 800x600.
-//   PASS 2 -- resize the Quake window to 900x700 (drag the grip), let
-//     the compositor persist the new layout, then RELOAD the page. On
-//     reload, the worker should read 900x700 from localStorage,
-//     publish it on the globals, and the Go side should log
-//     "wasmbox surface=900x700" -- proof the engine renders natively
-//     at the saved dim.
+//   PASS 2 -- resize the Quake window by dragging the grip toward 900x700.
+//     The surface is aspect-locked to 4:3, so it settles at 900x675; the
+//     compositor persists THAT, then RELOAD the page. On reload the worker
+//     should read 900x675 from localStorage, publish it on the globals, and
+//     the Go side should log "wasmbox surface=900x675" -- proof the engine
+//     renders natively at the saved dim.
 //
 // Output:
 //   * /tmp/wasmbox-quake-saved-size.png         -- post-reload viewport
@@ -100,11 +100,14 @@ expect(sawSurface800, "engine logs wasmbox surface=800x600");
 
 await page.screenshot({ path: "/tmp/wasmbox-quake-saved-size-pass1.png", fullPage: false });
 
-// --- Resize the Quake window to 900x700 via the grip ----------------------
-console.log("== resizing Quake window to ~900x700 ==");
-const targetW = 900, targetH = 700;
+// --- Resize the Quake window to ~900 wide via the grip --------------------
+// The Quake surface is aspect-locked to 4:3, so we drag toward 900x700 but
+// the compositor drives the width to ~900 and snaps the height to the 4:3
+// companion (round(900 * 3/4) = 675) rather than the raw dragged 700.
+console.log("== resizing Quake window toward 900 wide (4:3-locked) ==");
+const targetW = 900, dragH = 700;
 const dx = targetW - rect.w;
-const dy = targetH - rect.h;
+const dy = dragH - rect.h;
 const gripX = rect.x + rect.w - 4;
 const gripY = rect.y + rect.h - 4;
 await page.mouse.move(gripX, gripY);
@@ -116,10 +119,12 @@ await wait(1500);
 
 const rectAfterResize = await quakeRect();
 console.log("post-resize rect:", JSON.stringify(rectAfterResize));
+// Height follows the 4:3 lock off the achieved width, not the dragged 700.
+const expectH = rectAfterResize ? Math.round(rectAfterResize.w * 3 / 4) : 0;
 expect(rectAfterResize && Math.abs(rectAfterResize.w - targetW) <= 6,
   `resized width ~= ${targetW} (got ${rectAfterResize ? rectAfterResize.w : "?"})`);
-expect(rectAfterResize && Math.abs(rectAfterResize.h - targetH) <= 6,
-  `resized height ~= ${targetH} (got ${rectAfterResize ? rectAfterResize.h : "?"})`);
+expect(rectAfterResize && Math.abs(rectAfterResize.h - expectH) <= 6,
+  `resized height 4:3-locked ~= ${expectH} (got ${rectAfterResize ? rectAfterResize.h : "?"})`);
 
 // Capture the saved size so PASS 2 can compare apples to apples.
 const savedW = rectAfterResize.w;

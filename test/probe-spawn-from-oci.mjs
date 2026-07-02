@@ -117,18 +117,19 @@ const blobByDigest = new Map([
 
 try {
   const ctx = await browser.newContext();
-  // The OCI loader inside the compositor worker calls fetch() against
-  // http://127.0.0.1:5000/v2/hello/manifests/test-canned + .../blobs/<digest>.
-  // Intercept those, return canned bytes. context.route catches both
-  // main-thread + worker requests in Chromium.
-  await ctx.route(/http:\/\/127\.0\.0\.1:5000\/v2\/hello\/manifests\/.*/, async (route) => {
+  // The OCI loader inside the compositor worker calls fetch() against a
+  // /v2/hello/manifests/test-canned + .../blobs/<digest> endpoint. It resolves
+  // these against a same-origin /v2 mirror (the page origin), so we match the
+  // /v2 path on ANY origin rather than hardcoding a registry port. context.route
+  // catches both main-thread + worker requests in Chromium.
+  await ctx.route(/\/v2\/hello\/manifests\/.*/, async (route) => {
     await route.fulfill({
       status: 200,
       headers: { "Content-Type": "application/vnd.oci.image.manifest.v1+json" },
       body: Buffer.from(cannedManifestBody),
     });
   });
-  await ctx.route(/http:\/\/127\.0\.0\.1:5000\/v2\/hello\/blobs\/(sha256:[0-9a-f]+)/, async (route, request) => {
+  await ctx.route(/\/v2\/hello\/blobs\/sha256:[0-9a-f]+/, async (route, request) => {
     const m = request.url().match(/\/blobs\/(sha256:[0-9a-f]+)$/);
     const dig = m ? m[1] : "";
     const body = blobByDigest.get(dig);
