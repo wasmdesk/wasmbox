@@ -226,6 +226,8 @@ jobs:
 
       - name: Run cross-browser dom-window probe (chromium + firefox + webkit)
         working-directory: test
+        env:
+          WASMBOX_BASE_URL: "http://127.0.0.1:8137/"
         run: node probe-dom-window.mjs
 
       - name: Stop the server
