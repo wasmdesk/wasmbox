@@ -210,13 +210,12 @@
     // Tell the compositor "I have new pixels". `damage` defaults to the full
     // surface, which is what naive clients want.
     //
-    // seq is ALWAYS advanced by commit(), even when no per-pixel paint op
-    // (putPixel/fillRect/...) ran this frame, because that is the signal the
-    // compositor's blit cache uses to detect "new content available". Clients
-    // that fill the SAB in bulk via js.CopyBytesToJS (the typical Go-wasm
-    // pattern -- see clients/hello + clients/showcase) bypass _beginPaint so
-    // without this, seq would stay at 0 forever and the cache would
-    // incorrectly de-duplicate genuinely new frames.
+    // seq is ALWAYS advanced by commit(), even when the seqlock window was never
+    // opened this frame, because that is the signal the compositor's blit cache
+    // uses to detect "new content available". Go-wasm clients that fill the SAB
+    // in bulk via js.CopyBytesToJS should call beginFrame() before the copy (for
+    // tear-safety); if one does not, this fake even->odd->even pair still
+    // advances seq so the cache does not de-duplicate genuinely new frames.
     //   - If a paint op opened the window (seq odd): one bump closes it
     //     (odd -> even). seq advances by 1.
     //   - If no paint op ran (seq even): fake the pair (even -> odd -> even).
@@ -246,6 +245,14 @@
     _beginPaint() {
       if ((Atomics.load(this.seq, 0) & 1) === 0) Atomics.add(this.seq, 0, 1);
     }
+
+    // Public entry point for Go-wasm clients that fill the SAB in bulk via
+    // js.CopyBytesToJS: call beginFrame() right BEFORE the copy so the seqlock
+    // write window is open during it and the compositor never blits a
+    // half-copied frame; commit() closes it (odd -> even, a single bump). JS
+    // painters (putPixel/fillRect) open it automatically, so they need not call
+    // this. Idempotent within a frame.
+    beginFrame() { this._beginPaint(); }
 
     setTitle(title) {
       this.title = title;

@@ -63,6 +63,7 @@ func main() {
 
 	render := func() {
 		scene.Render(state, local)
+		client.Call("beginFrame") // open the seqlock window before the bulk copy (tear-free)
 		js.CopyBytesToJS(pixels, local)
 		damage := js.Global().Call("Object")
 		damage.Set("x", 0)
