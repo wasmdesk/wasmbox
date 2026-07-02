@@ -128,7 +128,7 @@ function countColorRect(png, c, x0, y0, x1, y1) {
 const { server, base } = await startServer();
 console.log(`probe-loading-progress: serving on ${base}`);
 
-const browser = await chromium.launch({ headless: true, channel: "chrome" });
+const browser = await chromium.launch({ headless: true });
 const consoleLines = [];
 const pageErrors = [];
 

@@ -184,6 +184,42 @@ jobs:
         working-directory: test
         run: node probe-rootmenu.mjs
 
+      - name: Run headless Files client probe
+        working-directory: test
+        run: node probe-files.mjs
+
+      - name: Run headless client loading-progress probe
+        working-directory: test
+        run: node probe-loading-progress.mjs
+
+      - name: Run headless Terminal probe
+        working-directory: test
+        run: node probe-terminal.mjs
+
+      - name: Run headless Terminal completion probe
+        working-directory: test
+        run: node probe-terminal-complete.mjs
+
+      - name: Run headless Terminal history probe
+        working-directory: test
+        run: node probe-terminal-history.mjs
+
+      - name: Run headless Terminal tab-polish probe
+        working-directory: test
+        run: node probe-terminal-tab-polish.mjs
+
+      - name: Run headless Terminal coreutils probe
+        working-directory: test
+        run: node probe-terminal-coreutils.mjs
+
+      - name: Run headless shell-pipes probe
+        working-directory: test
+        run: node probe-shell-pipes.mjs
+
+      - name: Run headless grep/regex probe
+        working-directory: test
+        run: node probe-grep-regex.mjs
+
       - name: Stop the server
         if: always()
         run: |
