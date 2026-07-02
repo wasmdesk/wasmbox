@@ -151,6 +151,34 @@ function bodyCenter(b) {
   return { x, y };
 }
 
+// Number of open-window buttons the dock currently shows, read from its
+// published geometry (globalThis.__wasmdockGeometry on the dock worker) — robust
+// to the iconbar layout, unlike pixel-scanning at fixed positions.
+async function dockGeo(page) {
+  for (const worker of page.workers()) {
+    try {
+      const g = await worker.evaluate(() => globalThis.__wasmdockGeometry || null);
+      if (g && Array.isArray(g.buttons)) return g;
+    } catch (_) { /* not the dock worker */ }
+  }
+  return null;
+}
+async function dockWindowCount(page) {
+  const g = await dockGeo(page);
+  return g ? g.buttons.length : -1;
+}
+// Right-click a window's dock iconbar entry (located from the geometry) to close
+// it — robust vs the window's on-canvas position. Returns true if it was found.
+async function closeViaIconbar(page, titlePrefix) {
+  const g = await dockGeo(page);
+  if (!g) return false;
+  const btn = g.buttons.find((b) => (b.title || "").startsWith(titlePrefix));
+  if (!btn) return false;
+  const dockX = Math.floor((VIEW_W - g.w) / 2), dockY = VIEW_H - g.h;
+  await page.mouse.click(dockX + btn.x + Math.floor(btn.w / 2), dockY + btn.y + Math.floor(btn.h / 2), { button: "right" });
+  return true;
+}
+
 // Central desktop area: clear of every boot window (which cascade at
 // x in [60, 60+5*28] and end at x+300 at most), clear of the legend DOM
 // overlay on the right (#legend, top:10px right:12px ~ x>=1010), and well
@@ -163,7 +191,7 @@ const ROOT_Y = 500;
 const { server, base } = await startServer();
 console.log(`probe-rootmenu: serving on ${base}`);
 
-const browser = await chromium.launch({ headless: true, channel: "chrome" });
+const browser = await chromium.launch({ headless: true });
 const consoleLines = [];
 const pageErrors = [];
 
@@ -247,7 +275,7 @@ try {
   }
 
   // Count iconbar entries pre-launch (3 boot + dock-launched hello autoSpawn).
-  const preEntries = countIconbarEntries(png2);
+  const preEntries = await dockWindowCount(page);
   ok(`iconbar before launch: ${preEntries} entries`);
 
   // ----- Step 4: click "Terminal" --------------------------------------
@@ -272,7 +300,7 @@ try {
     ok(`after-launch: menu dismissed (${stillMenu} MENU_BG px remaining, vs ~10000 when open)`);
   }
   // The iconbar must have gained one entry (the Terminal worker registered).
-  const postEntries = countIconbarEntries(png3);
+  const postEntries = await dockWindowCount(page);
   if (postEntries <= preEntries) {
     fail(`after-launch: iconbar entries did not grow (${preEntries} -> ${postEntries})`);
   } else {
@@ -290,17 +318,15 @@ try {
   // bottom y=600 — overlap is unavoidable on the body, but the right-click
   // point itself is at y=410 which is inside Terminal; we close Terminal
   // first via the per-window Close menu to free this region).
-  // Easier: close the Terminal first.
-  // Right-click on Terminal's titlebar to invoke the per-window menu and
-  // click Close.
-  // Terminal's titlebar is at y=180 (cascade slot 5 of a fresh window is
-  // (200, 200), titlebar height TITLE_H = 22, so titlebar_y = 178..200).
-  // Right-click at (300, 188) hits Terminal's titlebar.
-  await page.mouse.click(300, 188, { button: "right" });
-  await page.waitForTimeout(300);
-  // The per-window menu has [Raise, Close]. Click row index 1 (Close).
-  await page.mouse.click(300 + 20, 188 + Math.floor(ITEM_H * 1.5));
-  await page.waitForTimeout(600);
+  // Close the Terminal first so its window doesn't cover the desktop area we
+  // need to right-click for the root menu. Do it via its dock iconbar entry
+  // (right-click closes) located from the geometry — robust vs the Terminal's
+  // exact on-canvas position (which the old titlebar-coordinate guess missed,
+  // leaving the Terminal open and the workspace switch silently failing).
+  const closedTerm = await closeViaIconbar(page, "Terminal");
+  if (closedTerm) ok("Terminal closed via its dock iconbar entry");
+  else fail("could not locate the Terminal in the dock geometry to close it");
+  await page.waitForTimeout(800);
 
   const ROOT2_X = 600;
   const ROOT2_Y = 420;
@@ -345,10 +371,11 @@ try {
       ok(`ws3: dock still painted (pixel @(${dx},${dy}) = (${r},${g},${b}))`);
     }
   }
-  // Iconbar empty on ws3 (Terminal landed on ws1; nothing here).
-  const ws3Entries = countIconbarEntries(png4);
+  // Iconbar empty on ws3 (Terminal landed on ws1; nothing here). Counted via
+  // the dock geometry hook, not pixel-scanning.
+  const ws3Entries = await dockWindowCount(page);
   if (ws3Entries !== 0) {
-    fail(`ws3: iconbar entries = ${ws3Entries}, want 0`);
+    fail(`ws3: iconbar has ${ws3Entries} window buttons, want 0 (nothing lives on ws3)`);
   } else {
     ok(`ws3: iconbar empty (0 entries) — workspace 3 has no windows`);
   }

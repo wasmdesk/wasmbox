@@ -180,6 +180,10 @@ jobs:
         working-directory: test
         run: node probe-iconbar.mjs
 
+      - name: Run headless root-menu probe (menu/submenu/launch/workspace)
+        working-directory: test
+        run: node probe-rootmenu.mjs
+
       - name: Stop the server
         if: always()
         run: |
