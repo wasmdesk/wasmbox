@@ -60,6 +60,23 @@ function startServer() {
 function fail(msg) { console.error(`FAIL: ${msg}`); process.exitCode = 1; }
 function ok(msg)   { console.log(`ok  ${msg}`); }
 
+const VIEW_W = 1280;
+const VIEW_H = 800;
+
+// Read the dock's published window-button geometry (surface coords) from the
+// dock worker's global, so we can click a specific window's iconbar entry
+// without hardcoding the (evolving) dock layout. Returns { w, h, buttons:
+// [{ id, title, minimized, x, y, w, h }] } or null.
+async function dockGeometry(page) {
+  for (const worker of page.workers()) {
+    try {
+      const g = await worker.evaluate(() => globalThis.__wasmdockGeometry || null);
+      if (g && Array.isArray(g.buttons)) return g;
+    } catch (_) { /* worker may be navigating / not the dock */ }
+  }
+  return null;
+}
+
 // Count pixels inside (x0,y0,w,h) whose RGB matches `target` within tol.
 function countNearColor(png, x0, y0, w, h, target, tol) {
   let n = 0;
@@ -130,7 +147,7 @@ function bodyCenter(winX, winY, winW, winH) {
 const { server, base } = await startServer();
 console.log(`probe-minimize: serving on ${base}`);
 
-const browser = await chromium.launch({ headless: true, channel: "chrome" });
+const browser = await chromium.launch({ headless: true });
 const consoleLines = [];
 const pageErrors = [];
 
@@ -224,23 +241,26 @@ try {
     ok(`minimized: open-window section inked (${phase1TaskInk} px)`);
   }
 
-  // Click the editor's iconbar entry to restore it. With the new "iconbar
-  // shows all" rule, the iconbar mirrors the WM stack (bottom-to-top). The
-  // minimize-box click on editor first FOCUSED editor (raising it to top of
-  // stack) then minimized it — so the stack is now
-  //   [xterm, about rbgo, hello, editor (minimized)]
-  // and the editor's iconbar entry sits at the LAST position.
-  const ICONBAR_BUTTON_W = 120;
-  const ICONBAR_BUTTON_GAP = 2;
-  // The dock surface is 1280 wide; the 4 launcher buttons + 3 window buttons
-  // for [xterm, about rbgo, hello] + 1 for the minimized editor fit easily.
-  const N_OPEN_AT_PHASE1 = 4; // 3 boot + 1 hello autoSpawn — all still present
-  const editorIdxInIconbar = N_OPEN_AT_PHASE1 - 1; // editor is now at the LAST iconbar slot
-  const editorBtnX = TASKS_X0 + editorIdxInIconbar * (ICONBAR_BUTTON_W + ICONBAR_BUTTON_GAP) + Math.floor(ICONBAR_BUTTON_W / 2);
-  const editorBtnY = dockTop + Math.floor(DOCK_H / 2);
-  console.log(`info clicking editor iconbar button @(${editorBtnX},${editorBtnY})`);
-  await page.mouse.click(editorBtnX, editorBtnY);
-  await page.waitForTimeout(1500);
+  // Restore the editor by clicking its iconbar entry. Locate it precisely via
+  // the dock's published button geometry (globalThis.__wasmdockGeometry on the
+  // dock worker) — no hardcoded iconbar layout, so this survives dock redesigns.
+  const geo = await dockGeometry(page);
+  if (!geo) {
+    fail("could not read __wasmdockGeometry from the dock worker");
+  } else {
+    const btn = geo.buttons.find((b) => b.title === "editor");
+    if (!btn) {
+      fail(`editor not in dock geometry (have: ${geo.buttons.map((b) => b.title).join(", ")})`);
+    } else {
+      // Dock surface is bottom-anchored + centered: screen =
+      // ((VIEW_W - w)/2 + x, (VIEW_H - h) + y).
+      const editorBtnX = Math.floor((VIEW_W - geo.w) / 2) + btn.x + Math.floor(btn.w / 2);
+      const editorBtnY = (VIEW_H - geo.h) + btn.y + Math.floor(btn.h / 2);
+      console.log(`info clicking editor iconbar button @(${editorBtnX},${editorBtnY}) [id ${btn.id}, minimized=${btn.minimized}]`);
+      await page.mouse.click(editorBtnX, editorBtnY);
+      await page.waitForTimeout(1500);
+    }
+  }
 
   // Phase 2: restored screenshot.
   const shot2 = await page.screenshot({ type: "png", path: "/tmp/wasmbox-minimize-2.png", fullPage: false });

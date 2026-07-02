@@ -362,16 +362,33 @@ func (s *State) IconbarButtonRect(i int) (x, y, w, h int) {
 // (last_launcher_right + SeparatorW); subsequent buttons cascade with
 // IconbarButtonGap between them.
 func (s *State) WindowButtonRect(i int) (x, y, w, h int) {
-	bx, _, _, _ := s.IconbarRect()
+	bx, _, iw, _ := s.IconbarRect()
 	// Anchor past the last launcher slot's right edge (NOT including the
 	// trailing IconbarButtonGap — the SeparatorW replaces it).
 	lastLauncherRight := bx + len(s.Apps)*(IconbarButtonW+IconbarButtonGap) - IconbarButtonGap
 	if len(s.Apps) == 0 {
 		lastLauncherRight = bx - SeparatorW // empty launcher row: window row starts at iconbar left
 	}
-	x = lastLauncherRight + SeparatorW + i*(IconbarButtonW+IconbarButtonGap)
+	rowStart := lastLauncherRight + SeparatorW
+	// Shrink the window buttons so N of them always FIT in the space left in the
+	// iconbar (between the launcher row and the clock). At the full IconbarButtonW,
+	// four+ windows overflow past the iconbar's right edge — and HitTestWindow
+	// rejects buttons starting past it, so the rightmost entries (e.g. a
+	// just-minimized window) would become unclickable. Cap at IconbarButtonW so a
+	// nearly-empty desktop keeps the roomy default.
+	bw := IconbarButtonW
+	if n := len(s.Windows); n > 0 {
+		avail := (bx + iw) - rowStart
+		if fit := (avail - (n-1)*IconbarButtonGap) / n; fit < bw {
+			bw = fit
+		}
+		if bw < 1 {
+			bw = 1
+		}
+	}
+	x = rowStart + i*(bw+IconbarButtonGap)
 	y = IconbarVPad
-	w = IconbarButtonW
+	w = bw
 	h = s.H - 2*IconbarVPad
 	if h < 1 {
 		h = 1
