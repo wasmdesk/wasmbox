@@ -168,6 +168,10 @@ jobs:
           MAX_GROWTH_MB: "8"
         run: node probe-firefox-leak.mjs chromium
 
+      - name: Run headless workspaces probe (isolation + reversible iconbar)
+        working-directory: test
+        run: node probe-workspaces.mjs
+
       - name: Stop the server
         if: always()
         run: |
