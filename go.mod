@@ -5,7 +5,7 @@ go 1.26.4
 require (
 	github.com/go-embedded-ruby/ruby v0.0.0-20260623171000-045761e10d36
 	github.com/go-widgets/toolkit v0.0.0-20260701135849-b3ab9e0ca4c0
-	github.com/wasmdesk/coreutils v0.0.0-00010101000000-000000000000
+	github.com/wasmdesk/coreutils v0.0.0-20260629060422-c37bd87ae249
 )
 
 require (
@@ -25,8 +25,3 @@ require (
 	github.com/go-ruby-parser/parser v0.0.0-20260623170906-753af1b3721a // indirect
 	github.com/go-ruby-regexp/regexp v0.0.0-20260622075631-3a277cf71b81 // indirect
 )
-
-// wasmdesk/coreutils is not yet pushed (per development order: coreutils
-// repo is created locally first, then wired into wasmbox). Once a tagged
-// release is cut, drop this replace + bump the require above.
-replace github.com/wasmdesk/coreutils => ../coreutils
