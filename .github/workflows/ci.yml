@@ -220,6 +220,10 @@ jobs:
         working-directory: test
         run: node probe-grep-regex.mjs
 
+      - name: Run headless theme round-trip probe (light/dark/adwaita switch)
+        working-directory: test
+        run: node probe-theme.mjs
+
       - name: Stop the server
         if: always()
         run: |
