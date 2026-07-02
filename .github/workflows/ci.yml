@@ -172,6 +172,10 @@ jobs:
         working-directory: test
         run: node probe-workspaces.mjs
 
+      - name: Run headless minimize/restore probe (via dock geometry hook)
+        working-directory: test
+        run: node probe-minimize.mjs
+
       - name: Stop the server
         if: always()
         run: |

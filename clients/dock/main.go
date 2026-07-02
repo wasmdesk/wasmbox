@@ -27,6 +27,31 @@ import (
 	"github.com/wasmdesk/wasmbox/clients/dock/internal/theme"
 )
 
+// exposeGeometry publishes the dock's current window-button rectangles (surface
+// coordinates) on a worker global so headless probes can locate + click a
+// specific window's iconbar entry without hardcoding the layout. Read it via
+// Playwright's worker.evaluate(() => globalThis.__wasmdockGeometry): the screen
+// position is (VIEW_W - w)/2 + x, (VIEW_H - h) + y (the dock is bottom-center
+// anchored). Cheap; only called when the window set changes.
+func exposeGeometry(state *scene.State) {
+	wins := state.Windows
+	buttons := make([]interface{}, 0, len(wins))
+	for i := range wins {
+		x, y, w, h := state.WindowButtonRect(i)
+		buttons = append(buttons, map[string]interface{}{
+			"id":        wins[i].Id,
+			"title":     wins[i].Title,
+			"minimized": wins[i].Minimized,
+			"x":         x, "y": y, "w": w, "h": h,
+		})
+	}
+	js.Global().Set("__wasmdockGeometry", js.ValueOf(map[string]interface{}{
+		"w":       state.W,
+		"h":       state.H,
+		"buttons": buttons,
+	}))
+}
+
 func main() {
 	client := js.Global().Get("wasmboxClient")
 	if client.IsUndefined() {
@@ -209,6 +234,7 @@ func main() {
 				state.SetWindows(parsed)
 			}
 			render()
+			exposeGeometry(state) // test hook: publish window-button rects
 		case "tick":
 			// Clock tick posted by worker.js. The payload field "clock"
 			// carries the latest "HH:MM" string; the optional "workspace"
