@@ -42,6 +42,7 @@ func exposeGeometry(state *scene.State) {
 			"id":        wins[i].Id,
 			"title":     wins[i].Title,
 			"minimized": wins[i].Minimized,
+			"focused":   wins[i].Focused,
 			"x":         x, "y": y, "w": w, "h": h,
 		})
 	}

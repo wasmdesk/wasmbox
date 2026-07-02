@@ -176,6 +176,10 @@ jobs:
         working-directory: test
         run: node probe-minimize.mjs
 
+      - name: Run headless iconbar probe (focus indicator + click focus/close)
+        working-directory: test
+        run: node probe-iconbar.mjs
+
       - name: Stop the server
         if: always()
         run: |
