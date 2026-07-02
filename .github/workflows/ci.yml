@@ -102,9 +102,9 @@ jobs:
         working-directory: test
         run: npm install
 
-      - name: Install Playwright bundled Chromium
+      - name: Install Playwright browsers (chromium + firefox + webkit)
         working-directory: test
-        run: npx playwright install --with-deps chromium
+        run: npx playwright install --with-deps chromium firefox webkit
 
       - name: Serve the compositor (cmd/serve, COOP/COEP) in the background
         run: |
@@ -223,6 +223,10 @@ jobs:
       - name: Run headless theme round-trip probe (light/dark/adwaita switch)
         working-directory: test
         run: node probe-theme.mjs
+
+      - name: Run cross-browser dom-window probe (chromium + firefox + webkit)
+        working-directory: test
+        run: node probe-dom-window.mjs
 
       - name: Stop the server
         if: always()
