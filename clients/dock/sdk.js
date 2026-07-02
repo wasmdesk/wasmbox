@@ -89,6 +89,13 @@
       // 4 bytes per pixel (RGBA32), row-major, origin top-left.
       this.sab = new SharedArrayBuffer(this.stride * h);
       this.pixels = new Uint8ClampedArray(this.sab); // worker-side view
+      // Seqlock control word (one Int32 in a tiny shared buffer). Opened ODD by
+      // beginFrame() before the frame is copied into the SAB and closed EVEN by
+      // commit(); the compositor refuses to blit a surface whose seq is odd or
+      // changes mid-read, so a torn (half-copied) frame is never shown — matters
+      // for the dock's per-hover magnification repaints. Single writer here.
+      this.ctl = new SharedArrayBuffer(4);
+      this.seq = new Int32Array(this.ctl);
       this.windowId = null;
       this._welcomeCbs = [];
       this._inputCbs = [];
@@ -121,6 +128,7 @@
         h: this.h,
         sab: this.sab,
         stride: this.stride,
+        ctl: this.ctl,
       });
       return new Promise((resolve) => this.onWelcome(resolve));
     }
@@ -142,12 +150,23 @@
     // surface.
     commit(damage) {
       if (this.windowId === null) return;
+      // Close the seqlock write window (odd -> even) so the compositor may read
+      // a complete frame. Only flips if beginFrame() opened it this frame.
+      if ((Atomics.load(this.seq, 0) & 1) === 1) Atomics.add(this.seq, 0, 1);
       const d = damage || { x: 0, y: 0, w: this.w, h: this.h };
       send({
         type: "commit",
         window_id: this.windowId,
         damage: d,
       });
+    }
+
+    // Open the seqlock write window (even -> odd). The Go client calls this
+    // right before writing the frame into the SAB (js.CopyBytesToJS), so the
+    // compositor never blits a half-copied frame; commit() closes it. Idempotent
+    // within a frame.
+    beginFrame() {
+      if ((Atomics.load(this.seq, 0) & 1) === 0) Atomics.add(this.seq, 0, 1);
     }
 
     setTitle(title) {

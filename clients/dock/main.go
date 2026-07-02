@@ -50,6 +50,10 @@ func main() {
 
 	render := func() {
 		scene.Render(state, local)
+		// Open the seqlock write window before copying the frame into the SAB so
+		// the compositor never blits a half-copied frame (matters for the dock's
+		// per-hover magnification repaints); client.commit() closes it.
+		client.Call("beginFrame")
 		js.CopyBytesToJS(pixels, local)
 		damage := js.Global().Call("Object")
 		damage.Set("x", 0)
