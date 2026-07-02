@@ -42,6 +42,7 @@ func main() {
 
 	render := func() {
 		scene.Render(state, local)
+		client.Call("beginFrame") // open the seqlock window before the bulk copy (tear-free)
 		js.CopyBytesToJS(pixels, local)
 		// One commit covering the whole surface; the compositor unions damage.
 		damage := js.Global().Call("Object")
