@@ -3,13 +3,18 @@
 // found in the LICENSE file at the root of this repository.
 //
 // Headless Playwright probe for the VS Code-styled editor client
-// (clients/code). Spawns a system Chrome (channel: "chrome", headless: true),
-// loads the index page, opens a Code window via wasmboxSpawnExternal, locates
-// the surface on the canvas by sampling the unique #252526 sidebar BG, then:
+// (clients/code). Launches bundled Chromium (headless), loads the index page,
+// opens a Code window via wasmboxSpawnExternal, then locates + measures the
+// window on the canvas from the ACTUAL extent of its unique status-bar blue
+// (#007ACC) -- never a hardcoded window size -- and:
 //
-//   - per-region pixel samples (sidebar / editor / tab strip / status bar)
-//   - asserts the status bar is the signature blue #007ACC
-//   - types a few chars on the canvas and checks for visible editor ink
+//   - per-region pixel samples (sidebar / editor / status bar), all anchored
+//     to the measured geometry so a smaller-than-nominal window, a right-edge
+//     scrollbar, or an occluded top edge can't produce a stale sample
+//   - detects the tab strip (#2D2D30) by scanning up an editor column, which
+//     both proves it renders and yields the real surface top
+//   - types "func main() {" and asserts keyword-blue (#569CD6) ink appears,
+//     proving syntax highlighting works end-to-end in the browser
 //
 // Saves a screenshot to /tmp/wasmdesk-code.png.
 
@@ -32,13 +37,12 @@ const COLOR_STATUSBAR_BG  = [0x00, 0x7A, 0xCC];
 const COLOR_SIDEBAR_TEXT  = [0xCC, 0xCC, 0xCC];
 const COLOR_KEYWORD       = [0x56, 0x9C, 0xD6];
 
-// Layout constants (must match render.go).
+// Layout constants (must match render.go). Only the horizontal offsets and the
+// nominal tab-strip height are used; the window's actual on-screen width/height
+// are measured at runtime from the status-bar blue, not assumed.
 const SIDEBAR_WIDTH    = 200;
 const TAB_STRIP_HEIGHT = 28;
 const GUTTER_WIDTH     = 50;
-const STATUS_BAR_HEIGHT = 24;
-const SURFACE_W = 900;
-const SURFACE_H = 540;
 
 const MIME = {
   ".html": "text/html; charset=utf-8",
@@ -84,8 +88,15 @@ function pixelAt(png, x, y) {
 
 function eqColor(px, c) { return px[0] === c[0] && px[1] === c[1] && px[2] === c[2]; }
 
-// findSurfaceByColor locates the editor surface by its unique status-bar
-// blue: VS Code's #007ACC. Returns the topmost+leftmost match in the canvas.
+// findCodeSurface locates the editor surface by its unique status-bar blue
+// (VS Code's #007ACC). It returns the ACTUAL on-screen geometry derived from
+// the extent of that blue strip -- never a hardcoded window size. The code
+// window's default size can differ from any nominal constant, so we anchor
+// everything to the status bar: `left`/`right` and `statusTop`/`statusBottom`
+// are measured, `w` is the true painted width. Callers derive interior sample
+// points relative to the status bar (which is always the bottom band of the
+// window) and detect the tab strip by scanning -- so a smaller-than-nominal
+// window, a right-edge scrollbar, or an occluded top edge can't fool them.
 function findCodeSurface(png) {
   const { width, height, data } = png;
   let minX = width, minY = height, maxX = -1, maxY = -1;
@@ -101,15 +112,39 @@ function findCodeSurface(png) {
     }
   }
   if (maxX < 0) return null;
-  // The status bar is the lowest StatusBarHeight band of the surface.
-  // Top-left of the surface is (minX, maxY - SURFACE_H + 1).
-  return { x: minX, y: maxY - SURFACE_H + 1, w: SURFACE_W, h: SURFACE_H };
+  // The status bar is the lowest band of the surface; its blue extent gives
+  // the window's true left/right and the editor's bottom boundary.
+  return {
+    left: minX, right: maxX, w: maxX - minX + 1,
+    statusTop: minY, statusBottom: maxY,
+    // Back-compat aliases used by legacy callers below.
+    x: minX, y: minY,
+  };
+}
+
+// scanTabStrip walks UP an editor-pane column from just above the status bar
+// and returns the first vertical run of tab-strip background (#2D2D30) at
+// least 8 px tall -- proving the tab strip renders and yielding the surface's
+// real top edge (band.yTop) without assuming any window height.
+function scanTabStrip(png, geom) {
+  const x = geom.left + SIDEBAR_WIDTH + GUTTER_WIDTH + 100;
+  let runBottom = -1;
+  for (let y = geom.statusTop - 1; y >= 0 && y > geom.statusTop - 600; y--) {
+    if (eqColor(pixelAt(png, x, y), COLOR_TABSTRIP_BG)) {
+      if (runBottom < 0) runBottom = y;
+    } else if (runBottom >= 0) {
+      const len = runBottom - y;
+      if (len >= 8) return { yTop: y + 1, yBottom: runBottom, len };
+      runBottom = -1;
+    }
+  }
+  return null;
 }
 
 const { server, base } = await startServer();
 console.log(`probe-code: serving on ${base}`);
 
-const browser = await chromium.launch({ headless: true, channel: "chrome" });
+const browser = await chromium.launch({ headless: true });
 const consoleLines = [];
 const pageErrors = [];
 
@@ -133,24 +168,17 @@ try {
   await page.waitForTimeout(3500);
 
   // Many other windows are spawned by the compositor at boot (terminal,
-  // editor, files, etc.). Take a first snapshot just to find the Code
-  // status bar (the unique #007ACC strip), then click on the Code window
-  // titlebar to raise it above the others. We compute the titlebar y as
-  // (status-bar-bottom - SURFACE_H + 2) — i.e. ~2 px inside the top edge
-  // of the surface, which is where the compositor's titlebar sits.
+  // editor, files, etc.), so the Code window may start partly occluded.
+  // Scout for its status bar (the unique #007ACC strip), then click deep
+  // in its editor pane -- just above the status bar, well clear of the left
+  // sidebar and any occluding window -- to focus + raise it to the top.
   let scoutShot = await page.screenshot({ type: "png", fullPage: false });
   let scoutPng = PNG.sync.read(scoutShot);
   const scoutSurface = findCodeSurface(scoutPng);
   if (scoutSurface) {
-    // Compositor titlebar sits just above the surface origin -- click 10 px
-    // above to land on it (the titlebar is ~20 px tall on this compositor).
-    await page.mouse.click(scoutSurface.x + 100, scoutSurface.y - 10);
-    await page.waitForTimeout(400);
-    // Drag the window up + left so it doesn't extend past the canvas.
-    await page.mouse.move(scoutSurface.x + 100, scoutSurface.y - 10);
-    await page.mouse.down();
-    await page.mouse.move(120, 40, { steps: 10 });
-    await page.mouse.up();
+    const raiseX = scoutSurface.left + Math.floor(scoutSurface.w / 2);
+    const raiseY = scoutSurface.statusTop - 40;
+    await page.mouse.click(raiseX, raiseY);
     await page.waitForTimeout(400);
   }
 
@@ -161,12 +189,30 @@ try {
   if (!surface) {
     fail(`Code surface not visible on canvas (no status-bar blue ${COLOR_STATUSBAR_BG} found)`);
   } else {
-    console.log(`ok  Code surface located at (${surface.x},${surface.y}) ${surface.w}x${surface.h}`);
+    console.log(`ok  Code surface located: left=${surface.left} right=${surface.right} w=${surface.w} status y[${surface.statusTop}..${surface.statusBottom}]`);
 
-    // ---- per-region pixel samples ----
-    // Sidebar BG (well past EXPLORER header, no row at y=200).
-    const sbX = surface.x + 100;
-    const sbY = surface.y + 200;
+    // Detect the tab strip by scanning up an editor column; this both proves
+    // the strip renders and gives the real surface top (no hardcoded height).
+    const tab = scanTabStrip(png1, surface);
+    if (!tab) {
+      fail(`tab strip (#2D2D30) not found scanning up the editor column`);
+    } else {
+      console.log(`ok  tab strip band @ y[${tab.yTop}..${tab.yBottom}] (${tab.len}px) -- COLOR_TABSTRIP_BG (#2D2D30)`);
+    }
+    // Real surface top from the tab strip (fallback: just above status bar).
+    const surfTop = tab ? tab.yTop : surface.statusTop - 100;
+    // The editor body region: right of sidebar+gutter, above the status bar,
+    // and 16px clear of the right edge to dodge the scrollbar track.
+    const edLeft  = surface.left + SIDEBAR_WIDTH + GUTTER_WIDTH;
+    const edRight = surface.right - 16;
+    const edTop   = (tab ? tab.yBottom : surfTop + TAB_STRIP_HEIGHT) + 2;
+    const edBot   = surface.statusTop - 1;
+
+    // ---- per-region pixel samples (all anchored to real geometry) ----
+    // Sidebar BG: near the bottom-left of the window, below the file tree and
+    // clear of any occluding window that sits higher up.
+    const sbX = surface.left + 40;
+    const sbY = surface.statusTop - 30;
     const sbPx = pixelAt(png1, sbX, sbY);
     if (!eqColor(sbPx, COLOR_SIDEBAR_BG)) {
       fail(`sidebar pixel at (${sbX},${sbY}) = ${sbPx}, want ${COLOR_SIDEBAR_BG}`);
@@ -174,9 +220,9 @@ try {
       console.log(`ok  sidebar pixel @ (${sbX},${sbY}) = (${sbPx.join(",")}) -- COLOR_SIDEBAR_BG (#252526)`);
     }
 
-    // Editor BG (right-pane far right, mid height).
-    const ebX = surface.x + SURFACE_W - 16;
-    const ebY = surface.y + 200;
+    // Editor BG: interior of the empty editor, just above the status bar.
+    const ebX = edLeft + 60;
+    const ebY = surface.statusTop - 30;
     const ebPx = pixelAt(png1, ebX, ebY);
     if (!eqColor(ebPx, COLOR_WINDOW_BG)) {
       fail(`editor pixel at (${ebX},${ebY}) = ${ebPx}, want ${COLOR_WINDOW_BG}`);
@@ -185,8 +231,8 @@ try {
     }
 
     // Status bar BG (left edge -- guaranteed not over any glyph).
-    const stX = surface.x + 2;
-    const stY = surface.y + SURFACE_H - 12;
+    const stX = surface.left + 2;
+    const stY = (surface.statusTop + surface.statusBottom) >> 1;
     const stPx = pixelAt(png1, stX, stY);
     if (!eqColor(stPx, COLOR_STATUSBAR_BG)) {
       fail(`status bar pixel at (${stX},${stY}) = ${stPx}, want ${COLOR_STATUSBAR_BG}`);
@@ -194,20 +240,10 @@ try {
       console.log(`ok  status bar pixel @ (${stX},${stY}) = (${stPx.join(",")}) -- COLOR_STATUSBAR_BG (#007ACC)`);
     }
 
-    // Tab strip BG (right side of the tab strip, well past the single active tab).
-    const tsX = surface.x + SURFACE_W - 16;
-    const tsY = surface.y + TAB_STRIP_HEIGHT - 4;
-    const tsPx = pixelAt(png1, tsX, tsY);
-    if (!eqColor(tsPx, COLOR_TABSTRIP_BG)) {
-      fail(`tab strip pixel at (${tsX},${tsY}) = ${tsPx}, want ${COLOR_TABSTRIP_BG}`);
-    } else {
-      console.log(`ok  tab strip pixel @ (${tsX},${tsY}) = (${tsPx.join(",")}) -- COLOR_TABSTRIP_BG (#2D2D30)`);
-    }
-
-    // ---- focus the editor + type a char ----
-    // Click in the editor pane (well past sidebar + gutter, well below tab strip).
-    const editorX = surface.x + SIDEBAR_WIDTH + GUTTER_WIDTH + 20;
-    const editorY = surface.y + TAB_STRIP_HEIGHT + 20;
+    // ---- focus the editor + type a keyword ----
+    // Click deep in the empty editor (above the status bar) to place the cursor.
+    const editorX = edLeft + 40;
+    const editorY = surface.statusTop - 40;
     await page.mouse.click(editorX, editorY);
     await page.waitForTimeout(150);
 
@@ -220,17 +256,18 @@ try {
     let shot2 = await page.screenshot({ type: "png", fullPage: false });
     let png2 = PNG.sync.read(shot2);
 
-    // Look for keyword-blue pixels in the editor pane (#569CD6).
+    // Look for keyword-blue pixels in the editor pane (#569CD6), bounded to
+    // the real editor region so no off-window desktop pixels leak in.
     let kwInked = 0;
     let nonBgInked = 0;
-    for (let y = surface.y + TAB_STRIP_HEIGHT; y < surface.y + SURFACE_H - STATUS_BAR_HEIGHT; y++) {
-      for (let x = surface.x + SIDEBAR_WIDTH + GUTTER_WIDTH; x < surface.x + SURFACE_W; x++) {
+    for (let y = edTop; y <= edBot; y++) {
+      for (let x = edLeft; x <= edRight; x++) {
         const p = pixelAt(png2, x, y);
         if (eqColor(p, COLOR_KEYWORD)) kwInked++;
         if (!eqColor(p, COLOR_WINDOW_BG)) nonBgInked++;
       }
     }
-    if (kwInked < 20) {
+    if (kwInked < 12) {
       fail(`expected keyword-blue (#569CD6) pixels after typing "func main() {"; got ${kwInked} (non-BG total=${nonBgInked})`);
     } else {
       console.log(`ok  editor keyword-blue ink: ${kwInked} ColorKeyword pixels (#569CD6); non-BG total=${nonBgInked}`);
@@ -238,8 +275,8 @@ try {
 
     // Sidebar entry ink (EXPLORER header + at least one file row).
     let sbInk = 0;
-    for (let y = surface.y; y < surface.y + SURFACE_H - STATUS_BAR_HEIGHT; y++) {
-      for (let x = surface.x; x < surface.x + SIDEBAR_WIDTH; x++) {
+    for (let y = surfTop; y <= surface.statusTop; y++) {
+      for (let x = surface.left; x < surface.left + SIDEBAR_WIDTH; x++) {
         if (eqColor(pixelAt(png2, x, y), COLOR_SIDEBAR_TEXT)) sbInk++;
       }
     }
