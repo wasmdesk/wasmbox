@@ -230,6 +230,14 @@ jobs:
           WASMBOX_BASE_URL: "http://127.0.0.1:8137/"
         run: node probe-dom-window.mjs
 
+      - name: Run headless VS Code client probe (syntax highlighting + sections)
+        working-directory: test
+        run: node probe-code.mjs
+
+      - name: Run headless Fluxbox-dock probe (sections + live iconbar buttons)
+        working-directory: test
+        run: node probe-wasmdock-fluxbox.mjs
+
       - name: Stop the server
         if: always()
         run: |

@@ -2,10 +2,12 @@
 //
 // Headless Playwright probe for the Fluxbox-style wasmdock toolbar.
 //
-// Boot the compositor in headless Chrome, wait for the dock to land at the
-// bottom of the canvas, sample three known pixel zones (workspace label,
-// iconbar, clock), click on one of the iconbar buttons, and assert that the
-// corresponding launcher (e.g. terminal) spawned a window.
+// Boot the compositor in bundled headless Chromium, read the dock's real
+// geometry from its __wasmdockGeometry hook (never a hardcoded panel height),
+// sample the three fluxbox sections (workspace label / iconbar / clock) plus
+// the top bevel border, assert each section carries glyph ink, then click a
+// live window button (translated from the hook's surface-space rect) and
+// assert it becomes focused -- proving the iconbar buttons are interactive.
 
 import { createServer } from "node:http";
 import { readFile } from "node:fs/promises";
@@ -72,7 +74,19 @@ function nearColor(c, target, tol) {
 const { server, base } = await startServer();
 console.log(`probe-wasmdock-fluxbox: serving on ${base}`);
 
-const browser = await chromium.launch({ headless: true, channel: "chrome" });
+// Read the dock's published geometry (surface-space size + window-button
+// rects) from the dock worker's __wasmdockGeometry hook.
+async function dockGeometry(page) {
+  for (const worker of page.workers()) {
+    try {
+      const g = await worker.evaluate(() => globalThis.__wasmdockGeometry || null);
+      if (g && Array.isArray(g.buttons)) return g;
+    } catch (_) { /* not the dock worker */ }
+  }
+  return null;
+}
+
+const browser = await chromium.launch({ headless: true });
 const consoleLines = [];
 const pageErrors = [];
 
@@ -96,31 +110,30 @@ try {
   // a couple of seconds on a cold cache).
   await page.waitForTimeout(3000);
 
-  // The dock surface is 1280 px wide; we ask for h=60 because the compositor
-  // floors panel heights at Theme::MIN_H = 60 (compositor.rb). The Go-side
-  // scene scales every section to fill the granted height, so the toolbar
-  // sits at y = canvas_h - 60 on a 1280x800 viewport.
-  const DOCK_H = 60;
+  // Read the dock's REAL geometry from its hook instead of assuming a panel
+  // height: the toolbar is `geo.h` tall and pinned to the bottom of the canvas.
   const viewport = await page.viewportSize();
-  const dockTop = viewport.height - DOCK_H;
-  console.log(`info dock expected at y=${dockTop} (h=${DOCK_H})`);
+  const geo = await dockGeometry(page);
+  if (!geo) { fail("could not read __wasmdockGeometry from the dock worker"); throw new Error("no dock geometry"); }
+  const DOCK_H  = geo.h;
+  const dockTop = viewport.height - geo.h;
+  const dockX   = Math.floor((viewport.width - geo.w) / 2);
+  console.log(`info dock geometry: w=${geo.w} h=${geo.h} -> top=${dockTop} left=${dockX}, ${geo.buttons.length} window buttons`);
 
   // Grab a screenshot for pixel sampling.
   const shot = await page.screenshot({ type: "png", path: SCREENSHOT_PATH, fullPage: false });
   const png = PNG.sync.read(shot);
   ok(`screenshot saved -> ${SCREENSHOT_PATH}`);
 
-  // Per-section sampling. Sample at the dock vertical midpoint where the
-  // gradient face is most representative (away from the 1px bevel + border).
+  // Per-section face sampling at the dock vertical midpoint. The window
+  // buttons float on the right of the iconbar (their exact x depends on the
+  // open-window count), so we sample the two fixed sections -- the workspace
+  // label face on the far left and the clock OSD face on the far right -- and
+  // leave button rendering to the ink count + the live-click test below.
   const sampleY = dockTop + Math.floor(DOCK_H / 2);
   const samples = [
-    { name: "workspace",   x: 50,                  expect: [0x90, 0x90, 0x90] }, // inactive title bg (mid gray)
-    // Iconbar samples must dodge per-button bevels + label glyphs. Buttons
-    // start at x=100 and span 120 px each with a 2 px gap; the gap centre
-    // at x=222 reads the iconbar background gradient directly.
-    { name: "iconbar.gap", x: 222,                 expect: [0xc8, 0xc8, 0xc8] }, // active title gradient face in inter-button gap
-    { name: "iconbar.btn", x: 200,                 expect: [0xc8, 0xc8, 0xc8] }, // mid-button face (inactive grad)
-    { name: "clock",       x: viewport.width - 40, expect: [0xd0, 0xd0, 0xd0] }, // OSD bg
+    { name: "workspace", x: 50,                  expect: [0x90, 0x90, 0x90] }, // inactive title bg (mid gray)
+    { name: "clock",     x: viewport.width - 40, expect: [0xd0, 0xd0, 0xd0] }, // OSD bg
   ];
 
   for (const s of samples) {
@@ -164,34 +177,34 @@ try {
   if (clockInk     < 5) fail("clock label not inked");
   ok("each section carries ink pixels");
 
-  // ---- click-launch test --------------------------------------------------
-  // The terminal launcher is the first iconbar button. Its rect is at
-  // x=WorkspaceW (100), button width 120 -> center at x=160. Vertical
-  // center of the button row at dockTop + DOCK_H/2.
-  const beforeCount = await page.evaluate(() => globalThis.__wasmboxStackLen || 0);
-  await page.mouse.click(160, dockTop + Math.floor(DOCK_H / 2));
-  await page.waitForTimeout(2000);
-  // The compositor doesn't expose a window count by default; scan the
-  // canvas for the terminal panel's 0x101010 bg the way probe-terminal does.
-  const after = await page.screenshot({ type: "png", fullPage: false });
-  const afterPng = PNG.sync.read(after);
-  let terminalPixels = 0;
-  for (let y = 0; y < afterPng.height; y++) {
-    for (let x = 0; x < afterPng.width; x++) {
-      const i = (y * afterPng.width + x) * 4;
-      if (afterPng.data[i] === 0x10 && afterPng.data[i+1] === 0x10 && afterPng.data[i+2] === 0x10) {
-        terminalPixels++;
-      }
+  // ---- live-button test ---------------------------------------------------
+  // Prove the iconbar window buttons are interactive: pick a button that is
+  // NOT currently focused, translate its surface-space rect to screen coords
+  // (dock is bottom-centered), click its center, and assert the hook now
+  // reports that button as the focused one. This is robust to the button
+  // count/positions and to any palette retune.
+  if (geo.buttons.length < 1) {
+    fail("no iconbar window buttons to click");
+  } else {
+    const target = geo.buttons.find((b) => !b.focused) || geo.buttons[0];
+    const cx = dockX + target.x + Math.floor(target.w / 2);
+    const cy = dockTop + target.y + Math.floor(target.h / 2);
+    console.log(`info clicking window button id=${target.id} "${target.title}" @(${cx},${cy})`);
+    await page.mouse.click(cx, cy);
+    await page.waitForTimeout(600);
+    const after = await dockGeometry(page);
+    const now = after && after.buttons.find((b) => b.id === target.id);
+    const focusedCount = after ? after.buttons.filter((b) => b.focused).length : -1;
+    if (!now) {
+      fail(`window button id=${target.id} vanished after click`);
+    } else if (!now.focused) {
+      fail(`clicking window button "${target.title}" did not focus it (focused=${now.focused})`);
+    } else if (focusedCount !== 1) {
+      fail(`expected exactly one focused button after click, got ${focusedCount}`);
+    } else {
+      ok(`window button "${target.title}" became focused after click (exactly 1 focused)`);
     }
   }
-  console.log(`info terminal-panel pixels after click: ${terminalPixels}`);
-  if (terminalPixels < 1000) {
-    fail(`expected terminal window after iconbar click; only ${terminalPixels} panel pixels`);
-  } else {
-    ok(`terminal window spawned after iconbar click (${terminalPixels} panel pixels)`);
-  }
-
-  void beforeCount; // beforeCount is just a marker; the count probe above is the real assertion.
 
   if (pageErrors.length) {
     fail(`pageerror(s): ${pageErrors.join(" | ")}`);
