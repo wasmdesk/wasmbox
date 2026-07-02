@@ -60,7 +60,7 @@ function fail(msg) { console.error(`FAIL: ${msg}`); process.exitCode = 1; }
 const { server, base } = await startServer();
 console.log(`probe-shell-pipes: serving on ${base}`);
 
-const browser = await chromium.launch({ headless: true, channel: "chrome" });
+const browser = await chromium.launch({ headless: true });
 
 try {
   const page = await browser.newPage({ viewport: { width: 1280, height: 800 } });
