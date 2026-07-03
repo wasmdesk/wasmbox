@@ -6,12 +6,15 @@
 # Cross-origin isolation (needed for SharedArrayBuffer) is supplied at runtime
 # by coi-serviceworker.js, since Pages cannot set COOP/COEP headers.
 #
-# v1 deploys the self-contained in-repo apps (hello, terminal, files). dock and
-# quake build from sibling repos (wasmdesk/wasmdock, go-quake1/engine) and are a
-# follow-up once their checkout is wired here. Publishing the canonical images
-# to ghcr.io/wasmdesk/<app> is a separate step (needs push auth in ociapps-push)
-# — the mirror bytes are identical either way, so Pages delivery does not block
-# on it.
+# The site ships the FULL clients/ tree (every wasm client + the loom DOM
+# bundle at /loom/), so every root-menu / dock launch resolves same-origin,
+# exactly like the dev server — a managed OCI registry can't back the browser
+# directly (no CORS), so the apps are served beside the page. Quake builds from
+# the public go-quake1/engine sibling in asset-less synthbsp mode (no
+# copyrighted pak). The "vscode" code-server dom-window still needs a live
+# backend, so on this static host use the pure-Go "code" client (labelled "VS
+# Code" in the menu). The /v2 mirror + ghcr publish below are the additive
+# OCI-streaming demo path, not the launch path.
 name: pages
 
 on:
@@ -48,6 +51,15 @@ jobs:
           repository: wasmdesk/ociapps
           path: _ociapps
 
+      # The Quake client is built on demand from the public go-quake1/engine
+      # sibling (asset-less synthbsp mode — no copyrighted pak, ~12 MB wasm,
+      # well under the Pages 100 MB/file limit).
+      - name: Checkout go-quake1/engine
+        uses: actions/checkout@v4
+        with:
+          repository: go-quake1/engine
+          path: _engine
+
       - uses: actions/setup-go@v5
         with:
           go-version: "1.26.4"
@@ -67,12 +79,14 @@ jobs:
           root="$(go env GOROOT)"
           cp "$root/lib/wasm/wasm_exec.js" ./wasm_exec.js 2>/dev/null || cp "$root/misc/wasm/wasm_exec.js" ./wasm_exec.js
 
-      - name: Build + prep the in-repo client apps
+      - name: Build + prep every in-repo client app
         run: |
           set -e
           root="$(go env GOROOT)"
           wexec="$root/lib/wasm/wasm_exec.js"; [ -f "$wexec" ] || wexec="$root/misc/wasm/wasm_exec.js"
-          for app in hello terminal files; do
+          # Every wasm client the root-menu / dock can launch. Each ships its own
+          # sdk.js + wasm_exec.js beside its worker.js so it resolves same-origin.
+          for app in hello terminal files code showcase calculator notepad; do
             GOOS=js GOARCH=wasm go build -o "clients/$app/$app.wasm" "./clients/$app"
             cp clients/sdk/sdk.js "clients/$app/sdk.js"
             cp "$wexec" "clients/$app/wasm_exec.js"
@@ -82,22 +96,30 @@ jobs:
           # NOT overwrite its sdk.js.
           GOOS=js GOARCH=wasm go build -o clients/dock/dock.wasm ./clients/dock
           cp "$wexec" clients/dock/wasm_exec.js
+          # Quake: asset-less synthbsp build from the engine sibling. The OCI
+          # reference 404s at runtime on a static host, so the engine falls back
+          # to synthetic assets + synthbsp — no copyrighted pak needed. The quake
+          # worker.js loads ../../wasm_exec.js (the site root copy), so no
+          # per-client wasm_exec is required here.
+          GOWORK=off GOOS=js GOARCH=wasm go -C _engine build -trimpath -tags no_embed_assets \
+            -ldflags "-s -w -X main.OCIReference=/quake-assets:1.0" \
+            -o "$PWD/clients/quake/quake.wasm" ./cmd/quake-wasmbox/
 
       - name: Assemble the Pages site (desktop + shared SDK + static /v2 mirror)
         run: |
           set -e
           SITE=_site
-          rm -rf "$SITE" && mkdir -p "$SITE/clients/sdk"
+          rm -rf "$SITE" && mkdir -p "$SITE"
           cp index.html coi-serviceworker.js bridge.js boot-config.js compositor.worker.js ociapps-loader.js wasm_exec.js wasmbox.wasm "$SITE/"
-          cp clients/sdk/sdk.js "$SITE/clients/sdk/sdk.js"
-          # bootWasm spawns clients/hello/worker.js unconditionally + HEAD-gates
-          # clients/dock/worker.js (autoSpawnIfPresent) at boot, so ship both
-          # static runtime trees — the /v2 mirror only serves the ?ociapps
-          # OCI-streaming path. (quake stays out: its wasm exceeds the Pages
-          # per-file limit and needs the OCI-streaming path.)
-          mkdir -p "$SITE/clients/hello" "$SITE/clients/dock"
-          cp clients/hello/worker.js clients/hello/hello.wasm clients/hello/sdk.js clients/hello/wasm_exec.js "$SITE/clients/hello/"
-          cp clients/dock/worker.js clients/dock/dock.wasm clients/dock/sdk.js clients/dock/wasm_exec.js "$SITE/clients/dock/"
+          # Ship the FULL client tree so every root-menu / dock launch resolves
+          # same-origin exactly like the dev server (clients spawn by static path
+          # clients/<app>/worker.js or by DOM path, NOT via the /v2 mirror — the
+          # mirror below is the additive ?ociapps OCI-streaming demo only).
+          cp -R clients "$SITE/clients"
+          # Mount the loom DOM bundle at its descriptor path (/loom/, built with
+          # vite --base=/loom/) so the loom dom-window iframe resolves same-origin.
+          mkdir -p "$SITE/loom"
+          cp -R clients/loom/dist/. "$SITE/loom/"
           # .nojekyll so Pages serves the blobs/sha256:<hex> files (colon in the
           # name) verbatim instead of running them through Jekyll.
           touch "$SITE/.nojekyll"

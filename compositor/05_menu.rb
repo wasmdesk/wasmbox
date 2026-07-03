@@ -103,7 +103,12 @@ module RootMenu
     "hello"     => "Hello (wasm)",
     "quake"     => "Quake",
     "hello-oci" => "Hello (OCI)",
-    "vscode"    => "VS Code",
+    # "VS Code" is the pure-Go editor client (clients/code) — it loads
+    # same-origin on any static host incl. GitHub Pages. The code-server
+    # dom-window ("vscode") needs a live code-server backend + reverse proxy,
+    # so it is labelled distinctly and only works on backend deployments.
+    "code"      => "VS Code",
+    "vscode"    => "VS Code (code-server)",
     "loom"      => "Loom",
     "showcase"  => "Toolkit Showcase",
     "calculator" => "Calculator",
