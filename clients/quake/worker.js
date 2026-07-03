@@ -212,6 +212,23 @@ const isOCI = self.location.protocol === "blob:";
   try { console.log("quake worker: fb=" + fb.w + "x" + fb.h + " source=" + fb.source); }
   catch (_) {}
 
+  // Publish the same-origin OCI base for the Quake asset mirror. When quake is
+  // built with a host-less reference ("/quake-assets:latest"), the Go side
+  // (openOCIAssets) reads self.__quakeOCIBase to locate the /v2 mirror served
+  // beside the page -- crucially INCLUDING a GitHub Pages /<project>/ base
+  // path, which a fixed <scheme>://<host>/v2 origin would drop. The site root
+  // is this worker's URL minus its clients/quake/worker.js suffix (the same
+  // anchor wasmExecURL = "../../wasm_exec.js" resolves against). Skip blob:
+  // workers (OCI-spawned) where the path can't be derived -- those receive
+  // their assets through the envelope, not OCIReference.
+  try {
+    const href = String((self.location && self.location.href) || "");
+    if (href && !href.startsWith("blob:")) {
+      const base = href.replace(/clients\/quake\/worker\.js.*$/, "").replace(/\/+$/, "");
+      if (base) self.__quakeOCIBase = base;
+    }
+  } catch (_) {}
+
   let wasmExecURL = "../../wasm_exec.js";
   let wasmURL = "./quake.wasm";
   if (isOCI) {
