@@ -219,6 +219,25 @@ globalThis.__wasmboxReadRegion = function (x, y, w, h) {
   const px = d.length / 4;
   return { w: w | 0, h: h | 0, brightness: Math.round(sum / px / 3), nonblackPct: Math.round((100 * nonblack) / px), hash: hash >>> 0 };
 };
+// __wasmboxGrabRegion(x,y,w,h): TEST HOOK. Same source as __wasmboxReadRegion,
+// but returns the actual pixels as a PNG data URL so a test can save a frame to
+// disk and a human/agent can SEE what was composited (screenshots miss it).
+// Async: OffscreenCanvas has no toDataURL, so we round-trip through convertToBlob.
+globalThis.__wasmboxGrabRegion = async function (x, y, w, h) {
+  if (!offscreenScreen) return null;
+  let ctx;
+  try { ctx = offscreenScreen.getContext("2d"); } catch (_) { return null; }
+  if (!ctx) return null;
+  let img;
+  try { img = ctx.getImageData(x | 0, y | 0, w | 0, h | 0); } catch (_) { return null; }
+  const tmp = new OffscreenCanvas(w | 0, h | 0);
+  tmp.getContext("2d").putImageData(img, 0, 0);
+  const blob = await tmp.convertToBlob({ type: "image/png" });
+  const bytes = new Uint8Array(await blob.arrayBuffer());
+  let bin = "";
+  for (let i = 0; i < bytes.length; i++) bin += String.fromCharCode(bytes[i]);
+  return "data:image/png;base64," + btoa(bin);
+};
 // Last known viewport size (mirrors main's window.innerWidth/innerHeight).
 let viewportW = 0;
 let viewportH = 0;
