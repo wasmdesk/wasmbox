@@ -204,8 +204,16 @@ tasks:
       CGO_ENABLED: "0"
     cmds:
       - go build -o clients/dock/dock.wasm ./clients/dock
+      # The dock worker.js loads wasm_exec.js from beside itself; ociapps:pack:dock
+      # also packs it as a layer. Copy it here so both the static tree and the OCI
+      # pack have it (CGO_ENABLED/GOOS/GOARCH above don't affect this cp).
+      - |
+        root="$(go env GOROOT)"
+        if [ -f "$root/lib/wasm/wasm_exec.js" ]; then cp "$root/lib/wasm/wasm_exec.js" clients/dock/wasm_exec.js;
+        else cp "$root/misc/wasm/wasm_exec.js" clients/dock/wasm_exec.js; fi
     generates:
       - clients/dock/dock.wasm
+      - clients/dock/wasm_exec.js
 
   build:showcase:
     desc: Build the toolkit-showcase external client (clients/showcase/showcase.wasm)
@@ -617,10 +625,17 @@ tasks:
       - rm -rf "{{.SITE_DIR}}" && mkdir -p "{{.SITE_DIR}}"
       # Desktop shell + the worker/loader/bridge + the baked compositor wasm.
       - cp index.html coi-serviceworker.js bridge.js boot-config.js compositor.worker.js ociapps-loader.js wasm_exec.js wasmbox.wasm "{{.SITE_DIR}}/"
-      # The shared client SDK is desktop infra: every client worker.js
-      # importScripts it from <origin>/clients/sdk/sdk.js (not per-app OCI).
-      - mkdir -p "{{.SITE_DIR}}/clients/sdk"
-      - cp clients/sdk/sdk.js "{{.SITE_DIR}}/clients/sdk/sdk.js"
+      # Ship the full client tree so EVERY launch resolves same-origin, exactly
+      # like the dev server: the root-menu / dock spawn clients by static path
+      # (clients/<app>/worker.js) or DOM path, NOT via the OCI mirror, so those
+      # trees must exist beside the page. The /v2 mirror below is the additive
+      # OCI-streaming demo (?ociapps=1), not the launch path.
+      - mkdir -p "{{.SITE_DIR}}/clients"
+      - cp -R clients/. "{{.SITE_DIR}}/clients/"
+      # Mount the loom DOM bundle at its descriptor path (/loom/, built with
+      # vite --base=/loom/) so the loom dom-window iframe resolves same-origin.
+      - mkdir -p "{{.SITE_DIR}}/loom"
+      - cp -R clients/loom/dist/. "{{.SITE_DIR}}/loom/"
       # .nojekyll: Pages must serve the blobs/sha256:<hex> files (with a colon)
       # verbatim -- Jekyll would otherwise mangle/ignore them.
       - touch "{{.SITE_DIR}}/.nojekyll"
