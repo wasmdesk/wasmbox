@@ -10,8 +10,9 @@
 # bundle at /loom/), so every root-menu / dock launch resolves same-origin,
 # exactly like the dev server — a managed OCI registry can't back the browser
 # directly (no CORS), so the apps are served beside the page. Quake builds from
-# the public go-quake1/engine sibling in asset-less synthbsp mode (no
-# copyrighted pak). The "vscode" code-server dom-window still needs a live
+# the public go-quake1/engine sibling and streams id Software's freely-
+# redistributable SHAREWARE pak0 (~18 MB, real episode-1 maps, md5-verified)
+# from a same-origin /v2/quake-assets mirror. The "vscode" code-server dom-window still needs a live
 # backend, so on this static host use the pure-Go "code" client (labelled "VS
 # Code" in the menu). The /v2 mirror + ghcr publish below are the additive
 # OCI-streaming demo path, not the launch path.
@@ -96,14 +97,37 @@ jobs:
           # NOT overwrite its sdk.js.
           GOOS=js GOARCH=wasm go build -o clients/dock/dock.wasm ./clients/dock
           cp "$wexec" clients/dock/wasm_exec.js
-          # Quake: asset-less synthbsp build from the engine sibling. The OCI
-          # reference 404s at runtime on a static host, so the engine falls back
-          # to synthetic assets + synthbsp — no copyrighted pak needed. The quake
-          # worker.js loads ../../wasm_exec.js (the site root copy), so no
+          # Quake: OCI-streaming build. The SAME-ORIGIN reference
+          # "/quake-assets:latest" (leading slash) makes the engine resolve the
+          # mirror from globalThis.__quakeOCIBase (published by clients/quake/
+          # worker.js as the site root, incl. the Pages /<project>/ base path),
+          # so the /v2/quake-assets mirror assembled below is reachable. The
+          # quake worker.js loads ../../wasm_exec.js (site root copy), so no
           # per-client wasm_exec is required here.
           GOWORK=off GOOS=js GOARCH=wasm go -C _engine build -trimpath -tags no_embed_assets \
-            -ldflags "-s -w -X main.OCIReference=/quake-assets:1.0" \
+            -ldflags "-s -w -X main.OCIReference=/quake-assets:latest" \
             -o "$PWD/clients/quake/quake.wasm" ./cmd/quake-wasmbox/
+
+      - name: Fetch + pack the Quake shareware assets (OCI /v2/quake-assets mirror)
+        run: |
+          set -e
+          # id Software's freely-redistributable shareware Quake. pak0.pak lives
+          # inside the LZH-packed resource.1; extract + verify its known md5, then
+          # pack it into an OCI layout the quake client streams at runtime. The
+          # shareware pak is ~18 MB (well under the Pages 100 MB/file limit) and
+          # carries the real episode-1 maps (start.bsp, e1m1..e1m8) -- no
+          # copyrighted registered data, no music (the CD soundtrack is not in
+          # the shareware release).
+          sudo apt-get update -qq && sudo apt-get install -y -qq p7zip-full >/dev/null
+          curl -fsSL -o /tmp/quake106.zip "https://archive.org/download/Quake_802/quake106.zip"
+          ( cd /tmp && unzip -oq quake106.zip resource.1 && 7z x -y -o/tmp/qsw resource.1 ID1/PAK0.PAK >/dev/null )
+          got=$(md5sum /tmp/qsw/ID1/PAK0.PAK | cut -d' ' -f1)
+          want=5906e5998fc3d896ddaf5e6a62e03abb
+          echo "shareware pak0.pak md5: $got (want $want)"
+          [ "$got" = "$want" ] || { echo "::error::shareware pak0.pak md5 mismatch (want $want, got $got)"; exit 1; }
+          mkdir -p /tmp/empty-music
+          GOWORK=off go -C _engine run ./cmd/oci-pack-quake \
+            -pak /tmp/qsw/ID1/PAK0.PAK -music-dir /tmp/empty-music -out /tmp/oci-quake-assets
 
       - name: Assemble the Pages site (desktop + shared SDK + static /v2 mirror)
         run: |
@@ -127,6 +151,10 @@ jobs:
             ./bin/ociapps-pack -in "clients/$app" -manifest "packs/$app.toml" -out "/tmp/oci-$app" -ref "$app:latest"
             ./bin/ociapps-static -in "/tmp/oci-$app" -repo "$app" -out "$SITE"
           done
+          # Same-origin Quake asset mirror: the quake client, built with
+          # -X main.OCIReference=/quake-assets:latest, streams pak0 from here
+          # (resolved against the site root by clients/quake/worker.js).
+          ./bin/ociapps-static -in /tmp/oci-quake-assets -repo quake-assets -out "$SITE"
           echo "assembled $SITE: $(find "$SITE/v2" -type f | wc -l) /v2 files"
 
       # Publish the canonical app images to ghcr (the source of truth). The
