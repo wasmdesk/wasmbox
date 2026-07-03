@@ -10,9 +10,10 @@
 # bundle at /loom/), so every root-menu / dock launch resolves same-origin,
 # exactly like the dev server — a managed OCI registry can't back the browser
 # directly (no CORS), so the apps are served beside the page. Quake builds from
-# the public go-quake1/engine sibling and streams id Software's freely-
-# redistributable SHAREWARE pak0 (~18 MB, real episode-1 maps, md5-verified)
-# from a same-origin /v2/quake-assets mirror. The "vscode" code-server dom-window still needs a live
+# the public go-quake1/engine sibling and streams LibreQuake's BSD-licensed
+# pak0 (~44 MB, free/libre content with maps/start.bsp, sha256-verified) from a
+# same-origin /v2/quake-assets mirror -- GPL engine + BSD assets = a fully free
+# stack, no id proprietary data. The "vscode" code-server dom-window still needs a live
 # backend, so on this static host use the pure-Go "code" client (labelled "VS
 # Code" in the menu). The /v2 mirror + ghcr publish below are the additive
 # OCI-streaming demo path, not the launch path.
@@ -108,26 +109,27 @@ jobs:
             -ldflags "-s -w -X main.OCIReference=/quake-assets:latest" \
             -o "$PWD/clients/quake/quake.wasm" ./cmd/quake-wasmbox/
 
-      - name: Fetch + pack the Quake shareware assets (OCI /v2/quake-assets mirror)
+      - name: Fetch + pack the LibreQuake assets (OCI /v2/quake-assets mirror)
         run: |
           set -e
-          # id Software's freely-redistributable shareware Quake. pak0.pak lives
-          # inside the LZH-packed resource.1; extract + verify its known md5, then
-          # pack it into an OCI layout the quake client streams at runtime. The
-          # shareware pak is ~18 MB (well under the Pages 100 MB/file limit) and
-          # carries the real episode-1 maps (start.bsp, e1m1..e1m8) -- no
-          # copyrighted registered data, no music (the CD soundtrack is not in
-          # the shareware release).
-          sudo apt-get update -qq && sudo apt-get install -y -qq p7zip-full >/dev/null
-          curl -fsSL -o /tmp/quake106.zip "https://archive.org/download/Quake_802/quake106.zip"
-          ( cd /tmp && unzip -oq quake106.zip resource.1 && 7z x -y -o/tmp/qsw resource.1 ID1/PAK0.PAK >/dev/null )
-          got=$(md5sum /tmp/qsw/ID1/PAK0.PAK | cut -d' ' -f1)
-          want=5906e5998fc3d896ddaf5e6a62e03abb
-          echo "shareware pak0.pak md5: $got (want $want)"
-          [ "$got" = "$want" ] || { echo "::error::shareware pak0.pak md5 mismatch (want $want, got $got)"; exit 1; }
+          # LibreQuake (github.com/lavenderdotpet/LibreQuake) is a free/libre
+          # Quake-content remake whose art is under a BSD 3-clause license -- so
+          # the whole stack (GPL engine + BSD content) is fully FREE, with no id
+          # Software proprietary data at all. The "lite" release ships
+          # id1/pak0.pak (~44 MB, under the Pages 100 MB/file limit) which
+          # carries maps/start.bsp -- the map the engine loads. Plain zip, so no
+          # LZH extractor is needed. Pin the extracted pak0.pak sha256.
+          LQ=v0.09-beta
+          curl -fsSL -o /tmp/lq.zip \
+            "https://github.com/lavenderdotpet/LibreQuake/releases/download/$LQ/lite.zip"
+          ( cd /tmp && unzip -oq lq.zip lite/id1/pak0.pak )
+          got=$(sha256sum /tmp/lite/id1/pak0.pak | cut -d' ' -f1)
+          want=0dd895a425e75d9908025dcfe340f75f5b8166ada68b2d7ee54d8d91d29378ff
+          echo "LibreQuake $LQ pak0.pak sha256: $got (want $want)"
+          [ "$got" = "$want" ] || { echo "::error::LibreQuake pak0.pak sha256 mismatch (want $want, got $got)"; exit 1; }
           mkdir -p /tmp/empty-music
           GOWORK=off go -C _engine run ./cmd/oci-pack-quake \
-            -pak /tmp/qsw/ID1/PAK0.PAK -music-dir /tmp/empty-music -out /tmp/oci-quake-assets
+            -pak /tmp/lite/id1/pak0.pak -music-dir /tmp/empty-music -out /tmp/oci-quake-assets
 
       - name: Assemble the Pages site (desktop + shared SDK + static /v2 mirror)
         run: |
