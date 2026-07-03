@@ -341,3 +341,92 @@ jobs:
         run: |
           if [ -f serve.pid ]; then kill "$(cat serve.pid)" 2>/dev/null || true; fi
           echo "---- serve.log ----"; cat serve.log || true
+
+  quake-smoke:
+    name: Quake client smoke (cross-browser, log-based)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.26.4"
+          check-latest: true
+          cache: true
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+      - name: Checkout wasmdesk/ociapps (OCI packaging CLIs)
+        uses: actions/checkout@v4
+        with:
+          repository: wasmdesk/ociapps
+          path: .ociapps
+      - name: Checkout go-quake1/engine (Quake client)
+        uses: actions/checkout@v4
+        with:
+          repository: go-quake1/engine
+          path: .engine
+      - name: Install Task
+        uses: arduino/setup-task@v2
+        with:
+          version: 3.x
+          repo-token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build compositor + hello + dock + serve + ociapps CLIs
+        env:
+          OCIAPPS_DIR: .ociapps
+        run: task build:compositor build:hello build:dock build:serve build:ociapps-cli
+
+      - name: Build the Quake client (same-origin /quake-assets ref)
+        run: |
+          mkdir -p clients/quake
+          GOWORK=off GOOS=js GOARCH=wasm go -C .engine build -trimpath -tags no_embed_assets \
+            -ldflags "-s -w -X main.OCIReference=/quake-assets:latest" \
+            -o "$PWD/clients/quake/quake.wasm" ./cmd/quake-wasmbox/
+
+      - name: Fetch + pack the LibreQuake pak0 into the /v2/quake-assets mirror
+        run: |
+          set -e
+          LQ=v0.09-beta
+          curl -fsSL -o /tmp/lq.zip \
+            "https://github.com/lavenderdotpet/LibreQuake/releases/download/$LQ/lite.zip"
+          ( cd /tmp && unzip -oq lq.zip lite/id1/pak0.pak )
+          got=$(sha256sum /tmp/lite/id1/pak0.pak | cut -d' ' -f1)
+          want=0dd895a425e75d9908025dcfe340f75f5b8166ada68b2d7ee54d8d91d29378ff
+          [ "$got" = "$want" ] || { echo "::error::LibreQuake pak0 sha256 mismatch (want $want got $got)"; exit 1; }
+          mkdir -p /tmp/empty-music
+          GOWORK=off go -C .engine run ./cmd/oci-pack-quake \
+            -pak /tmp/lite/id1/pak0.pak -music-dir /tmp/empty-music -out /tmp/oci-quake-assets
+          SITE=/tmp/quake-site
+          rm -rf "$SITE" && mkdir -p "$SITE"
+          cp index.html coi-serviceworker.js bridge.js boot-config.js compositor.worker.js \
+             ociapps-loader.js wasm_exec.js wasmbox.wasm "$SITE/"
+          cp -R clients "$SITE/clients"
+          touch "$SITE/.nojekyll"
+          ./bin/ociapps-static -in /tmp/oci-quake-assets -repo quake-assets -out "$SITE"
+
+      - name: Serve the site (COOP/COEP for SAB)
+        run: |
+          ./bin/wasmbox-serve -addr :8138 -dir /tmp/quake-site > serve.log 2>&1 &
+          echo "$!" > serve.pid
+          for i in $(seq 1 40); do
+            if curl -fsS -o /dev/null "http://127.0.0.1:8138/wasmbox.wasm"; then echo "serve up"; break; fi
+            sleep 0.5
+          done
+
+      - name: Install probe deps + Chromium & Firefox
+        working-directory: test
+        run: |
+          npm install
+          npx playwright install --with-deps chromium firefox
+
+      - name: Run the cross-browser Quake smoke (chromium + firefox)
+        working-directory: test
+        env:
+          WASMBOX_BASE_URL: "http://127.0.0.1:8138"
+        run: node probe-quake-smoke.mjs
+
+      - name: Stop the quake server
+        if: always()
+        run: |
+          if [ -f serve.pid ]; then kill "$(cat serve.pid)" 2>/dev/null || true; fi
+          echo "---- serve.log ----"; cat serve.log || true
