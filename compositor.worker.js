@@ -188,6 +188,37 @@ const elementsById = new Map();
 // The OffscreenCanvas transferred from main at boot. We register it under
 // "screen" so compositor.rb's getElementById("screen") returns it.
 let offscreenScreen = null;
+
+// __wasmboxReadRegion(x,y,w,h): TEST HOOK. Reads the composited desktop pixels
+// straight from the worker-owned OffscreenCanvas via getImageData -- the only
+// reliable way to observe the real rendered output under automation (a
+// Playwright viewport screenshot does NOT capture worker OffscreenCanvas
+// frames). Returns a brightness average + a cheap content hash + a non-black
+// ratio for the region; sampling it over time detects animation / flicker /
+// freeze deterministically. Read from the page via
+// `worker.evaluate(({x,y,w,h}) => globalThis.__wasmboxReadRegion(x,y,w,h), r)`.
+globalThis.__wasmboxReadRegion = function (x, y, w, h) {
+  if (!offscreenScreen) return null;
+  let ctx;
+  try { ctx = offscreenScreen.getContext("2d"); } catch (_) { return null; }
+  if (!ctx) return null;
+  let img;
+  try { img = ctx.getImageData(x | 0, y | 0, w | 0, h | 0); } catch (_) { return null; }
+  const d = img.data;
+  let sum = 0, nonblack = 0, hash = 2166136261;
+  for (let i = 0; i < d.length; i += 4) {
+    const r = d[i], g = d[i + 1], b = d[i + 2];
+    sum += r + g + b;
+    if (r + g + b > 40) nonblack++;
+    if ((i & 255) === 0) { // sample the hash cheaply
+      hash = ((hash ^ r) * 16777619) >>> 0;
+      hash = ((hash ^ g) * 16777619) >>> 0;
+      hash = ((hash ^ b) * 16777619) >>> 0;
+    }
+  }
+  const px = d.length / 4;
+  return { w: w | 0, h: h | 0, brightness: Math.round(sum / px / 3), nonblackPct: Math.round((100 * nonblack) / px), hash: hash >>> 0 };
+};
 // Last known viewport size (mirrors main's window.innerWidth/innerHeight).
 let viewportW = 0;
 let viewportH = 0;

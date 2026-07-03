@@ -1,31 +1,41 @@
 // SPDX-License-Identifier: BSD-3-Clause
 //
-// Cross-browser, LOG-BASED smoke test for the Quake client. This is the
-// autonomous test protocol for quake: it asserts on the client's OWN console
-// output (deterministic) instead of pixel-diffing a real-time game (which is
-// unreliable and repeatedly produced false "it works" claims).
+// Cross-browser autonomous smoke test for the Quake client. It combines two
+// verification styles that each dodge a way headless browser testing lies:
 //
-// WHY cross-browser matters: the client freeze this guards against
-// (`QUAKE: FAIL client: unknown TE_* kind` from the attract-loop demo, which
-// used to kill the whole wasm host) reproduces in FIREFOX but NOT in Chromium
-// on the same build -- a JS-event-loop timing difference. A Chromium-only test
-// gives a false pass. So this runs every engine Playwright ships that can
-// actually execute the client.
+//   A) LOG-BASED assertions on the client's OWN console output (deterministic).
+//   B) REAL-FRAME sampling via the compositor's __wasmboxReadRegion worker hook
+//      (getImageData on the worker-owned OffscreenCanvas). A Playwright viewport
+//      *screenshot* does NOT capture worker-canvas frames -- it reports a static
+//      image even while the canvas animates -- which is why screenshot/pixel
+//      diffing produced repeated false "it works" claims. getImageData read
+//      inside the worker sees the true frames, so >=2 distinct frame hashes over
+//      the sample window proves the client is actually RENDERING (not frozen).
+//
+// WHY cross-browser matters: the freeze this guards against
+// (`QUAKE: FAIL client: unknown TE_* kind` from the attract-loop demo killing
+// the wasm host) reproduced in FIREFOX but NOT Chromium on the same build -- a
+// JS-event-loop timing difference. A Chromium-only test gives a false pass.
+//
+// KNOWN LIMIT: headless browsers throttle rAF/timers, so real-TIME game
+// behaviour (the attract demo actually playing, menu-idle animations) does not
+// run at real speed under automation -- neither screenshots nor this hook
+// reproduce it. This smoke therefore proves "boots + streams + not frozen +
+// rendering", NOT full in-browser gameplay; that still needs a real browser
+// (or Playwright's Clock API + this hook, a future step).
 //
 // Engines:
 //   - chromium + firefox: run the full check.
-//   - webkit: SKIPPED -- headless WebKit does not make progress past the wasm
-//     handshake for the ~13 MB client + ~44 MB pak stream (no FAIL, just never
-//     streams); it is a headless-WebKit limitation, not the real Safari path.
+//   - webkit: SKIPPED -- headless WebKit never progresses past the wasm
+//     handshake for the ~13 MB client + ~44 MB pak; a headless limitation, not
+//     the real Safari path.
 //
-// Asserts, per engine:
-//   1. the compositor boots (globalThis.wasmboxReady),
-//   2. quake streams its pak + `loaded maps/start.bsp` (assets reachable),
-//   3. NO `QUAKE: FAIL` line (the host did not die -> the window is not frozen).
+// Asserts, per engine: (1) compositor boots, (2) quake streams its pak +
+// `loaded maps/start.bsp`, (3) NO `QUAKE: FAIL`, (4) >=2 distinct real-frame
+// hashes = rendering/alive (skipped gracefully when the hook is absent).
 //
 // Point BASE at a server that has clients/quake/quake.wasm + a
-// /v2/quake-assets mirror (built by the quake-smoke CI job or `task serve` +
-// a quake build). Exit 0 iff every run engine passes.
+// /v2/quake-assets mirror. Exit 0 iff every run engine passes.
 
 import * as pw from "playwright";
 
@@ -42,6 +52,7 @@ async function runEngine(name) {
   const b = await engine.launch({ headless: true });
   const cons = [];
   const errs = [];
+  let frameHashes = -1;
   try {
     const p = await b.newPage({ viewport: { width: 1280, height: 800 } });
     p.on("console", (m) => cons.push(m.text().replace(/^\[.*?\]\s*/, "")));
@@ -57,9 +68,30 @@ async function runEngine(name) {
     await wait(1500);
     await p.evaluate(() => globalThis.wasmboxSpawnExternal("clients/quake/worker.js"));
     await wait(PLAY_MS);
+
+    // Frame-animation check: read the quake window region straight from the
+    // compositor's OffscreenCanvas (via the __wasmboxReadRegion worker hook) --
+    // a viewport screenshot does NOT capture worker-canvas frames, but
+    // getImageData does. >=2 distinct frame hashes over the samples proves the
+    // client is actually rendering (not frozen); a single hash = frozen.
+    // Skipped gracefully (-1) if the hook isn't present (older build).
+    let cw = null;
+    for (const wk of p.workers()) {
+      try { if (await wk.evaluate(() => typeof globalThis.__wasmboxReadRegion === "function")) { cw = wk; break; } } catch (_) {}
+    }
+    if (cw) {
+      const hs = new Set();
+      for (let i = 0; i < 6; i++) {
+        const r = await cw.evaluate(() => globalThis.__wasmboxReadRegion(200, 170, 560, 420));
+        if (r) hs.add(r.hash);
+        await wait(500);
+      }
+      frameHashes = hs.size;
+    }
   } finally {
     await b.close();
   }
+
   const has = (re) => cons.some((l) => re.test(l));
   const failLine = cons.find((l) => /QUAKE: FAIL/.test(l));
   return {
@@ -68,6 +100,7 @@ async function runEngine(name) {
     startbsp: has(/loaded maps\/start\.bsp/),
     fail: failLine ? failLine.slice(0, 70) : null,
     pageerrors: errs.length,
+    frameHashes,
   };
 }
 
@@ -81,14 +114,16 @@ for (const name of ENGINES) {
     allOK = false;
     continue;
   }
-  const ok = !r.fail && r.streamed && r.startbsp && r.pageerrors === 0;
+  // frameHashes: -1 = hook absent (don't gate); >=2 = animating (ok); <2 = frozen.
+  const animating = r.frameHashes === -1 || r.frameHashes >= 2;
+  const ok = !r.fail && r.streamed && r.startbsp && r.pageerrors === 0 && animating;
   allOK = allOK && ok;
   if (ok) {
-    console.log(`ok    ${name}: streamed + maps/start.bsp loaded, no QUAKE:FAIL`);
+    console.log(`ok    ${name}: streamed + maps/start.bsp loaded, no QUAKE:FAIL, rendering (frameHashes=${r.frameHashes})`);
   } else {
     console.log(
       `FAIL  ${name}: streamed=${r.streamed} startbsp=${r.startbsp} ` +
-        `pageerrors=${r.pageerrors} QUAKE:FAIL=${r.fail || "none"}`,
+        `pageerrors=${r.pageerrors} frameHashes=${r.frameHashes} QUAKE:FAIL=${r.fail || "none"}`,
     );
   }
 }
