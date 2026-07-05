@@ -31,8 +31,9 @@
 //     the real Safari path.
 //
 // Asserts, per engine: (1) compositor boots, (2) quake streams its pak +
-// `loaded maps/start.bsp`, (3) NO `QUAKE: FAIL`, (4) >=2 distinct real-frame
-// hashes = rendering/alive (skipped gracefully when the hook is absent).
+// loads its map (`loaded maps/<name>.bsp from pak`), (3) NO `QUAKE: FAIL`,
+// (4) >=2 distinct real-frame hashes = rendering/alive (skipped gracefully
+// when the hook is absent).
 //
 // Point BASE at a server that has clients/quake/quake.wasm + a
 // /v2/quake-assets mirror. Exit 0 iff every run engine passes.
@@ -97,7 +98,10 @@ async function runEngine(name) {
   return {
     engine: name,
     streamed: has(/streaming pak/),
-    startbsp: has(/loaded maps\/start\.bsp/),
+    // Map-agnostic: the default map has changed before (start.bsp -> lq_e0m1)
+    // and will again, so match ANY "loaded maps/<name>.bsp from pak" rather
+    // than a hard-coded map name that silently rots the smoke test.
+    mapLoaded: has(/loaded maps\/[\w.-]+\.bsp from pak/),
     fail: failLine ? failLine.slice(0, 70) : null,
     pageerrors: errs.length,
     frameHashes,
@@ -116,13 +120,13 @@ for (const name of ENGINES) {
   }
   // frameHashes: -1 = hook absent (don't gate); >=2 = animating (ok); <2 = frozen.
   const animating = r.frameHashes === -1 || r.frameHashes >= 2;
-  const ok = !r.fail && r.streamed && r.startbsp && r.pageerrors === 0 && animating;
+  const ok = !r.fail && r.streamed && r.mapLoaded && r.pageerrors === 0 && animating;
   allOK = allOK && ok;
   if (ok) {
-    console.log(`ok    ${name}: streamed + maps/start.bsp loaded, no QUAKE:FAIL, rendering (frameHashes=${r.frameHashes})`);
+    console.log(`ok    ${name}: streamed + map .bsp loaded, no QUAKE:FAIL, rendering (frameHashes=${r.frameHashes})`);
   } else {
     console.log(
-      `FAIL  ${name}: streamed=${r.streamed} startbsp=${r.startbsp} ` +
+      `FAIL  ${name}: streamed=${r.streamed} mapLoaded=${r.mapLoaded} ` +
         `pageerrors=${r.pageerrors} frameHashes=${r.frameHashes} QUAKE:FAIL=${r.fail || "none"}`,
     );
   }
