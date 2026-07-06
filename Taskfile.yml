@@ -105,8 +105,17 @@ tasks:
           -o "$(pwd)/clients/quake/quake.wasm" \
           ./cmd/quake-wasmbox/
       - 'echo "build:quake: wrote clients/quake/quake.wasm ($(wc -c < clients/quake/quake.wasm) bytes); OCIReference={{.QUAKE_OCI_REFERENCE}}"'
+      # Content-hash manifest for coi-serviceworker.js: it caches the ~13 MB
+      # quake.wasm keyed by this sha256, so a reload / redeploy only re-downloads
+      # the body when the hash actually changes. sha256sum (Linux CI) with a
+      # shasum fallback (macOS).
+      - |
+        h=$(sha256sum clients/quake/quake.wasm 2>/dev/null | cut -d' ' -f1 || shasum -a 256 clients/quake/quake.wasm | cut -d' ' -f1)
+        printf '{"sha256":"%s"}\n' "$h" > clients/quake/quake-wasm.json
+        echo "build:quake: wrote clients/quake/quake-wasm.json (sha256 $h)"
     generates:
       - clients/quake/quake.wasm
+      - clients/quake/quake-wasm.json
 
   build:quake:embed:
     desc: Legacy build of cmd/quake-wasmbox with pak + music baked into the wasm via //go:embed (~200 MB, unusable in browser but kept for native-debug). Use `build:quake` for the OCI-streaming default.
@@ -124,8 +133,12 @@ tasks:
         fi
       - go -C "{{.ENGINE_DIR}}" build -trimpath -ldflags '-s -w' -o "$(pwd)/clients/quake/quake.wasm" ./cmd/quake-wasmbox/
       - 'echo "build:quake:embed: wrote clients/quake/quake.wasm ($(wc -c < clients/quake/quake.wasm) bytes)"'
+      - |
+        h=$(sha256sum clients/quake/quake.wasm 2>/dev/null | cut -d' ' -f1 || shasum -a 256 clients/quake/quake.wasm | cut -d' ' -f1)
+        printf '{"sha256":"%s"}\n' "$h" > clients/quake/quake-wasm.json
     generates:
       - clients/quake/quake.wasm
+      - clients/quake/quake-wasm.json
 
   serve:all:
     desc: Build wasmbox + hello + Quake clients, then serve on http://localhost:{{.PORT}}/. Right-click desktop -> spawn quake, or run wasmboxSpawnExternal('clients/quake/worker.js') in console.
