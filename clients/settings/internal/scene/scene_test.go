@@ -88,7 +88,7 @@ func TestSwitchToggleAnywhereOnRow(t *testing.T) {
 	sw := s.cats[0].rows[1].sw // "Reduce Transparency"
 	was := sw.On
 	// Click in the row's text region (left of the switch), still toggles.
-	ry := contentTop + 1*rowH
+	ry := cardTop + 1*rowH
 	if !s.HandleMouse(sidebarW+40, ry+rowH/2) {
 		t.Fatal("clicking a switch row should request a redraw")
 	}
@@ -115,7 +115,7 @@ func TestContentClickMissIsNoOp(t *testing.T) {
 	s := newState()
 	s.selected = 2 // Sound; row 0/1 are scales (no whole-row toggle)
 	// Click in the content pane but not on any control -> no redraw.
-	if s.HandleMouse(sidebarW+40, contentTop+rowH/2) {
+	if s.HandleMouse(sidebarW+40, cardTop+rowH/2) {
 		t.Error("clicking empty content (scale row body) should be a no-op")
 	}
 }

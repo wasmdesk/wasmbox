@@ -5,7 +5,7 @@ go 1.26.4
 require (
 	github.com/go-embedded-ruby/ruby v0.0.0-20260623171000-045761e10d36
 	github.com/go-widgets/painter v0.1.1-0.20260706183023-1373a47de8fc
-	github.com/go-widgets/toolkit v0.9.3-0.20260706183657-7361506703ed
+	github.com/go-widgets/toolkit v0.9.3-0.20260706190404-03d62e897dd7
 	github.com/wasmdesk/coreutils v0.0.0-20260629060422-c37bd87ae249
 )
 
