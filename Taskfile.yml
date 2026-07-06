@@ -46,10 +46,15 @@ tasks:
   build:
     desc: Build wasmbox.wasm + hello + dock + terminal + files + code clients + copy wasm_exec.js
     deps: [build:compositor, build:hello, build:dock, build:terminal, build:files, build:code, build:showcase, build:calculator, build:notepad, build:serve]
+    cmds:
+      # Content-hash manifests for coi-serviceworker.js (see scripts/wasm-manifest.sh).
+      - sh scripts/wasm-manifest.sh clients/*/*.wasm
 
   build:all:
     desc: Build everything incl. the external go-quake1 + wasmdock clients
     deps: [build:compositor, build:hello, build:quake, build:dock, build:terminal, build:files, build:code, build:serve]
+    cmds:
+      - sh scripts/wasm-manifest.sh clients/*/*.wasm
 
   build:dock:
     desc: Build the wasmdock external client from the sibling wasmdesk/wasmdock repo into clients/dock/dock.wasm. The dock's worker.js + sdk.js are committed in clients/dock/; only the wasm + wasm_exec.js are built. Override DOCK_DIR if wasmdock repo lives elsewhere.
@@ -105,14 +110,8 @@ tasks:
           -o "$(pwd)/clients/quake/quake.wasm" \
           ./cmd/quake-wasmbox/
       - 'echo "build:quake: wrote clients/quake/quake.wasm ($(wc -c < clients/quake/quake.wasm) bytes); OCIReference={{.QUAKE_OCI_REFERENCE}}"'
-      # Content-hash manifest for coi-serviceworker.js: it caches the ~13 MB
-      # quake.wasm keyed by this sha256, so a reload / redeploy only re-downloads
-      # the body when the hash actually changes. sha256sum (Linux CI) with a
-      # shasum fallback (macOS).
-      - |
-        h=$(sha256sum clients/quake/quake.wasm 2>/dev/null | cut -d' ' -f1 || shasum -a 256 clients/quake/quake.wasm | cut -d' ' -f1)
-        printf '{"sha256":"%s"}\n' "$h" > clients/quake/quake-wasm.json
-        echo "build:quake: wrote clients/quake/quake-wasm.json (sha256 $h)"
+      # Content-hash manifest for coi-serviceworker.js (see scripts/wasm-manifest.sh).
+      - sh scripts/wasm-manifest.sh clients/quake/quake.wasm
     generates:
       - clients/quake/quake.wasm
       - clients/quake/quake-wasm.json
@@ -133,9 +132,7 @@ tasks:
         fi
       - go -C "{{.ENGINE_DIR}}" build -trimpath -ldflags '-s -w' -o "$(pwd)/clients/quake/quake.wasm" ./cmd/quake-wasmbox/
       - 'echo "build:quake:embed: wrote clients/quake/quake.wasm ($(wc -c < clients/quake/quake.wasm) bytes)"'
-      - |
-        h=$(sha256sum clients/quake/quake.wasm 2>/dev/null | cut -d' ' -f1 || shasum -a 256 clients/quake/quake.wasm | cut -d' ' -f1)
-        printf '{"sha256":"%s"}\n' "$h" > clients/quake/quake-wasm.json
+      - sh scripts/wasm-manifest.sh clients/quake/quake.wasm
     generates:
       - clients/quake/quake.wasm
       - clients/quake/quake-wasm.json
