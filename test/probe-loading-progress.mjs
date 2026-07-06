@@ -36,9 +36,9 @@ const COLOR_BAR_FILL    = [53, 132, 228];
 const COLOR_BAR_TRACK   = [218, 220, 224];
 const COLOR_LOADER_BG   = [250, 250, 250];
 
-// Adwaita scene palette (matches clients/files/internal/scene/render.go).
-const COLOR_SIDEBAR_BG  = [241, 241, 241];
-const COLOR_WINDOW_BG   = [250, 250, 250];
+// WhiteSur scene palette (matches clients/files/internal/scene/render.go).
+const COLOR_SIDEBAR_BG  = [240, 240, 240];
+const COLOR_WINDOW_BG   = [255, 255, 255];
 
 const MIME = {
   ".html": "text/html; charset=utf-8",
