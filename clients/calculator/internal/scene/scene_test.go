@@ -84,7 +84,7 @@ func TestClearNegatePercent(t *testing.T) {
 		t.Fatalf("100%% want 1, got %q", s.display.Text)
 	}
 	// Negate: 1 → -1.
-	s.press("±")
+	s.press("+/-")
 	if s.display.Text != "-1" {
 		t.Fatalf("negate want -1, got %q", s.display.Text)
 	}
@@ -216,7 +216,7 @@ func TestPressAfterOpNegateNoOp(t *testing.T) {
 	// early — display stays put, no crash.
 	s := New(surfaceW, surfaceH)
 	s.display.Text = "garbage"
-	s.press("±")
+	s.press("+/-")
 	if s.display.Text != "garbage" {
 		t.Fatal("negate on garbage should be no-op")
 	}

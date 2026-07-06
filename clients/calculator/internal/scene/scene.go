@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: BSD-3-Clause
 //
 // Package scene renders the wasmdesk/toolkit-based Calculator: a display
-// Entry across the top and a 5×4 button grid below (0..9, . + - * / = C ± %).
+// Entry across the top and a 5×4 button grid below (0..9, . + - * / = C +/- %).
 // A real toolkit consumer with tighter scope than the multi-tab
 // showcase — validates that Grid + Button + Entry compose cleanly in a
 // production layout, and that click handling flows through a chain of
@@ -12,6 +12,7 @@ package scene
 import (
 	"strconv"
 
+	"github.com/go-widgets/painter"
 	"github.com/go-widgets/toolkit"
 )
 
@@ -45,7 +46,7 @@ const (
 
 // keys layout (5 rows, 4 cols). Empty cells are gaps.
 var keys = [5][4]string{
-	{"C", "±", "%", "/"},
+	{"C", "+/-", "%", "/"},
 	{"7", "8", "9", "*"},
 	{"4", "5", "6", "-"},
 	{"1", "2", "3", "+"},
@@ -54,7 +55,7 @@ var keys = [5][4]string{
 
 // New builds a Calculator sized W×H.
 func New(w, h int) *State {
-	s := &State{W: w, H: h, theme: toolkit.DefaultLight()}
+	s := &State{W: w, H: h, theme: toolkit.WhiteSurLight()}
 	s.display = toolkit.NewEntry("0")
 	s.display.SetBounds(toolkit.Rect{X: sideMargin, Y: buttonPadTop, W: w - 2*sideMargin, H: displayH})
 
@@ -82,10 +83,11 @@ func New(w, h int) *State {
 
 // Render paints every widget.
 func Render(s *State, buf []byte) {
+	p := painter.NewPixelPainter(buf, s.W, s.H)
 	fill(buf, s.W, toolkit.Rect{X: 0, Y: 0, W: s.W, H: s.H}, s.theme.Background)
-	s.display.Draw(buf, s.W, s.theme)
+	s.display.Draw(p, s.theme)
 	for _, b := range s.buttons {
-		b.Draw(buf, s.W, s.theme)
+		b.Draw(p, s.theme)
 	}
 }
 
@@ -159,7 +161,7 @@ func (s *State) press(key string) {
 		s.op = 0
 		s.freshOp = false
 		s.display.Text = "0"
-	case "±":
+	case "+/-":
 		if v, err := strconv.ParseFloat(s.display.Text, 64); err == nil {
 			s.display.Text = formatNumber(-v)
 		}

@@ -36,8 +36,10 @@ github.com/go-ruby-regexp/regexp v0.0.0-20260622075631-3a277cf71b81 h1:821uMDal5
 github.com/go-ruby-regexp/regexp v0.0.0-20260622075631-3a277cf71b81/go.mod h1:+0nK2X+aCPMO91bPMM/DT1OFUIzFQeoTPGkkOR3kd84=
 github.com/go-task/slim-sprig/v3 v3.0.0 h1:sUs3vkvUymDpBKi3qH1YSqBQk9+9D/8M2mN1vB6EwHI=
 github.com/go-task/slim-sprig/v3 v3.0.0/go.mod h1:W848ghGpv3Qj3dhTPRyJypKRiqCdHZiAzKg9hl15HA8=
-github.com/go-widgets/toolkit v0.0.0-20260701135849-b3ab9e0ca4c0 h1:govU/5/F5ru+j4cllK4KtilNjnNTrTV9EiRT/kmQrgY=
-github.com/go-widgets/toolkit v0.0.0-20260701135849-b3ab9e0ca4c0/go.mod h1:iQoXD6OJxzhKr9TmfcA5rNgEByqpaOLG5Ib9gCNaijk=
+github.com/go-widgets/painter v0.1.1-0.20260706170118-01dc3241c587 h1:vDqry+LhhEzgrTmyKKiohmHB2ypbOuT8vGZCfX+FlSo=
+github.com/go-widgets/painter v0.1.1-0.20260706170118-01dc3241c587/go.mod h1:ccmlkH2UmcXQh6rt9Fu2eDt2RI0B5V0POaGmUKeW0EQ=
+github.com/go-widgets/toolkit v0.9.3-0.20260706170132-bd2ef32bf2a6 h1:h0PyBCFniiQIAND5N6ZL6AN69F2c430XBYiMoads2uo=
+github.com/go-widgets/toolkit v0.9.3-0.20260706170132-bd2ef32bf2a6/go.mod h1:gdsk+M0w/DlH+eHCKXd8TjkWN4gswdm5r69J7NVIOTg=
 github.com/google/go-cmp v0.7.0 h1:wk8382ETsv4JYUZwIsn6YpYiWiBsYLSJiTsyBybVuN8=
 github.com/google/go-cmp v0.7.0/go.mod h1:pXiqmnSA92OHEEa9HXL2W4E7lf9JzCmGVUdgjX3N/iU=
 github.com/google/pprof v0.0.0-20260402051712-545e8a4df936 h1:EwtI+Al+DeppwYX2oXJCETMO23COyaKGP6fHVpkpWpg=
