@@ -40,10 +40,10 @@ const TERM_INK   = [0xa0, 0xe0, 0xa0]; // PaletteFG[0] -- default ink
 const TERM_CYAN  = [0x8a, 0xe1, 0xff]; // PaletteFG[1] -- prompt
 
 // Files palette (Adwaita light).
-const FILES_SIDEBAR_BG = [241, 241, 241];
-const FILES_WINDOW_BG  = [250, 250, 250];
-const FILES_ACCENT     = [53, 132, 228];
-const FILES_TEXT       = [46, 52, 54];
+const FILES_SIDEBAR_BG = [240, 240, 240];
+const FILES_WINDOW_BG  = [255, 255, 255];
+const FILES_ACCENT     = [8, 96, 242];
+const FILES_TEXT       = [36, 36, 36];
 
 const HEADER_BAR_HEIGHT = 44;
 const COLUMN_HEADER_HEIGHT = 28;

@@ -109,46 +109,51 @@ const (
 )
 
 // Palette. Colours are uint8 RGB triples (alpha is forced to 0xFF on write).
-// The names match Adwaita / libadwaita's light-theme roles -- exposed so the
-// playwright probe can sample for an exact pixel match.
+// The values are the WhiteSur (macOS Big Sur) light-theme roles -- a white file
+// "view" framed by a #f0f0f0 sidebar + #ebebeb header, WhiteSur's #0860F2
+// accent -- so Files matches wasmbox's --frame=aqua-whitesur chrome. The names
+// still read as libadwaita roles so the playwright probe can sample for an
+// exact pixel match; the three chrome greys stay distinct so the probe can tell
+// the panes apart.
 var (
-	// ColorWindowBG is the right-pane background (Adwaita @view_bg_color, light).
-	ColorWindowBG = [3]uint8{250, 250, 250}
-	// ColorSidebarBG is the left navigation pane background.
-	ColorSidebarBG = [3]uint8{241, 241, 241}
-	// ColorHeaderBarBG is the top header-bar background.
-	ColorHeaderBarBG = [3]uint8{248, 248, 248}
+	// ColorWindowBG is the right-pane background (WhiteSur view_bg_color #ffffff).
+	ColorWindowBG = [3]uint8{255, 255, 255}
+	// ColorSidebarBG is the left navigation pane background (#f0f0f0).
+	ColorSidebarBG = [3]uint8{240, 240, 240}
+	// ColorHeaderBarBG is the top header-bar background (WhiteSur
+	// headerbar_bg_color #ebebeb).
+	ColorHeaderBarBG = [3]uint8{235, 235, 235}
 	// ColorToolbarBG is an alias kept for callers that still talk about the
 	// "toolbar" -- the band is identical to the header bar.
 	ColorToolbarBG = ColorHeaderBarBG
-	// ColorDivider is the 1px line between header/sidebar/column-header bands.
-	ColorDivider = [3]uint8{218, 220, 224}
-	// ColorTextPrimary is the default text ink (Adwaita @view_fg_color).
-	ColorTextPrimary = [3]uint8{46, 52, 54}
-	// ColorTextSecondary is the dimmed ink for column metadata + section
-	// labels (Adwaita @theme_unfocused_fg).
-	ColorTextSecondary = [3]uint8{146, 153, 159}
-	// ColorAccent is the focused-selection blue (Adwaita @accent_bg_color).
-	ColorAccent = [3]uint8{53, 132, 228}
+	// ColorDivider is the 1px line between header/sidebar/column-header bands
+	// (WhiteSur borders, flattened to an opaque hairline).
+	ColorDivider = [3]uint8{211, 211, 211}
+	// ColorTextPrimary is the default text ink (WhiteSur window_fg_color #242424).
+	ColorTextPrimary = [3]uint8{36, 36, 36}
+	// ColorTextSecondary is the dimmed ink for column metadata + section labels.
+	ColorTextSecondary = [3]uint8{130, 130, 138}
+	// ColorAccent is the focused-selection blue (WhiteSur accent_bg_color #0860F2).
+	ColorAccent = [3]uint8{8, 96, 242}
 	// ColorOnAccent is the text/icon ink on top of the accent fill (white).
 	ColorOnAccent = [3]uint8{255, 255, 255}
-	// ColorButtonFace is the fill of the rest-state nav buttons (slightly
-	// raised vs the header bar so they read as "tappable").
-	ColorButtonFace = [3]uint8{240, 240, 240}
+	// ColorButtonFace is the fill of the rest-state nav buttons (WhiteSur
+	// card_bg_color #fbfbfb -- slightly raised vs the header bar).
+	ColorButtonFace = [3]uint8{251, 251, 251}
 	// ColorButtonDisabled is the dimmed ink for an unavailable button (e.g.
 	// the forward arrow when there is no forward history).
-	ColorButtonDisabled = [3]uint8{200, 204, 208}
+	ColorButtonDisabled = [3]uint8{198, 198, 204}
 	// ColorCrumbActiveBG is the fill of the active path-bar segment (the
 	// last crumb -- "you are here").
-	ColorCrumbActiveBG = [3]uint8{226, 228, 232}
+	ColorCrumbActiveBG = [3]uint8{224, 224, 226}
 	// ColorFolderFill / ColorFolderTab / ColorFolderStroke paint the
-	// Nautilus-style two-tone folder icon.
-	ColorFolderFill   = [3]uint8{95, 161, 224}
-	ColorFolderTab    = [3]uint8{120, 184, 235}
-	ColorFolderStroke = [3]uint8{53, 113, 184}
+	// Nautilus-style two-tone folder icon, tuned to the WhiteSur accent blue.
+	ColorFolderFill   = [3]uint8{74, 134, 246}
+	ColorFolderTab    = [3]uint8{120, 174, 250}
+	ColorFolderStroke = [3]uint8{8, 80, 210}
 	// ColorFilePaper / ColorFileBorder paint the page-with-folded-corner icon.
 	ColorFilePaper  = [3]uint8{255, 255, 255}
-	ColorFileBorder = [3]uint8{190, 195, 200}
+	ColorFileBorder = [3]uint8{200, 203, 208}
 )
 
 // Render paints the current scene into buf. Panics on size mismatch -- a
