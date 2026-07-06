@@ -28,14 +28,14 @@ const ROOT = fileURLToPath(new URL("..", import.meta.url));
 const BOOT_TIMEOUT_MS = 15000;
 const SCREENSHOT_PATH = "/tmp/files-nautilus.png";
 
-// Adwaita (light) palette duplicated from clients/files/internal/scene/render.go
+// WhiteSur (light) palette duplicated from clients/files/internal/scene/render.go
 // so the probe is self-contained. Keep in sync if the colour table changes there.
-const COLOR_WINDOW_BG      = [250, 250, 250];
-const COLOR_SIDEBAR_BG     = [241, 241, 241];
-const COLOR_HEADERBAR_BG   = [248, 248, 248];
-const COLOR_ACCENT         = [53, 132, 228];
-const COLOR_TEXT_PRIMARY   = [46, 52, 54];
-const COLOR_FOLDER_FILL    = [95, 161, 224];
+const COLOR_WINDOW_BG      = [255, 255, 255];
+const COLOR_SIDEBAR_BG     = [240, 240, 240];
+const COLOR_HEADERBAR_BG   = [235, 235, 235];
+const COLOR_ACCENT         = [8, 96, 242];
+const COLOR_TEXT_PRIMARY   = [36, 36, 36];
+const COLOR_FOLDER_FILL    = [74, 134, 246];
 const COLOR_ON_ACCENT      = [255, 255, 255];
 
 // Layout constants must match render.go.
@@ -97,7 +97,7 @@ function pixelAt(png, x, y) {
 function eqColor(px, c) { return px[0] === c[0] && px[1] === c[1] && px[2] === c[2]; }
 
 // findSidebarBounds locates the file browser surface by its unique sidebar
-// background colour (no other compositor pane uses Adwaita's @sidebar_bg).
+// background colour (no other compositor pane uses Adwaita's sidebar #f0f0f0).
 // Returns the bounding box of the contiguous sidebar pixel block.
 function findSidebarBounds(png, color) {
   const { width, height, data } = png;
@@ -189,7 +189,7 @@ try {
     if (!eqColor(sbPx, COLOR_SIDEBAR_BG)) {
       fail(`sidebar pixel at (${sbX},${sbY}) = ${sbPx}, want ${COLOR_SIDEBAR_BG}`);
     } else {
-      console.log(`ok  sidebar pixel @ (${sbX},${sbY}) = (${sbPx.join(",")}) -- COLOR_SIDEBAR_BG (Adwaita @sidebar_bg)`);
+      console.log(`ok  sidebar pixel @ (${sbX},${sbY}) = (${sbPx.join(",")}) -- COLOR_SIDEBAR_BG (WhiteSur sidebar #f0f0f0)`);
     }
     // Window background (right pane, far right + below all rows).
     const wbX = surface.x + SURFACE_W - 4;
@@ -198,7 +198,7 @@ try {
     if (!eqColor(wbPx, COLOR_WINDOW_BG)) {
       fail(`window-bg pixel at (${wbX},${wbY}) = ${wbPx}, want ${COLOR_WINDOW_BG}`);
     } else {
-      console.log(`ok  window-bg pixel @ (${wbX},${wbY}) = (${wbPx.join(",")}) -- COLOR_WINDOW_BG (Adwaita @view_bg)`);
+      console.log(`ok  window-bg pixel @ (${wbX},${wbY}) = (${wbPx.join(",")}) -- COLOR_WINDOW_BG (WhiteSur view_bg #ffffff)`);
     }
     // Header bar background (right of the path bar buttons + above the column
     // headers). Sample at far-right of the header band.
