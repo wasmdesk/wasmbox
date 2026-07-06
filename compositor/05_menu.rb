@@ -113,6 +113,7 @@ module RootMenu
     "showcase"  => "Toolkit Showcase",
     "calculator" => "Calculator",
     "notepad"    => "Notepad",
+    "settings"   => "Settings",
   }.freeze
 
   # IDs the root menu intentionally OMITS from the Applications submenu. The
