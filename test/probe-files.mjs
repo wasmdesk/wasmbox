@@ -165,15 +165,33 @@ try {
   );
   console.log("ok  compositor booted");
 
-  // Spawn the files client.
+  // Spawn the files client, then settle until it has FULLY painted rather than
+  // sampling after a fixed wait -- a fixed wait races the window's placement +
+  // first render, so an early frame yields a mislocated surface / unpainted
+  // content (a flaky failure). Poll until the sidebar is located AND the list's
+  // folder icons are on screen, meaning the scene's first paint is complete.
   await page.evaluate(() => globalThis.wasmboxSpawnExternal("clients/files/worker.js"));
-  await page.waitForTimeout(2500);
-
-  // Discover the Files window on the canvas by its unique cream panel BG.
-  let shot1 = await page.screenshot({ type: "png", fullPage: false });
-  let png1 = PNG.sync.read(shot1);
-
-  const surface = fileSurface(png1);
+  let png1 = null;
+  let surface = null;
+  for (let i = 0; i < 80; i++) {
+    await page.waitForTimeout(150);
+    const png = PNG.sync.read(await page.screenshot({ type: "png", fullPage: false }));
+    const s = fileSurface(png);
+    if (!s) continue;
+    let folderPx = 0;
+    for (let k = 0; k + 2 < png.data.length; k += 4) {
+      if (png.data[k] === COLOR_FOLDER_FILL[0] && png.data[k + 1] === COLOR_FOLDER_FILL[1] && png.data[k + 2] === COLOR_FOLDER_FILL[2]) {
+        folderPx++;
+      }
+    }
+    if (folderPx > 30) { png1 = png; surface = s; break; }
+  }
+  if (!png1) {
+    // Fall back to whatever the last frame shows so the failure below is
+    // reported against a real screenshot rather than a null.
+    png1 = PNG.sync.read(await page.screenshot({ type: "png", fullPage: false }));
+    surface = fileSurface(png1);
+  }
   if (!surface) {
     fail(`Files surface not visible on canvas (no sidebar BG ${COLOR_SIDEBAR_BG} found)`);
   } else {
