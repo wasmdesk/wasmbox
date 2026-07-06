@@ -88,7 +88,7 @@ jobs:
           wexec="$root/lib/wasm/wasm_exec.js"; [ -f "$wexec" ] || wexec="$root/misc/wasm/wasm_exec.js"
           # Every wasm client the root-menu / dock can launch. Each ships its own
           # sdk.js + wasm_exec.js beside its worker.js so it resolves same-origin.
-          for app in hello terminal files code showcase calculator notepad settings; do
+          for app in hello terminal files code showcase calculator notepad settings browser; do
             GOOS=js GOARCH=wasm go build -o "clients/$app/$app.wasm" "./clients/$app"
             cp clients/sdk/sdk.js "clients/$app/sdk.js"
             cp "$wexec" "clients/$app/wasm_exec.js"

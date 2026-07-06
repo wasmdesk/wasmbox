@@ -45,14 +45,14 @@ tasks:
 
   build:
     desc: Build wasmbox.wasm + hello + dock + terminal + files + code clients + copy wasm_exec.js
-    deps: [build:compositor, build:hello, build:dock, build:terminal, build:files, build:code, build:showcase, build:calculator, build:notepad, build:settings, build:serve]
+    deps: [build:compositor, build:hello, build:dock, build:terminal, build:files, build:code, build:showcase, build:calculator, build:notepad, build:settings, build:browser, build:serve]
     cmds:
       # Content-hash manifests for coi-serviceworker.js (see scripts/wasm-manifest.sh).
       - sh scripts/wasm-manifest.sh clients/*/*.wasm
 
   build:all:
     desc: Build everything incl. the external go-quake1 + wasmdock clients
-    deps: [build:compositor, build:hello, build:quake, build:dock, build:terminal, build:files, build:code, build:settings, build:serve]
+    deps: [build:compositor, build:hello, build:quake, build:dock, build:terminal, build:files, build:code, build:settings, build:browser, build:serve]
     cmds:
       - sh scripts/wasm-manifest.sh clients/*/*.wasm
 
@@ -260,6 +260,18 @@ tasks:
       - go build -o clients/settings/settings.wasm ./clients/settings
     generates:
       - clients/settings/settings.wasm
+
+  build:browser:
+    desc: Build the WhiteSur/Safari browser-shell external client (clients/browser/browser.wasm)
+    env:
+      GOWORK: "off"
+      GOOS: js
+      GOARCH: wasm
+      CGO_ENABLED: "0"
+    cmds:
+      - go build -o clients/browser/browser.wasm ./clients/browser
+    generates:
+      - clients/browser/browser.wasm
 
   build:notepad:
     desc: Build the toolkit-notepad external client (clients/notepad/notepad.wasm)
