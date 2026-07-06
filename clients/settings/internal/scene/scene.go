@@ -152,7 +152,7 @@ func Render(s *State, buf []byte) {
 		ry := catTop + i*catRowH
 		ink := th.OnBackground
 		if i == s.selected {
-			p.FillRect(toolkit.Rect{X: catMargin, Y: ry, W: sidebarW - 2*catMargin, H: catRowH - 4}, th.Accent)
+			p.FillRoundRect(toolkit.Rect{X: catMargin, Y: ry, W: sidebarW - 2*catMargin, H: catRowH - 4}, 8, th.Accent)
 			ink = onAccent
 		}
 		toolkit.DrawText(p, contentPad, ry+(catRowH-4-toolkit.GlyphHeight)/2, c.name, ink)
