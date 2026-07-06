@@ -38,8 +38,12 @@ github.com/go-task/slim-sprig/v3 v3.0.0 h1:sUs3vkvUymDpBKi3qH1YSqBQk9+9D/8M2mN1v
 github.com/go-task/slim-sprig/v3 v3.0.0/go.mod h1:W848ghGpv3Qj3dhTPRyJypKRiqCdHZiAzKg9hl15HA8=
 github.com/go-widgets/painter v0.1.1-0.20260706170118-01dc3241c587 h1:vDqry+LhhEzgrTmyKKiohmHB2ypbOuT8vGZCfX+FlSo=
 github.com/go-widgets/painter v0.1.1-0.20260706170118-01dc3241c587/go.mod h1:ccmlkH2UmcXQh6rt9Fu2eDt2RI0B5V0POaGmUKeW0EQ=
+github.com/go-widgets/painter v0.1.1-0.20260706183023-1373a47de8fc h1:c7v5cf1Ny4aNxom1Np5yDUhljVl/YCc4vPEigCGQE7k=
+github.com/go-widgets/painter v0.1.1-0.20260706183023-1373a47de8fc/go.mod h1:ccmlkH2UmcXQh6rt9Fu2eDt2RI0B5V0POaGmUKeW0EQ=
 github.com/go-widgets/toolkit v0.9.3-0.20260706170132-bd2ef32bf2a6 h1:h0PyBCFniiQIAND5N6ZL6AN69F2c430XBYiMoads2uo=
 github.com/go-widgets/toolkit v0.9.3-0.20260706170132-bd2ef32bf2a6/go.mod h1:gdsk+M0w/DlH+eHCKXd8TjkWN4gswdm5r69J7NVIOTg=
+github.com/go-widgets/toolkit v0.9.3-0.20260706183657-7361506703ed h1:9/ZSfiZBN8bIobF2efm1AEFSiVGW2z7kkOw1U1jZbY8=
+github.com/go-widgets/toolkit v0.9.3-0.20260706183657-7361506703ed/go.mod h1:mP4rHHGZ1DaC2VBuEqzBGTg1sm00Xl/eNOU6cIwSa1o=
 github.com/google/go-cmp v0.7.0 h1:wk8382ETsv4JYUZwIsn6YpYiWiBsYLSJiTsyBybVuN8=
 github.com/google/go-cmp v0.7.0/go.mod h1:pXiqmnSA92OHEEa9HXL2W4E7lf9JzCmGVUdgjX3N/iU=
 github.com/google/pprof v0.0.0-20260402051712-545e8a4df936 h1:EwtI+Al+DeppwYX2oXJCETMO23COyaKGP6fHVpkpWpg=

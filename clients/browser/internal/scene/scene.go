@@ -133,9 +133,9 @@ func Render(s *State, buf []byte) {
 	drawButton(p, th, s.fwdRect, ">", fwdInk)
 	drawButton(p, th, s.addRect, "+", th.OnSurface)
 
-	// Address bar: a rounded-ish white pill with the URL / placeholder.
-	p.FillRect(s.addrRect, th.Surface)
-	strokePill(p, s.addrRect, th.Border)
+	// Address bar: a rounded white pill with the URL / placeholder.
+	p.FillRoundRect(s.addrRect, addrH/2, th.Surface)
+	p.StrokeRoundRect(s.addrRect, addrH/2, th.Border, 1)
 	urlInk := th.OnSurface
 	if !s.onSite {
 		urlInk = dim(th)
@@ -158,14 +158,14 @@ func renderStart(s *State, p *painter.PixelPainter, th *toolkit.Theme) {
 	}
 	for i, f := range s.favs {
 		r := s.tileRects[i]
-		// Card body + border.
-		p.FillRect(r, th.Surface)
-		strokePill(p, r, th.Border)
-		// Icon block: accent square with the site's first letter, centred.
+		// Card body + border (rounded).
+		p.FillRoundRect(r, 10, th.Surface)
+		p.StrokeRoundRect(r, 10, th.Border, 1)
+		// Icon block: rounded accent square with the site's first letter.
 		iconSz := 44
 		ix := r.X + (r.W-iconSz)/2
 		iy := r.Y + 14
-		p.FillRect(toolkit.Rect{X: ix, Y: iy, W: iconSz, H: iconSz}, th.Accent)
+		p.FillRoundRect(toolkit.Rect{X: ix, Y: iy, W: iconSz, H: iconSz}, 10, th.Accent)
 		initial := string(upper(f.name[0]))
 		toolkit.DrawText(p, ix+(iconSz-toolkit.TextWidth(initial))/2, iy+(iconSz-toolkit.GlyphHeight)/2, initial, onAccent)
 		// Label under the icon.
@@ -248,17 +248,9 @@ func (s *State) HandleKey(code string) bool {
 // --- helpers --------------------------------------------------------------
 
 func drawButton(p *painter.PixelPainter, th *toolkit.Theme, r toolkit.Rect, label string, ink toolkit.RGBA) {
-	p.FillRect(r, th.SurfaceAlt)
-	strokePill(p, r, th.Border)
+	p.FillRoundRect(r, 6, th.SurfaceAlt)
+	p.StrokeRoundRect(r, 6, th.Border, 1)
 	toolkit.DrawText(p, r.X+(r.W-toolkit.TextWidth(label))/2, r.Y+(r.H-toolkit.GlyphHeight)/2, label, ink)
-}
-
-// strokePill outlines r (a 1px border); named for the pill/card shapes it edges.
-func strokePill(p *painter.PixelPainter, r toolkit.Rect, c toolkit.RGBA) {
-	p.FillRect(toolkit.Rect{X: r.X, Y: r.Y, W: r.W, H: 1}, c)
-	p.FillRect(toolkit.Rect{X: r.X, Y: r.Y + r.H - 1, W: r.W, H: 1}, c)
-	p.FillRect(toolkit.Rect{X: r.X, Y: r.Y, W: 1, H: r.H}, c)
-	p.FillRect(toolkit.Rect{X: r.X + r.W - 1, Y: r.Y, W: 1, H: r.H}, c)
 }
 
 // dim returns a muted ink for placeholder / disabled text.
