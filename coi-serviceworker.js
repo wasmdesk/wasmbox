@@ -43,29 +43,74 @@ if (typeof window === "undefined") {
     }
   });
 
+  // withCOI rebuilds a response carrying the COOP/COEP(/CORP) headers a
+  // SharedArrayBuffer page needs -- the original coi-serviceworker behaviour.
+  const withCOI = (response) => {
+    // Opaque/redirect responses (status 0) cannot be rebuilt; pass through.
+    if (response.status === 0) return response;
+    const headers = new Headers(response.headers);
+    headers.set("Cross-Origin-Embedder-Policy", "require-corp");
+    headers.set("Cross-Origin-Opener-Policy", "same-origin");
+    // Same-origin resources are always allowed under COEP; tagging them
+    // CORP:same-origin is belt-and-suspenders and harmless.
+    if (!headers.has("Cross-Origin-Resource-Policy")) {
+      headers.set("Cross-Origin-Resource-Policy", "same-origin");
+    }
+    return new Response(response.body, {
+      status: response.status,
+      statusText: response.statusText,
+      headers,
+    });
+  };
+
+  // The big client wasms we content-hash cache. Keyed on the URL tail.
+  const WASM_RE = /\/clients\/quake\/quake\.wasm(\?|$)/;
+  const WASM_CACHE = "wasmbox-wasm-v1";
+
+  // cachedWasm serves the ~13 MB quake.wasm from CacheStorage keyed by its
+  // CONTENT hash (from a tiny build-time manifest), independent of the
+  // origin's ETag/max-age. When the hash is already cached the wasm is served
+  // with NO network body -- so a page reload, and even a redeploy that only
+  // re-timestamps the file, does not re-download it; only a real content
+  // change (new hash) fetches the body. Any hiccup (missing manifest, cache
+  // error) rejects and the caller falls back to the plain network path.
+  const cachedWasm = async (req) => {
+    const manifestURL = req.url.replace(/quake\.wasm(\?.*)?$/, "quake-wasm.json");
+    const mres = await fetch(manifestURL, { cache: "no-store" });
+    if (!mres.ok) throw new Error("no wasm manifest");
+    const hash = (await mres.json()).sha256;
+    if (!hash) throw new Error("wasm manifest missing sha256");
+    const key = "/__wasmcache/quake.wasm?h=" + hash;
+    const keyURL = new Request(key).url;
+    const cache = await caches.open(WASM_CACHE);
+    const hit = await cache.match(keyURL);
+    if (hit) return hit;
+    const resp = withCOI(await fetch(req));
+    if (resp.ok) {
+      await cache.put(keyURL, resp.clone());
+      // Evict stale hashes so the cache holds only the current wasm.
+      for (const k of await cache.keys()) {
+        if (k.url.includes("/__wasmcache/quake.wasm?h=") && k.url !== keyURL) {
+          await cache.delete(k);
+        }
+      }
+    }
+    return resp;
+  };
+
   self.addEventListener("fetch", (event) => {
     const req = event.request;
     // Leave cache-only cross-origin probes alone (Chromium throws otherwise).
     if (req.cache === "only-if-cached" && req.mode !== "same-origin") return;
 
+    // Content-hash cache path for the big Quake wasm (falls back to network).
+    if (req.method === "GET" && WASM_RE.test(req.url)) {
+      event.respondWith(cachedWasm(req).catch(() => fetch(req).then(withCOI)));
+      return;
+    }
+
     event.respondWith(
-      fetch(req).then((response) => {
-        // Opaque/redirect responses (status 0) cannot be rebuilt; pass through.
-        if (response.status === 0) return response;
-        const headers = new Headers(response.headers);
-        headers.set("Cross-Origin-Embedder-Policy", "require-corp");
-        headers.set("Cross-Origin-Opener-Policy", "same-origin");
-        // Same-origin resources are always allowed under COEP; tagging them
-        // CORP:same-origin is belt-and-suspenders and harmless.
-        if (!headers.has("Cross-Origin-Resource-Policy")) {
-          headers.set("Cross-Origin-Resource-Policy", "same-origin");
-        }
-        return new Response(response.body, {
-          status: response.status,
-          statusText: response.statusText,
-          headers,
-        });
-      }).catch((e) => {
+      fetch(req).then(withCOI).catch((e) => {
         // A network error here would otherwise blank the page; log + rethrow
         // so the failure is visible rather than silent.
         console.error("coi-serviceworker fetch:", e);
