@@ -44,20 +44,25 @@ type State struct {
 	selected int
 }
 
-// Layout constants (pixels).
+// Layout constants (pixels). Modelled on macOS Ventura System Settings: a grey
+// window with a translucent-feel sidebar and content area, and the settings
+// rows grouped inside a white rounded "card".
 const (
-	sidebarW   = 180
-	catTop     = 48
-	catRowH    = 36
-	catMargin  = 8
-	contentPad = 22
-	titleTop   = 20
-	contentTop = 58
-	rowH       = 52
-	switchW    = 46
-	switchH    = 26
-	scaleW     = 150
-	scaleH     = 22
+	sidebarW    = 200
+	catTop      = 48
+	catRowH     = 34
+	catMargin   = 10 // sidebar pill inset from the sidebar edges
+	sidePad     = 16 // sidebar text inset
+	titleTop    = 22
+	cardMarginX = 20 // card inset from the content-area edges
+	cardTop     = 56
+	cardRadius  = 10
+	rowH        = 44
+	rowPadX     = 16 // row content inset from the card edges
+	switchW     = 44
+	switchH     = 26
+	scaleW      = 160
+	scaleH      = 24
 )
 
 // New builds the Settings panel sized W×H.
@@ -105,25 +110,30 @@ func New(w, h int) *State {
 	return s
 }
 
-// layout assigns each row control its absolute bounds. Row index alone drives
-// the vertical position, so every category's controls are laid out once (only
-// the selected category is drawn / hit-tested).
+// cardRect is the white grouped card that holds a category's rows.
+func (s *State) cardRect(numRows int) toolkit.Rect {
+	x := sidebarW + cardMarginX
+	return toolkit.Rect{X: x, Y: cardTop, W: s.W - x - cardMarginX, H: numRows * rowH}
+}
+
+// layout assigns each row control its absolute bounds inside its category's
+// card. Every category is laid out once (only the selected one is drawn /
+// hit-tested).
 func (s *State) layout() {
-	contentX := sidebarW
-	contentW := s.W - sidebarW
 	for ci := range s.cats {
+		card := s.cardRect(len(s.cats[ci].rows))
 		for ri := range s.cats[ci].rows {
 			row := &s.cats[ci].rows[ri]
-			ry := contentTop + ri*rowH
+			ry := card.Y + ri*rowH
 			switch row.kind {
 			case rowSwitch:
 				row.sw.SetBounds(toolkit.Rect{
-					X: contentX + contentW - contentPad - switchW,
+					X: card.X + card.W - rowPadX - switchW,
 					Y: ry + (rowH-switchH)/2, W: switchW, H: switchH,
 				})
 			case rowScale:
 				row.sc.SetBounds(toolkit.Rect{
-					X: contentX + contentW - contentPad - scaleW,
+					X: card.X + card.W - rowPadX - scaleW,
 					Y: ry + (rowH-scaleH)/2, W: scaleW, H: scaleH,
 				})
 			}
@@ -135,38 +145,41 @@ func (s *State) layout() {
 func Render(s *State, buf []byte) {
 	p := painter.NewPixelPainter(buf, s.W, s.H)
 	th := s.theme
-	contentX := sidebarW
 	onAccent := th.Extra["accent_fg_color"]
 	if onAccent == (toolkit.RGBA{}) {
 		onAccent = toolkit.RGB(0xff, 0xff, 0xff)
 	}
 
-	// Sidebar ground + white content pane + hairline divider between them.
+	// Grey window ground; a hairline splits the sidebar from the content area.
 	p.FillRect(toolkit.Rect{X: 0, Y: 0, W: s.W, H: s.H}, th.Background)
-	p.FillRect(toolkit.Rect{X: contentX, Y: 0, W: s.W - contentX, H: s.H}, th.Surface)
-	p.FillRect(toolkit.Rect{X: contentX, Y: 0, W: 1, H: s.H}, th.Border)
+	p.FillRect(toolkit.Rect{X: sidebarW, Y: 0, W: 1, H: s.H}, th.Border)
 
-	// Sidebar: title + category rows (selected row = accent pill).
-	toolkit.DrawText(p, contentPad-4, titleTop, "Settings", th.OnBackground)
+	// Sidebar: title + category rows (selected row = rounded accent pill).
+	toolkit.DrawText(p, sidePad, titleTop, "Settings", th.OnBackground)
 	for i, c := range s.cats {
 		ry := catTop + i*catRowH
 		ink := th.OnBackground
 		if i == s.selected {
-			p.FillRoundRect(toolkit.Rect{X: catMargin, Y: ry, W: sidebarW - 2*catMargin, H: catRowH - 4}, 8, th.Accent)
+			p.FillRoundRect(toolkit.Rect{X: catMargin, Y: ry, W: sidebarW - 2*catMargin, H: catRowH - 4}, 7, th.Accent)
 			ink = onAccent
 		}
-		toolkit.DrawText(p, contentPad, ry+(catRowH-4-toolkit.GlyphHeight)/2, c.name, ink)
+		toolkit.DrawText(p, sidePad+5, ry+(catRowH-4-toolkit.GlyphHeight)/2, c.name, ink)
 	}
 
-	// Content: page title + divider, then the selected category's rows.
+	// Content: page title, then the selected category's rows grouped inside a
+	// white rounded card with inset dividers between rows (macOS Settings).
 	cat := s.cats[s.selected]
-	toolkit.DrawText(p, contentX+contentPad, titleTop, cat.name, th.OnSurface)
-	p.FillRect(toolkit.Rect{X: contentX + contentPad, Y: titleTop + toolkit.GlyphHeight + 8, W: s.W - contentX - 2*contentPad, H: 1}, th.Border)
+	toolkit.DrawText(p, sidebarW+cardMarginX, titleTop, cat.name, th.OnSurface)
+	card := s.cardRect(len(cat.rows))
+	p.FillRoundRect(card, cardRadius, th.Surface)
+	p.StrokeRoundRect(card, cardRadius, th.Border, 1)
 	for ri := range cat.rows {
 		row := cat.rows[ri]
-		ry := contentTop + ri*rowH
-		toolkit.DrawText(p, contentX+contentPad, ry+(rowH-toolkit.GlyphHeight)/2, row.title, th.OnSurface)
-		p.FillRect(toolkit.Rect{X: contentX + contentPad, Y: ry + rowH - 1, W: s.W - contentX - 2*contentPad, H: 1}, th.Border)
+		ry := card.Y + ri*rowH
+		toolkit.DrawText(p, card.X+rowPadX, ry+(rowH-toolkit.GlyphHeight)/2, row.title, th.OnSurface)
+		if ri < len(cat.rows)-1 {
+			p.FillRect(toolkit.Rect{X: card.X + rowPadX, Y: ry + rowH - 1, W: card.W - 2*rowPadX, H: 1}, th.Border)
+		}
 		switch row.kind {
 		case rowSwitch:
 			row.sw.Draw(p, th)
@@ -196,6 +209,7 @@ func (s *State) HandleMouse(x, y int) bool {
 		return false
 	}
 	cat := &s.cats[s.selected]
+	card := s.cardRect(len(cat.rows))
 	for ri := range cat.rows {
 		row := &cat.rows[ri]
 		var b toolkit.Rect
@@ -213,8 +227,8 @@ func (s *State) HandleMouse(x, y int) bool {
 			}
 			return true
 		}
-		ry := contentTop + ri*rowH
-		if row.kind == rowSwitch && y >= ry && y < ry+rowH {
+		ry := card.Y + ri*rowH
+		if row.kind == rowSwitch && y >= ry && y < ry+rowH && x >= card.X && x < card.X+card.W {
 			row.sw.OnEvent(toolkit.Event{Kind: toolkit.EventClick})
 			return true
 		}

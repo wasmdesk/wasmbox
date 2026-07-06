@@ -86,22 +86,21 @@ try {
   out.located = win;
   if (win) { await page.mouse.click(win.x + 200, win.y - 14); await page.waitForTimeout(400); }
 
-  // Ensure the "Appearance" page (sidebar row 0) is selected -- findWindow only
-  // spans the #f5f5f5 sidebar, so use the fixed window width (640, from
-  // worker.js) to reach the content-pane controls.
-  const FULL_W = 640, SIDEBAR_W = 180, PAD = 22, SWITCH_W = 46;
+  // The window ground is uniformly grey now, so findWindow spans the whole
+  // window body. Layout constants mirror clients/settings/internal/scene.
+  const CARD_MX = 20, ROW_PADX = 16, SWITCH_W = 44, CARD_TOP = 56, ROW_H = 44;
   if (win) {
-    await page.mouse.click(win.x + 40, win.y + 48 + 18); // "Appearance" row
+    await page.mouse.click(win.x + 40, win.y + 48 + 17); // "Appearance" sidebar row
     await page.waitForTimeout(300);
   }
   png = PNG.sync.read(await page.screenshot({ type: "png" }));
   out.accentBefore = countColor(png, ACCENT);
 
-  // Toggle the "Dark Mode" switch (content row 0, right edge). off->on turns
-  // its track accent-blue, so accent px must rise.
+  // Toggle the "Dark Mode" switch (row 0, right edge of the card). off->on
+  // turns its track accent-blue, so accent px must rise.
   if (win) {
-    const switchCx = win.x + FULL_W - PAD - SWITCH_W / 2;
-    const switchCy = win.y + 58 + 26; // contentTop + rowH/2 (row 0)
+    const switchCx = win.x + win.w - CARD_MX - ROW_PADX - SWITCH_W / 2;
+    const switchCy = win.y + CARD_TOP + ROW_H / 2;
     await page.mouse.click(switchCx, switchCy);
     await page.waitForTimeout(300);
   }
