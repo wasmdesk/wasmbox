@@ -114,6 +114,7 @@ module RootMenu
     "calculator" => "Calculator",
     "notepad"    => "Notepad",
     "settings"   => "Settings",
+    "browser"    => "Browser",
   }.freeze
 
   # IDs the root menu intentionally OMITS from the Applications submenu. The

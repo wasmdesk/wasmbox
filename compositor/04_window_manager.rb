@@ -70,6 +70,10 @@ class WindowManager
     # content pane of Switch / Scale rows. Exercises those toolkit controls
     # in a System-Settings-style layout.
     "settings"   => "clients/settings/worker.js",
+    # WhiteSur/Safari-styled web browser shell: a toolbar + address bar over a
+    # Favourites start page. The wasmbox page is COEP:require-corp, so it can't
+    # embed live cross-origin sites; tiles open local placeholder pages.
+    "browser"    => "clients/browser/worker.js",
     # Bundled quake client (pure-Go Quake 1, from the sibling go-quake1 repo).
     # The wasm is huge (~190 MB) and may not be built locally, but the worker.js
     # is part of the wasmbox tree, so the descriptor is always safe — the worker

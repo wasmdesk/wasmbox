@@ -14,6 +14,7 @@
 /clients/showcase/showcase.wasm
 /clients/calculator/calculator.wasm
 /clients/settings/settings.wasm
+/clients/browser/browser.wasm
 /clients/notepad/notepad.wasm
 /bin/
 # Stray binaries from `go build` in the cmd/serve dir (Taskfile uses
