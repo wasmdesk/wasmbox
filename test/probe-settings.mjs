@@ -88,7 +88,7 @@ try {
 
   // The window ground is uniformly grey now, so findWindow spans the whole
   // window body. Layout constants mirror clients/settings/internal/scene.
-  const CARD_MX = 20, ROW_PADX = 16, SWITCH_W = 44, CARD_TOP = 56, ROW_H = 44;
+  const CARD_MX = 20, ROW_PADX = 16, SWITCH_W = 36, CARD_TOP = 56, ROW_H = 44;
   if (win) {
     await page.mouse.click(win.x + 40, win.y + 48 + 17); // "Appearance" sidebar row
     await page.waitForTimeout(300);
