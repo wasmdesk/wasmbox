@@ -59,10 +59,13 @@ const (
 	cardRadius  = 10
 	rowH        = 44
 	rowPadX     = 16 // row content inset from the card edges
-	switchW     = 44
-	switchH     = 26
-	scaleW      = 160
-	scaleH      = 24
+	// Switch + slider share a compact 20px control height so their knobs read
+	// as the same 16px family (switch knob = switchH-2*switchPad = 16; the
+	// toolkit slider thumb is 16), instead of a chunky pill next to a thin bar.
+	switchW = 36
+	switchH = 20
+	scaleW  = 180
+	scaleH  = 20
 )
 
 // New builds the Settings panel sized W×H.
