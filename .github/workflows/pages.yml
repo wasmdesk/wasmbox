@@ -108,14 +108,12 @@ jobs:
           GOWORK=off GOOS=js GOARCH=wasm go -C _engine build -trimpath -tags no_embed_assets \
             -ldflags "-s -w -X main.OCIReference=/quake-assets:latest" \
             -o "$PWD/clients/quake/quake.wasm" ./cmd/quake-wasmbox/
-          # Content-hash manifest read by coi-serviceworker.js to cache the
-          # ~13 MB quake.wasm across reloads/redeploys, re-downloading only when
-          # this sha256 changes. GitHub Pages' mtime-based ETag busts every
-          # deploy, so the SW keys on content instead. Shipped via the full
-          # clients/ copy in the assemble step below.
-          h=$(sha256sum clients/quake/quake.wasm | cut -d' ' -f1)
-          printf '{"sha256":"%s"}\n' "$h" > clients/quake/quake-wasm.json
-          echo "quake-wasm.json sha256: $h"
+          # Content-hash manifests for EVERY lazily-loaded client wasm, read by
+          # coi-serviceworker.js to cache each app in CacheStorage keyed by its
+          # sha256 -- re-downloaded only when its bytes change. GitHub Pages'
+          # mtime-based ETag busts every deploy, so the SW keys on content
+          # instead. Shipped via the full clients/ copy in the assemble step.
+          sh scripts/wasm-manifest.sh clients/*/*.wasm
 
       - name: Fetch + pack the LibreQuake assets (OCI /v2/quake-assets mirror)
         run: |

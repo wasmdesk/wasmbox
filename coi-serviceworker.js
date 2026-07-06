@@ -63,34 +63,42 @@ if (typeof window === "undefined") {
     });
   };
 
-  // The big client wasms we content-hash cache. Keyed on the URL tail.
-  const WASM_RE = /\/clients\/quake\/quake\.wasm(\?|$)/;
+  // Every lazily-loaded client wasm -- clients/<app>/<app>.wasm -- is
+  // content-hash cached (quake, code, files, terminal, calculator, ...). The
+  // compositor's own wasmbox.wasm loads eagerly at boot and is left to the
+  // normal HTTP cache.
+  const WASM_RE = /\/clients\/[^/]+\/[^/]+\.wasm(\?|$)/;
   const WASM_CACHE = "wasmbox-wasm-v1";
 
-  // cachedWasm serves the ~13 MB quake.wasm from CacheStorage keyed by its
-  // CONTENT hash (from a tiny build-time manifest), independent of the
-  // origin's ETag/max-age. When the hash is already cached the wasm is served
-  // with NO network body -- so a page reload, and even a redeploy that only
-  // re-timestamps the file, does not re-download it; only a real content
-  // change (new hash) fetches the body. Any hiccup (missing manifest, cache
-  // error) rejects and the caller falls back to the plain network path.
+  // cachedWasm serves a client wasm (up to ~13 MB for quake) from CacheStorage
+  // keyed by its CONTENT hash (from a tiny build-time manifest beside it,
+  // <name>-wasm.json), independent of the origin's ETag/max-age. When the hash
+  // is already cached the wasm is served with NO network body -- so a page
+  // reload, and even a redeploy that only re-timestamps the file, does not
+  // re-download it; only a real content change (new hash) fetches the body.
+  // Each app is namespaced by its own path, so caching one never evicts
+  // another. Any hiccup (missing manifest, cache error) rejects and the caller
+  // falls back to the plain network path.
   const cachedWasm = async (req) => {
-    const manifestURL = req.url.replace(/quake\.wasm(\?.*)?$/, "quake-wasm.json");
+    // clients/<app>/<app>.wasm -> clients/<app>/<app>-wasm.json (same dir).
+    const manifestURL = req.url.replace(/([^/]+)\.wasm(\?.*)?$/, "$1-wasm.json");
     const mres = await fetch(manifestURL, { cache: "no-store" });
     if (!mres.ok) throw new Error("no wasm manifest");
     const hash = (await mres.json()).sha256;
     if (!hash) throw new Error("wasm manifest missing sha256");
-    const key = "/__wasmcache/quake.wasm?h=" + hash;
-    const keyURL = new Request(key).url;
+    // Namespace the cache key by this wasm's own path so apps don't collide.
+    const keyPath = "/__wasmcache" + new URL(req.url).pathname;
+    const keyURL = new Request(keyPath + "?h=" + hash).url;
+    const prefix = new Request(keyPath + "?h=").url;
     const cache = await caches.open(WASM_CACHE);
     const hit = await cache.match(keyURL);
     if (hit) return hit;
     const resp = withCOI(await fetch(req));
     if (resp.ok) {
       await cache.put(keyURL, resp.clone());
-      // Evict stale hashes so the cache holds only the current wasm.
+      // Evict stale hashes for THIS app only (leave other apps' wasms cached).
       for (const k of await cache.keys()) {
-        if (k.url.includes("/__wasmcache/quake.wasm?h=") && k.url !== keyURL) {
+        if (k.url.startsWith(prefix) && k.url !== keyURL) {
           await cache.delete(k);
         }
       }

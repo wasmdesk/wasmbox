@@ -4,7 +4,8 @@
 /clients/hello/hello.wasm
 /clients/dock/dock.wasm
 /clients/quake/quake.wasm
-/clients/quake/quake-wasm.json
+# Content-hash manifests generated beside each built client wasm.
+/clients/*/*-wasm.json
 /clients/dock/dock.wasm
 /clients/dock/wasm_exec.js
 /clients/terminal/terminal.wasm
