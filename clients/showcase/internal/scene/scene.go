@@ -11,6 +11,7 @@
 package scene
 
 import (
+	"github.com/go-widgets/painter"
 	"github.com/go-widgets/toolkit"
 )
 
@@ -281,28 +282,29 @@ func (s *State) setActiveThemeName(name string) {
 func Render(s *State, buf []byte) {
 	r := toolkit.Rect{X: 0, Y: 0, W: s.W, H: s.H}
 	fill(buf, s.W, r, s.theme.Background)
+	p := painter.NewPixelPainter(buf, s.W, s.H)
 
-	s.menuBar.Draw(buf, s.W, s.theme)
-	s.toolbar.Draw(buf, s.W, s.theme)
-	s.notebook.Draw(buf, s.W, s.theme)
+	s.menuBar.Draw(p, s.theme)
+	s.toolbar.Draw(p, s.theme)
+	s.notebook.Draw(p, s.theme)
 
 	switch s.notebook.Active {
 	case 0:
-		s.clickLabel.Draw(buf, s.W, s.theme)
+		s.clickLabel.Draw(p, s.theme)
 	case 1:
-		s.check2.Draw(buf, s.W, s.theme)
-		s.radioA.Draw(buf, s.W, s.theme)
-		s.radioB.Draw(buf, s.W, s.theme)
-		s.dropdown.Draw(buf, s.W, s.theme)
+		s.check2.Draw(p, s.theme)
+		s.radioA.Draw(p, s.theme)
+		s.radioB.Draw(p, s.theme)
+		s.dropdown.Draw(p, s.theme)
 	case 2:
-		s.textView.Draw(buf, s.W, s.theme)
+		s.textView.Draw(p, s.theme)
 	case 3:
-		s.listBox.Draw(buf, s.W, s.theme)
+		s.listBox.Draw(p, s.theme)
 	case 6:
-		s.scale.Draw(buf, s.W, s.theme)
-		s.spin.Draw(buf, s.W, s.theme)
+		s.scale.Draw(p, s.theme)
+		s.spin.Draw(p, s.theme)
 	}
-	s.status.Draw(buf, s.W, s.theme)
+	s.status.Draw(p, s.theme)
 }
 
 // HandleMouse delivers a click at (x, y). Returns true if the scene

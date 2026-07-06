@@ -1,6 +1,6 @@
 // Command calculator is a toolkit consumer with tighter scope than the
 // multi-tab showcase: one display Entry across the top + a 5×4 button
-// grid below (0..9, . + - * / = C ± %). Validates that Grid + Button +
+// grid below (0..9, . + - * / = C +/- %). Validates that Grid + Button +
 // Entry compose cleanly in a real, small production layout.
 //
 //go:build js && wasm

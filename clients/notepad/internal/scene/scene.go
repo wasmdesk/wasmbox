@@ -25,6 +25,7 @@ package scene
 import (
 	"strconv"
 
+	"github.com/go-widgets/painter"
 	"github.com/go-widgets/toolkit"
 )
 
@@ -115,11 +116,12 @@ func New(w, h int) *State {
 // editor → status → notification on top).
 func Render(s *State, buf []byte) {
 	fill(buf, s.W, toolkit.Rect{X: 0, Y: 0, W: s.W, H: s.H}, s.theme.Background)
-	s.toolbar.Draw(buf, s.W, s.theme)
-	s.docs.Draw(buf, s.W, s.theme)
-	s.editor.Draw(buf, s.W, s.theme)
-	s.status.Draw(buf, s.W, s.theme)
-	s.notify.Draw(buf, s.W, s.theme)
+	p := painter.NewPixelPainter(buf, s.W, s.H)
+	s.toolbar.Draw(p, s.theme)
+	s.docs.Draw(p, s.theme)
+	s.editor.Draw(p, s.theme)
+	s.status.Draw(p, s.theme)
+	s.notify.Draw(p, s.theme)
 }
 
 // HandleMouse dispatches a click at (x, y) to whichever pane it lands
