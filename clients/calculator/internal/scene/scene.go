@@ -67,6 +67,7 @@ func New(w, h int) *State {
 				continue
 			}
 			b := toolkit.NewButton(label, nil)
+			b.Style = keyStyle(label)
 			b.SetBounds(toolkit.Rect{
 				X: sideMargin + c*(colW+buttonGap),
 				Y: baseY + r*(rowH+buttonGap),
@@ -79,6 +80,20 @@ func New(w, h int) *State {
 		}
 	}
 	return s
+}
+
+// keyStyle assigns each calculator key its macOS button hierarchy: operators
+// and "=" are prominent (accent), the top-row functions (C, +/-, %) are
+// secondary (muted grey), and the digits + "." stay the default surface keys.
+func keyStyle(label string) toolkit.ButtonStyle {
+	switch label {
+	case "/", "*", "-", "+", "=":
+		return toolkit.ButtonProminent
+	case "C", "+/-", "%":
+		return toolkit.ButtonSecondary
+	default:
+		return toolkit.ButtonDefault
+	}
 }
 
 // Render paints every widget.
