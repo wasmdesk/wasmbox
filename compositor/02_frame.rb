@@ -29,6 +29,36 @@ class Frame
     cls
   end
 
+  # --- retained-mode chrome sprite cache -----------------------------------
+  # A decorated window's chrome (titlebar + buttons + border + resize grip) is
+  # a pure function of its size, focus state, shade state, title and the active
+  # frame/palette — it does NOT change while the window merely sits there or is
+  # dragged around. Re-issuing ~25 canvas ops per window per frame to redraw
+  # something identical is wasted bridge crossings. The Compositor caches each
+  # window's rendered chrome as an OffscreenCanvas sprite (JS side) keyed by the
+  # signature below, and re-renders it only when the signature changes; every
+  # other frame it blits the cached bitmap with a single drawImage.
+  #
+  # sprite_key MUST fold in every input the paint methods read: the frame
+  # identity (current_name distinguishes OpenboxFrame from a Juno-palette
+  # ThemedOpenboxFrame even though both share a class), the frame width/height
+  # (which already encode window w/h AND the shaded collapse), the focus flag
+  # (active vs inactive colours), the shade flag and the title text.
+  def self.sprite_key(win, active)
+    _fx, _fy, fw, fh = current.frame_rect(win)
+    "#{current_name}:#{fw}:#{fh}:#{active ? 1 : 0}:#{win.shaded? ? 1 : 0}:#{win.title}"
+  end
+
+  # Screen-space bounding box of a window's chrome sprite, as [x, y, w, h].
+  # This is frame_rect padded by 1px on every side so a chrome's 1px drop
+  # shadow (AquaFrame paints one at frame_right+1 / frame_bottom+1) and any
+  # half-pixel border stroke land inside the cached bitmap. The transparent
+  # margins are harmless when the sprite is composited over the body.
+  def self.sprite_bounds(win)
+    fx, fy, fw, fh = current.frame_rect(win)
+    [fx - 1, fy - 1, fw + 2, fh + 2]
+  end
+
   # The window-geometry hooks. Default impls reuse Theme:: constants so a
   # chrome that wants the Openbox geometry can just inherit OpenboxFrame.
 

@@ -573,6 +573,64 @@ globalThis.wasmboxBlitFromSABScaled = function (ctx, slot, sx, sy, sw, sh, dx, d
   ctx.drawImage(slot.canvas, 0, 0, slot.w, slot.h, dx, dy, dw, dh);
 };
 
+// --- retained-mode chrome sprite cache -----------------------------------
+// A decorated window's chrome (titlebar + buttons + border + resize grip) is
+// static for as long as its size / focus / shade / title / frame don't change.
+// The Ruby compositor used to re-issue ~25 canvas ops per window per frame to
+// redraw it; now it caches each window's rendered chrome as an OffscreenCanvas
+// sprite here and blits it with a single drawImage, re-rendering only when the
+// sprite key changes.
+//
+// wasmboxChromeBegin(winId, key, w, h, ox, oy):
+//   Cache HIT  (slot key + size match)  -> returns null. Ruby skips painting
+//                                          and goes straight to Present.
+//   Cache MISS (new / changed / resized) -> (re)creates the sprite canvas,
+//                                          clears it, translates its context by
+//                                          (-ox, -oy) so the chrome's absolute
+//                                          screen coords land at the sprite's
+//                                          local origin, and returns that 2D
+//                                          context for Ruby to paint into.
+// ox/oy are the sprite's top-left in screen space (Frame.sprite_bounds).
+const chromeCache = new Map(); // winId -> { key, canvas, octx, w, h }
+globalThis.wasmboxChromeBegin = function (winId, key, w, h, ox, oy) {
+  w = Math.max(1, w | 0);
+  h = Math.max(1, h | 0);
+  // Bound memory across a long session: windows come and go and their slots
+  // would otherwise linger forever. A rare full clear (sprites re-render on
+  // demand) is cheaper than threading a per-window forget call through Ruby.
+  if (chromeCache.size > 128) chromeCache.clear();
+  let slot = chromeCache.get(winId);
+  if (slot && slot.key === key && slot.w === w && slot.h === h) {
+    return null; // cache hit
+  }
+  if (!slot) {
+    slot = {};
+    chromeCache.set(winId, slot);
+  }
+  if (!slot.canvas || slot.w !== w || slot.h !== h) {
+    slot.canvas = new OffscreenCanvas(w, h);
+    slot.octx = slot.canvas.getContext("2d");
+    slot.w = w;
+    slot.h = h;
+  } else {
+    // Reuse the same-size canvas: reset to identity to clear, then re-translate.
+    slot.octx.setTransform(1, 0, 0, 1, 0, 0);
+    slot.octx.clearRect(0, 0, w, h);
+  }
+  slot.key = key;
+  slot.octx.setTransform(1, 0, 0, 1, -(ox | 0), -(oy | 0));
+  return slot.octx;
+};
+
+// wasmboxChromePresent(ctx, winId, ox, oy): blit the cached chrome sprite for
+// winId onto the live canvas `ctx` at its screen top-left (ox, oy). No-op if
+// the slot somehow went missing (defensive; Begin always creates it first).
+globalThis.wasmboxChromePresent = function (ctx, winId, ox, oy) {
+  const slot = chromeCache.get(winId);
+  if (!slot || !slot.canvas) return;
+  ctx.drawImage(slot.canvas, ox | 0, oy | 0);
+};
+
 globalThis.wasmboxMakeObject = function () {
   const o = {};
   for (let i = 0; i < arguments.length; i += 2) o[arguments[i]] = arguments[i + 1];

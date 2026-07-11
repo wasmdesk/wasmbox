@@ -346,8 +346,16 @@ tasks:
       - go test ./clients/hello/... ./clients/dock/... ./clients/terminal/... ./clients/files/... ./clients/code/...
       - go test ./
       - go test ./packs/...
+      - go test ./cmd/rbbench
       - go run ./cmd/rbtest
       - node test/sdk-bootwasm.test.mjs
+
+  bench:
+    desc: Report compositor wasm<->JS bridge crossings per frame (dirty-rect gate + chrome sprite cache vs the pre-optimisation baseline), idle / drag / animate.
+    env:
+      GOWORK: "off"
+    cmds:
+      - go run ./cmd/rbbench
 
   clean:
     desc: Remove the build artifacts
