@@ -14,6 +14,22 @@ class Compositor
     @last_t = 0.0
     @fps = 0.0
     @last_layout_sig = nil
+
+    # --- dirty-rectangle compositing state ---------------------------------
+    # @damage accumulates the regions that changed since the last composited
+    # frame; compute_damage rebuilds it each frame by diffing the live scene
+    # against @prev_wins / @prev_globals (the retained snapshot of what we last
+    # drew). render then skips entirely (idle) or repaints only those regions.
+    @damage = DamageSet.new
+    @prev_wins = {}       # id => { vk: <visual signature>, b: <screen bounds> }
+    @prev_globals = nil   # [frame_name, workspace, width, height, menu_open?]
+    @cur_wins = {}        # working snapshot built during compute_damage
+    @rendered_frames = 0  # frames we actually composited (HUD counter)
+    # @bench_no_gate / @bench_no_sprite are optional bench seams: cmd/rbbench
+    # sets them via instance_variable_set to A/B the old (full redraw every
+    # frame / inline chrome paint) vs new (dirty-gate / cached sprite) paths in
+    # one binary. They are nil (falsy) in the shipped compositor, so production
+    # never touches the legacy paths.
   end
 
   # --- persistence ---------------------------------------------------------
@@ -916,10 +932,36 @@ class Compositor
   end
 
   def render
-    draw_desktop
-    # Re-anchor every panel to the bottom-center of the current canvas, so the
-    # dock tracks viewport resizes and never cascades.
+    # Re-anchor every panel to the bottom-center of the current canvas BEFORE
+    # we diff, so a re-anchor (e.g. after a viewport resize) shows up as a
+    # geometry change in compute_damage rather than being missed.
     @wm.panels.each { |p| @wm.anchor_panel(p, @width, @height) }
+
+    compute_damage
+
+    # Idle fast-path: nothing changed since the last composited frame, so we
+    # skip the whole scene walk. This is the dirty-rectangle gate at its
+    # coarsest — zero damage, zero work (beyond the cheap diff above). It is
+    # the Ruby-side complement of the JS-side commit-seq gate: that one avoids
+    # re-copying an unchanged surface; this one avoids re-walking an unchanged
+    # desktop.
+    return if !@bench_no_gate && @damage.empty?
+
+    if @bench_no_gate || @damage.full?
+      draw_full
+    else
+      draw_regions(@damage)
+    end
+
+    @rendered_frames += 1
+    snapshot_scene
+  end
+
+  # Whole-screen recomposite: the original render path. Used for the first
+  # frame, viewport resizes, frame/palette swaps, workspace switches, whenever
+  # a menu is open, and whenever damage collapses to `full`.
+  def draw_full
+    draw_desktop
     # Draw normal windows first, then panels on top (always-on-top stratum).
     # Minimized windows have been folded into the dock's iconbar; the
     # compositor skips them entirely so they leave no pixels on the canvas.
@@ -927,14 +969,156 @@ class Compositor
     # workspace's windows render. Panels (the dock) IGNORE the workspace
     # filter and always render, because the dock is the UI that switches
     # workspaces in the first place.
+    visible_windows.each { |win| draw_window(win) }
+    draw_menu if @menu
+    draw_hud
+  end
+
+  # Region recomposite: repaint only the damaged rectangles. Each rect is
+  # clipped so the draw calls for a partially-damaged window touch only the
+  # in-region pixels; everything outside every rect is retained from the prior
+  # frame (the OffscreenCanvas is persistent, never cleared). Within a rect we
+  # redraw the desktop background then every window whose screen bounds
+  # intersect it, in bottom-to-top stacking order, so overlaps stay correct.
+  def draw_regions(dmg)
+    wins = visible_windows
+    dmg.rects.each do |r|
+      @ctx.call("save")
+      @ctx.call("beginPath")
+      @ctx.call("rect", r[:x], r[:y], r[:w], r[:h])
+      @ctx.call("clip")
+      draw_desktop_region(r)
+      wins.each do |win|
+        next unless DamageSet.rect_intersects?(r, window_bounds(win))
+        draw_window(win)
+      end
+      @ctx.call("restore")
+    end
+    # The HUD is an always-on-top overlay whose fps/frame text changes every
+    # composited frame. compute_damage appends its rect to the damage set on
+    # every rendered frame, so the loop above already refreshed the background
+    # (and any window) beneath it; paint the text last, unclipped.
+    draw_hud
+  end
+
+  # The bottom-to-top list of windows that actually render: not minimized, and
+  # either a panel (always visible) or on the active workspace.
+  def visible_windows
     active = @wm.active_workspace
+    out = []
     @wm.ordered_windows.each do |win|
       next if win.minimized?
       next if !win.panel? && win.workspace != active
-      draw_window(win)
+      out << win
     end
-    draw_menu if @menu
-    draw_hud
+    out
+  end
+
+  # Screen-space bounding box [x, y, w, h] a window paints into: the padded
+  # chrome sprite bounds for a decorated window, else the bare body rect.
+  def window_bounds(win)
+    win.decorated? ? Frame.sprite_bounds(win) : win.body_rect
+  end
+
+  # Everything that, when it changes, is cheapest to handle with a full
+  # recomposite: the active frame/palette, the active workspace, the canvas
+  # size and whether a menu is currently open.
+  def current_globals
+    [Frame.current_name, @wm.active_workspace, @width, @height, !@menu.nil?]
+  end
+
+  # A window's visual signature: every input that changes its on-screen pixels
+  # OR its position. Two frames with equal signatures for a window mean that
+  # window need not be repainted (and its cached chrome sprite still applies).
+  def window_vkey(win)
+    "#{win.x}:#{win.y}:#{win.w}:#{win.h}:#{win.focused? ? 1 : 0}:#{win.shaded? ? 1 : 0}:#{win.title}"
+  end
+
+  # Small reserved band at the bottom-left for the HUD text (fps + frame no.).
+  def hud_rect
+    [0, @height - 24, [540, @width].min, 24]
+  end
+
+  # Diff the live scene against the last composited frame and populate @damage.
+  # Global changes (or the first frame) force a full recomposite; otherwise we
+  # accumulate one rectangle per changed / appeared / vanished window plus one
+  # per external surface that committed new pixels, then the HUD band.
+  def compute_damage
+    @damage.clear
+    g = current_globals
+    # First frame, a global change, or ANY frame while a menu is open (menus
+    # are transient + cheap, and a full repaint keeps popup draw + erase
+    # trivial). @prev_globals carries last frame's menu-open flag, so the frame
+    # a menu CLOSES on also lands here and erases it.
+    force_full = @prev_globals.nil? || g != @prev_globals || !@menu.nil?
+
+    cur = {}
+    visible_windows.each do |win|
+      b = window_bounds(win)
+      vk = window_vkey(win)
+      cur[win.id] = { vk: vk, b: b }
+      next if force_full
+      prev = @prev_wins[win.id]
+      if prev.nil?
+        @damage.add_rect(b)                     # newly appeared
+      elsif prev[:vk] != vk
+        u = DamageSet.union(prev[:b], b)        # moved / resized / focus / shade / retitle
+        @damage.add(u[:x], u[:y], u[:w], u[:h])
+      end
+      # New client pixels (a commit) damage the surface even when its geometry
+      # is unchanged. We over-approximate to the whole window bounds rather
+      # than mapping the sub-rect through the resize scale — simpler, and still
+      # far less than a full-screen repaint whenever other windows exist.
+      if win.external? && !win.clipped_damage.nil?
+        @damage.add_rect(b)
+      end
+    end
+    @cur_wins = cur
+
+    if force_full
+      @damage.full!
+      return
+    end
+    # A window present last frame but gone now leaves a hole to repaint.
+    @prev_wins.each do |id, prev|
+      @damage.add_rect(prev[:b]) unless cur.key?(id)
+    end
+    # Keep the HUD live on every composited frame.
+    @damage.add_rect(hud_rect) unless @damage.empty?
+  end
+
+  # Promote the working snapshot to the retained one, after a composite.
+  def snapshot_scene
+    @prev_wins = @cur_wins
+    @prev_globals = current_globals
+  end
+
+  # Repaint the desktop background (fill + grid) inside a single damage rect.
+  # Only the grid lines that cross the rect are stroked, so the per-region cost
+  # scales with the rect, not the viewport.
+  def draw_desktop_region(r)
+    fill_rect([r[:x], r[:y], r[:w], r[:h]], Theme::DESKTOP)
+    @ctx.set("strokeStyle", Theme::DESKTOP_GRID)
+    @ctx.set("lineWidth", 1)
+    step = 40
+    x0 = r[:x]; x1 = r[:x] + r[:w]
+    y0 = r[:y]; y1 = r[:y] + r[:h]
+    gx = (x0 / step) * step
+    while gx <= x1
+      @ctx.call("beginPath")
+      @ctx.call("moveTo", gx + 0.5, y0)
+      @ctx.call("lineTo", gx + 0.5, y1)
+      @ctx.call("stroke")
+      gx += step
+    end
+    gy = (y0 / step) * step
+    while gy <= y1
+      @ctx.call("beginPath")
+      @ctx.call("moveTo", x0, gy + 0.5)
+      @ctx.call("lineTo", x1, gy + 0.5)
+      @ctx.call("stroke")
+      gy += step
+    end
   end
 
   def fill_rect(rect, colour)
@@ -992,23 +1176,27 @@ class Compositor
     end
 
     active = win.focused?
-    chrome = Frame.current
-
-    # Chrome-owned titlebar + buttons. The current chrome handles all paint
-    # ops for the bar (background, hairline, title text, close/min/max
-    # glyphs). Both Openbox and Aqua chromes implement this method.
-    chrome.paint(@ctx, win, active, self)
 
     # Shaded ("rolled up"): only the titlebar + its buttons are drawn — no body,
     # no resize grip, no border. The body area shows whatever sits behind the
-    # window.
-    return if win.shaded?
+    # window. The chrome sprite for a shaded window is titlebar-only (its key +
+    # bounds already encode the shade), so we just present it and return.
+    if win.shaded?
+      present_chrome(win, active)
+      return
+    end
 
-    # Client body. In-process windows paint a solid fill; external windows
-    # blit their SharedArrayBuffer through a cached ImageData view; dom
-    # windows do NOT paint a body -- the body is a real <iframe> the main
-    # thread overlays on the canvas at the body-rect coords, and we just
-    # republish those coords every frame so the iframe tracks the WM.
+    # Client body FIRST, then the chrome sprite on top. The sprite carries the
+    # titlebar (above the body, no overlap) plus the border + resize grip which
+    # must land ON the body edges — so presenting it after the body reproduces
+    # the original z-order (paint, body, paint_frame). The body area of the
+    # sprite is transparent, so the body pixels show through.
+    #
+    # In-process windows paint a solid fill; external windows blit their
+    # SharedArrayBuffer through a cached ImageData view; dom windows do NOT
+    # paint a body -- the body is a real <iframe> the main thread overlays on
+    # the canvas at the body-rect coords, and we just republish those coords so
+    # the iframe tracks the WM.
     if win.dom?
       bx, by, bw, bh = win.body_rect
       JS.global.call("wasmboxIframeMove", win.id, bx, by, bw, bh)
@@ -1018,10 +1206,44 @@ class Compositor
       fill_rect(win.body_rect, win.fill)
     end
 
-    # Chrome-owned frame chrome: resize grip + 1px border (Openbox), plus
-    # the faked 1px drop shadow + slightly heavier border on Aqua. Painted
-    # AFTER the body so it lands on top.
-    chrome.paint_frame(@ctx, win, active, self)
+    present_chrome(win, active)
+  end
+
+  # Present a decorated window's chrome (titlebar + buttons + border + resize
+  # grip) via the retained-mode sprite cache. The JS helper wasmboxChromeBegin
+  # returns the sprite's OffscreenCanvas 2D context on a cache MISS (so we
+  # re-render the ~25 chrome ops into it once), or nil on a HIT (the cached
+  # bitmap is still valid). Either way wasmboxChromePresent blits the cached
+  # sprite onto the live canvas with a single drawImage. Moving/dragging a
+  # window keeps the cache hot (position is not part of the key), so a drag
+  # costs one drawImage per frame instead of a full chrome repaint.
+  def present_chrome(win, active)
+    ox, oy, sw, sh = Frame.sprite_bounds(win)
+    chrome = Frame.current
+
+    # Bench baseline: paint the decoration inline on every composite (the
+    # pre-cache behaviour) so cmd/rbbench can measure the sprite-cache win.
+    if @bench_no_sprite
+      chrome.paint(@ctx, win, active, self)
+      chrome.paint_frame(@ctx, win, active, self) unless win.shaded?
+      return
+    end
+
+    key = Frame.sprite_key(win, active)
+    octx = JS.global.call("wasmboxChromeBegin", win.id, key, sw, sh, ox, oy)
+    unless octx.nil?
+      # Cache miss: render the chrome into the sprite. wasmboxChromeBegin has
+      # translated the sprite ctx by (-ox, -oy), so the chrome's absolute
+      # screen coordinates land at the sprite's local origin. Swap @ctx so the
+      # host helpers (fill_rect / text / stroke_rect, which the chrome calls)
+      # target the sprite too.
+      saved = @ctx
+      @ctx = octx
+      chrome.paint(@ctx, win, active, self)
+      chrome.paint_frame(@ctx, win, active, self) unless win.shaded?
+      @ctx = saved
+    end
+    JS.global.call("wasmboxChromePresent", @ctx, win.id, ox, oy)
   end
 
   # Blit an external window's SharedArrayBuffer onto the canvas. Chrome forbids
@@ -1105,7 +1327,11 @@ class Compositor
 
   def draw_hud
     n = @wm.windows.length
-    line = "rbgo compositor — #{n} window#{n == 1 ? '' : 's'} — #{'%.0f' % @fps} fps — frame #{@frames}"
+    # @rendered_frames counts COMPOSITED frames (not every rAF tick): with the
+    # dirty-rect gate an idle desktop stops compositing, so the counter — and
+    # the fps reading — hold steady, which is the honest picture of the work
+    # actually done.
+    line = "rbgo compositor — #{n} window#{n == 1 ? '' : 's'} — #{'%.0f' % @fps} fps — frame #{@rendered_frames}"
     text(line, 10, @height - 12, Theme::HUD_TEXT, 12)
   end
 end

@@ -1042,5 +1042,89 @@ assert_eq(res, :ignored, "set_frame with missing name is :ignored")
 # Reset to openbox so downstream state is stable.
 FrameRegistry.select("openbox")
 
+# ---- DamageSet: empty / full / add / collapse -------------------------
+ds = DamageSet.new
+assert(ds.empty?, "fresh DamageSet is empty")
+assert(!ds.full?, "fresh DamageSet is not full")
+ds.add(10, 20, 30, 40)
+assert(!ds.empty?, "DamageSet not empty after add")
+assert_eq(ds.rects.length, 1, "one rect added")
+assert_eq(ds.rects[0], { x: 10, y: 20, w: 30, h: 40 }, "rect stored as hash")
+assert_eq(ds.total_area, 30 * 40, "total_area sums rect area")
+# Zero/negative rects are dropped.
+ds.add(0, 0, 0, 5)
+ds.add(0, 0, -3, 5)
+assert_eq(ds.rects.length, 1, "empty/negative rects dropped")
+# clear resets both flag + rects.
+ds.clear
+assert(ds.empty?, "clear resets to empty")
+# full! wins over rects.
+ds.add(1, 2, 3, 4)
+ds.full!
+assert(ds.full?, "full! marks full")
+assert(!ds.empty?, "full set is not empty")
+ds.add(5, 5, 5, 5) # add is a no-op while full
+assert(ds.full?, "add is a no-op once full")
+# Accumulating past MAX_RECTS collapses to full (bounded book-keeping).
+ds2 = DamageSet.new
+i = 0
+while i <= DamageSet::MAX_RECTS
+  ds2.add(i, 0, 2, 2)
+  i += 1
+end
+assert(ds2.full?, "> MAX_RECTS rects collapses to full")
+
+# ---- DamageSet: add_rect / rect_intersects? / union -------------------
+ds3 = DamageSet.new
+ds3.add_rect([100, 100, 50, 50])
+assert_eq(ds3.rects[0], { x: 100, y: 100, w: 50, h: 50 }, "add_rect takes [x,y,w,h]")
+r = { x: 100, y: 100, w: 50, h: 50 }
+assert(DamageSet.rect_intersects?(r, [120, 120, 10, 10]), "overlapping bounds intersect")
+assert(DamageSet.rect_intersects?(r, [90, 90, 20, 20]), "corner overlap intersects")
+assert(!DamageSet.rect_intersects?(r, [200, 200, 10, 10]), "disjoint bounds do not intersect")
+assert(!DamageSet.rect_intersects?(r, [150, 100, 10, 10]), "touching far edge is half-open (no intersect)")
+assert(!DamageSet.rect_intersects?(r, [100, 60, 10, 40]), "touching top edge is half-open (no intersect)")
+# union bounds two [x,y,w,h] rects.
+u = DamageSet.union([10, 10, 20, 20], [50, 40, 10, 10])
+assert_eq(u, { x: 10, y: 10, w: 50, h: 40 }, "union spans both rects")
+u2 = DamageSet.union([0, 0, 100, 100], [20, 20, 10, 10])
+assert_eq(u2, { x: 0, y: 0, w: 100, h: 100 }, "union of a rect containing another is the outer rect")
+
+# ---- Frame chrome sprite cache: key + bounds --------------------------
+wmsp = WindowManager.new
+FrameRegistry.select("openbox")
+spw = wmsp.spawn("sprite", 200, 120)
+k1 = Frame.sprite_key(spw, true)
+# Same inputs -> same key (a cache HIT: the decoration need not repaint).
+assert_eq(Frame.sprite_key(spw, true), k1, "sprite_key is stable for unchanged inputs")
+# Focus flips the key (active vs inactive colours differ).
+assert(Frame.sprite_key(spw, false) != k1, "sprite_key changes with focus state")
+# Position does NOT affect the key: a dragged window keeps its cached sprite.
+spw.move_to(spw.x + 137, spw.y + 42)
+assert_eq(Frame.sprite_key(spw, true), k1, "sprite_key is position-independent (drag stays a cache hit)")
+# Size, title, shade + the active frame each invalidate the sprite.
+spw.resize_to(260, 120)
+assert(Frame.sprite_key(spw, true) != k1, "sprite_key changes with size")
+spw.resize_to(200, 120)
+spw.title = "renamed"
+assert(Frame.sprite_key(spw, true) != k1, "sprite_key changes with title")
+spw.title = "sprite"
+wmsp.shade(spw)
+assert(Frame.sprite_key(spw, true) != k1, "sprite_key changes when shaded")
+wmsp.unshade(spw)
+FrameRegistry.select("aqua")
+assert(Frame.sprite_key(spw, true) != k1, "sprite_key changes with the active frame/palette")
+FrameRegistry.select("openbox")
+assert_eq(Frame.sprite_key(spw, true), k1, "sprite_key returns to its value once inputs are restored")
+# sprite_bounds is frame_rect padded by 1px on every side (captures the 1px
+# drop shadow / half-pixel border stroke) and fully contains frame_rect.
+frct = spw.frame_rect
+sb = Frame.sprite_bounds(spw)
+assert_eq(sb[0], frct[0] - 1, "sprite_bounds x = frame x - 1 (left pad)")
+assert_eq(sb[1], frct[1] - 1, "sprite_bounds y = frame top - 1 (top pad)")
+assert(sb[0] <= frct[0] && sb[1] <= frct[1], "sprite_bounds origin covers frame origin")
+assert(sb[0] + sb[2] >= frct[0] + frct[2], "sprite_bounds right covers frame right + shadow")
+assert(sb[1] + sb[3] >= frct[1] + frct[3], "sprite_bounds bottom covers frame bottom + shadow")
+
 puts "rbtest: ran all pure-WM assertions"
 `
