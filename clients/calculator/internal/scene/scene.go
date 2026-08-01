@@ -7,12 +7,13 @@
 // production layout, and that click handling flows through a chain of
 // (button → scene handler → display update).
 //
-// Layout is built from the toolkit's Sencha container model (VBox/HBox with
-// fixed/flex items) rather than hand-computed toolkit.Rect placement: the
-// display is a fixed-height row at the top and the button grid fills the rest,
-// each button a fixed-size cell of a row box. A single root.SetBounds lays the
-// whole tree out, root.Draw paints it, and root.OnEvent routes clicks into
-// child-local space — no per-widget rect arithmetic and no manual hit-testing.
+// Layout is built from the toolkit's Sencha container model (VBox for the
+// scene column + a toolkit.Grid for the keys) rather than hand-computed
+// toolkit.Rect placement: the display is a fixed-height row at the top and the
+// button grid fills the rest, each button an Attach'd cell of a fixed-track
+// Grid. A single root.SetBounds lays the whole tree out, root.Draw paints it,
+// and root.OnEvent routes clicks into child-local space — no per-widget rect
+// arithmetic and no manual hit-testing.
 
 package scene
 
@@ -74,15 +75,18 @@ var keys = [5][4]string{
 //	├─ displayRow  HBox (fixed height displayH)
 //	│  ├─ display  Entry (fixed width w-2*sideMargin)
 //	│  └─ spacer   empty Container (flex)       — the display's right inset
-//	└─ grid  VBox (flex, Spacing=buttonGap)
-//	   └─ row  HBox ×5 (fixed height rowH, Spacing=buttonGap)
-//	      └─ button ×N (fixed width colW)
+//	└─ grid  Grid 4×5 (flex, Spacing=buttonGap)
+//	   └─ button ×N attached at (col, row); fixed colW×rowH tracks
 //
-// Fixed sizes (displayH/rowH/colW) become AddFixed extents and the gutters
-// become box Spacing, so the layout is declared, not arithmetic'd per widget.
-// The grid is a full-width flex child of root, which keeps the right-most
-// button column (which reaches the surface edge, wider than the inset display)
-// fully hit-testable.
+// The button grid is a single toolkit.Grid (available from toolkit v0.64.0,
+// which added Spacing gutters + fixed Col/RowWidths tracks) rather than a
+// VBox-of-HBox workaround: Spacing carries the buttonGap gutter on both axes
+// and the fixed ColWidths/RowHeights tracks pin each cell to the 60×40 key
+// size. gridTracks then places cell (c, r) at offset c*(colW+buttonGap) /
+// r*(rowH+buttonGap) — byte-identical to the old per-widget arithmetic. The
+// grid is a full-width flex child of root, which keeps the right-most button
+// column (which reaches the surface edge, wider than the inset display) fully
+// hit-testable.
 func New(w, h int) *State {
 	s := &State{W: w, H: h, theme: toolkit.WhiteSurLight()}
 
@@ -94,14 +98,15 @@ func New(w, h int) *State {
 	displayRow.AddFixed(s.display, w-2*sideMargin)
 	displayRow.AddFlex(toolkit.NewContainer(nil), 1) // invisible right-margin spacer
 
-	// Button grid: a column of fixed-height rows, each a row of fixed-width
-	// buttons with buttonGap gutters — reproduces the 60×40 keys + 4px gaps
-	// declaratively instead of one toolkit.Rect per key.
-	grid := toolkit.NewVBox()
+	// Button grid: a 4-col × 5-row toolkit.Grid with buttonGap gutters and every
+	// track pinned to the 60×40 key size, so each cell (c, r) lands at the exact
+	// same rect the old VBox-of-HBox produced — Attach places the buttons, no
+	// per-widget rect arithmetic.
+	grid := toolkit.NewGrid(4, 5)
 	grid.Spacing = buttonGap
+	grid.ColWidths = []int{colW, colW, colW, colW}
+	grid.RowHeights = []int{rowH, rowH, rowH, rowH, rowH}
 	for r := 0; r < 5; r++ {
-		row := toolkit.NewHBox()
-		row.Spacing = buttonGap
 		for c := 0; c < 4; c++ {
 			label := keys[r][c]
 			if label == "" {
@@ -114,10 +119,9 @@ func New(w, h int) *State {
 				s.press(key)
 				s.dirty = true
 			}
-			row.AddFixed(b, colW)
+			grid.Attach(b, c, r)
 			s.buttons = append(s.buttons, b)
 		}
-		grid.AddFixed(row, rowH)
 	}
 
 	root := toolkit.NewVBox()
