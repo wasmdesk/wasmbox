@@ -185,13 +185,70 @@ func TestFillOutOfBuffer(t *testing.T) {
 	fill(buf, 4, toolkit.Rect{X: 0, Y: 0, W: 100, H: 100}, toolkit.RGB(0xFF, 0, 0))
 }
 
-func TestInsideRect(t *testing.T) {
-	r := toolkit.Rect{X: 10, Y: 10, W: 20, H: 20}
-	if !insideRect(15, 15, r) {
-		t.Fatal("centre must be inside")
+// TestGoldenLayoutRects is the behaviour-preserving proof: the Sencha
+// container tree lays every widget out to the EXACT same toolkit.Rect the old
+// hand-placed code produced. The expected rects are recomputed here with the
+// original arithmetic (display inset by sideMargin/buttonPadTop; each button at
+// sideMargin+c*(colW+buttonGap), baseY+r*(rowH+buttonGap), colW×rowH).
+func TestGoldenLayoutRects(t *testing.T) {
+	s := New(surfaceW, surfaceH)
+
+	wantDisplay := toolkit.Rect{X: sideMargin, Y: buttonPadTop, W: surfaceW - 2*sideMargin, H: displayH}
+	if got := s.display.Bounds(); got != wantDisplay {
+		t.Fatalf("display bounds = %+v, want %+v", got, wantDisplay)
 	}
-	if insideRect(0, 0, r) {
-		t.Fatal("(0,0) must be outside")
+
+	baseY := buttonPadTop + displayH + buttonGap
+	var want []toolkit.Rect
+	for r := 0; r < 5; r++ {
+		for c := 0; c < 4; c++ {
+			if keys[r][c] == "" {
+				continue // matches New's skip of empty cells
+			}
+			want = append(want, toolkit.Rect{
+				X: sideMargin + c*(colW+buttonGap),
+				Y: baseY + r*(rowH+buttonGap),
+				W: colW,
+				H: rowH,
+			})
+		}
+	}
+	if len(want) != len(s.buttons) {
+		t.Fatalf("button count = %d, want %d", len(s.buttons), len(want))
+	}
+	for i, b := range s.buttons {
+		if got := b.Bounds(); got != want[i] {
+			t.Fatalf("button %d (%q) bounds = %+v, want %+v", i, b.Label, got, want[i])
+		}
+	}
+}
+
+// TestClickFarRightColumnRoutes guards the one geometry subtlety of the
+// container migration: the button grid is a FULL-width flex child (reaching the
+// surface's right edge), wider than the inset display, so a click near the
+// right-most operator column's outer edge — outside the display's width — still
+// routes to the button. A width-clipped column would drop these clicks.
+func TestClickFarRightColumnRoutes(t *testing.T) {
+	s := New(surfaceW, surfaceH)
+	s.press("6")
+	// "*" is row 1, col 3: X=200,W=60 → right edge 260. Click at x=258.
+	if !s.HandleMouse(258, 104) {
+		t.Fatal("click near the right edge of * must route to the button")
+	}
+	if s.op != '*' {
+		t.Fatalf("after clicking *: op = %q, want '*'", s.op)
+	}
+}
+
+// TestClickInterButtonGapMisses proves a click in a 4px inter-column gutter
+// routes to no button (HandleMouse returns false), preserving the old
+// insideRect miss behaviour.
+func TestClickInterButtonGapMisses(t *testing.T) {
+	s := New(surfaceW, surfaceH)
+	// col0 right edge = 8+60 = 68; col1 left = 72. x=70 sits in the gutter,
+	// y=104 in row 1.
+	if s.HandleMouse(70, 104) {
+		t.Fatal("click in the inter-column gutter must not route")
 	}
 }
 
