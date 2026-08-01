@@ -6,6 +6,21 @@
 // / System-Settings layout. It validates that the toolkit's Switch + Scale
 // compose into a real preferences surface driven by (sidebar select -> page
 // switch) and (row control -> model update).
+//
+// The panel is built from the toolkit's Sencha container/layout model rather
+// than hand-computed toolkit.Rect placement:
+//
+//	root  Container(BorderLayout)                — the app shell
+//	├─ West   sidebar  VBox (fixed sidebarW)     — title spacer + catRow ×N + filler
+//	└─ Center content  Container(CardLayout)      — one page per category, only
+//	                                                the selected page is shown
+//	   page  (custom widget)                      — page title + white card
+//	      rows  VBox (fixed-height rows)          — one settingRowW per preference
+//	         settingRowW  (custom widget)         — title + divider + Switch/Scale
+//
+// A single root.SetBounds lays the whole tree out, root.Draw paints it, and
+// root.OnEvent routes clicks into child-local space -- there is no flat layout()
+// arithmetic and no manual insideRect hit-testing.
 
 package scene
 
@@ -22,7 +37,8 @@ const (
 	rowScale
 )
 
-// settingRow is one preference: a title plus exactly one control.
+// settingRow is one preference: a title plus exactly one control. It is the
+// model the pages' settingRowW widgets wrap (they share the sw/sc pointers).
 type settingRow struct {
 	title string
 	kind  rowKind
@@ -36,12 +52,20 @@ type category struct {
 	rows []settingRow
 }
 
-// State bundles the sidebar model + every row's control widget.
+// State bundles the sidebar model, every row's control widget and the container
+// tree that lays them out.
 type State struct {
 	W, H     int
 	theme    *toolkit.Theme
 	cats     []category
 	selected int
+
+	root    *toolkit.Container  // BorderLayout: West sidebar + Center content
+	content *toolkit.Container  // CardLayout page switcher
+	cards   *toolkit.CardLayout // the content layout, so selection sets Active
+	catRows []*catRow           // sidebar entries, in category order
+	pages   []*page             // content pages, in category order
+	dirty   bool                // set when a routed click mutated the model
 }
 
 // Layout constants (pixels). Modelled on macOS Ventura System Settings: a grey
@@ -109,134 +133,241 @@ func New(w, h int) *State {
 			}
 		}
 	}
-	s.layout()
+
+	s.buildTree()
 	return s
 }
 
-// cardRect is the white grouped card that holds a category's rows.
-func (s *State) cardRect(numRows int) toolkit.Rect {
-	x := sidebarW + cardMarginX
-	return toolkit.Rect{X: x, Y: cardTop, W: s.W - x - cardMarginX, H: numRows * rowH}
-}
-
-// layout assigns each row control its absolute bounds inside its category's
-// card. Every category is laid out once (only the selected one is drawn /
-// hit-tested).
-func (s *State) layout() {
-	for ci := range s.cats {
-		card := s.cardRect(len(s.cats[ci].rows))
-		for ri := range s.cats[ci].rows {
-			row := &s.cats[ci].rows[ri]
-			ry := card.Y + ri*rowH
-			switch row.kind {
-			case rowSwitch:
-				row.sw.SetBounds(toolkit.Rect{
-					X: card.X + card.W - rowPadX - switchW,
-					Y: ry + (rowH-switchH)/2, W: switchW, H: switchH,
-				})
-			case rowScale:
-				row.sc.SetBounds(toolkit.Rect{
-					X: card.X + card.W - rowPadX - scaleW,
-					Y: ry + (rowH-scaleH)/2, W: scaleW, H: scaleH,
-				})
-			}
+// buildTree assembles the Sencha container tree over the category model and lays
+// it out once with a single root.SetBounds.
+func (s *State) buildTree() {
+	// Sidebar: a fixed top spacer under the "Settings" title, then one catRow
+	// per category (each at its historical catTop+i*catRowH position via fixed
+	// heights and no inter-row gap), then a flex filler soaking up the rest.
+	sidebar := toolkit.NewVBox()
+	sidebar.Spacing = -1 // contiguous rows (negative Spacing -> 0 gap in the box model)
+	sidebar.AddFixed(toolkit.NewContainer(nil), catTop)
+	for i := range s.cats {
+		cr := &catRow{
+			name:     s.cats[i].name,
+			idx:      i,
+			selected: &s.selected,
+			onClick:  func(idx int) func() { return func() { s.selectCat(idx) } }(i),
 		}
+		s.catRows = append(s.catRows, cr)
+		sidebar.AddFixed(cr, catRowH)
 	}
+	sidebar.AddFlex(toolkit.NewContainer(nil), 1)
+
+	// Content: a card-layout stack of one page per category; only the selected
+	// page draws + receives events.
+	s.cards = &toolkit.CardLayout{Active: s.selected}
+	s.content = toolkit.NewContainer(s.cards)
+	for ci := range s.cats {
+		rows := toolkit.NewVBox()
+		rows.Spacing = -1 // contiguous 44px rows, no gap (dividers are drawn instead)
+		n := len(s.cats[ci].rows)
+		for ri := range s.cats[ci].rows {
+			src := &s.cats[ci].rows[ri]
+			rows.AddFixed(&settingRowW{
+				title:   src.title,
+				kind:    src.kind,
+				sw:      src.sw,
+				sc:      src.sc,
+				divider: ri < n-1,
+				notify:  func() { s.dirty = true },
+			}, rowH)
+		}
+		pg := &page{name: s.cats[ci].name, rows: rows, numRows: n}
+		s.pages = append(s.pages, pg)
+		s.content.AddWidget(pg)
+	}
+
+	// Shell: sidebar docked West at its fixed width, content filling the Center.
+	s.root = toolkit.NewContainer(toolkit.BorderLayout{})
+	s.root.Add(toolkit.Item{Widget: sidebar, Region: toolkit.RegionWest, Size: sidebarW})
+	s.root.Add(toolkit.Item{Widget: s.content, Region: toolkit.RegionCenter})
+	s.root.SetBounds(toolkit.Rect{X: 0, Y: 0, W: s.W, H: s.H})
 }
 
-// Render paints the whole panel.
-func Render(s *State, buf []byte) {
-	p := painter.NewPixelPainter(buf, s.W, s.H)
-	th := s.theme
+// selectCat switches the shown category, re-arranging the content card stack so
+// the newly-active page (and its controls) get laid out. A no-op when the target
+// is already selected. Sets dirty so a routed click reports a needed redraw.
+func (s *State) selectCat(i int) {
+	if s.selected == i {
+		return
+	}
+	s.selected = i
+	s.cards.Active = i
+	s.content.SetBounds(s.content.Bounds()) // re-run CardLayout for the new active page
+	s.dirty = true
+}
+
+// --- sidebar category row -------------------------------------------------
+
+// catRow is one sidebar entry: a full-width band that draws an accent pill +
+// light-ink label when it is the selected category, else a plain label. A click
+// anywhere on the band selects the category.
+type catRow struct {
+	toolkit.Base
+	name     string
+	idx      int
+	selected *int   // shared pointer to State.selected, read at draw time
+	onClick  func() // selects this category
+}
+
+// Draw paints the pill (when selected) and the category label.
+func (c *catRow) Draw(p painter.Painter, th *toolkit.Theme) {
+	b := c.Bounds()
 	onAccent := th.Extra["accent_fg_color"]
 	if onAccent == (toolkit.RGBA{}) {
 		onAccent = toolkit.RGB(0xff, 0xff, 0xff)
 	}
-
-	// Grey window ground; a hairline splits the sidebar from the content area.
-	p.FillRect(toolkit.Rect{X: 0, Y: 0, W: s.W, H: s.H}, th.Background)
-	p.FillRect(toolkit.Rect{X: sidebarW, Y: 0, W: 1, H: s.H}, th.Border)
-
-	// Sidebar: title + category rows (selected row = rounded accent pill).
-	toolkit.DrawText(p, sidePad, titleTop, "Settings", th.OnBackground)
-	for i, c := range s.cats {
-		ry := catTop + i*catRowH
-		ink := th.OnBackground
-		if i == s.selected {
-			p.FillRoundRect(toolkit.Rect{X: catMargin, Y: ry, W: sidebarW - 2*catMargin, H: catRowH - 4}, 7, th.Accent)
-			ink = onAccent
-		}
-		toolkit.DrawText(p, sidePad+5, ry+(catRowH-4-toolkit.GlyphHeight())/2, c.name, ink)
+	ink := th.OnBackground
+	if *c.selected == c.idx {
+		p.FillRoundRect(toolkit.Rect{X: b.X + catMargin, Y: b.Y, W: b.W - 2*catMargin, H: catRowH - 4}, 7, th.Accent)
+		ink = onAccent
 	}
+	toolkit.DrawText(p, b.X+sidePad+5, b.Y+(catRowH-4-toolkit.GlyphHeight())/2, c.name, ink)
+}
 
-	// Content: page title, then the selected category's rows grouped inside a
-	// white rounded card with inset dividers between rows (macOS Settings).
-	cat := s.cats[s.selected]
-	toolkit.DrawText(p, sidebarW+cardMarginX, titleTop, cat.name, th.OnSurface)
-	card := s.cardRect(len(cat.rows))
-	p.FillRoundRect(card, cardRadius, th.Surface)
-	p.StrokeRoundRect(card, cardRadius, th.Border, 1)
-	for ri := range cat.rows {
-		row := cat.rows[ri]
-		ry := card.Y + ri*rowH
-		toolkit.DrawText(p, card.X+rowPadX, ry+(rowH-toolkit.GlyphHeight())/2, row.title, th.OnSurface)
-		if ri < len(cat.rows)-1 {
-			p.FillRect(toolkit.Rect{X: card.X + rowPadX, Y: ry + rowH - 1, W: card.W - 2*rowPadX, H: 1}, th.Border)
-		}
-		switch row.kind {
-		case rowSwitch:
-			row.sw.Draw(p, th)
-		case rowScale:
-			row.sc.Draw(p, th)
-		}
+// OnEvent selects this category on a click (coordinates are irrelevant: the
+// whole band is one target).
+func (c *catRow) OnEvent(ev toolkit.Event) {
+	if ev.Kind == toolkit.EventClick {
+		c.onClick()
 	}
 }
 
-// HandleMouse routes a click. A click in the sidebar selects a category; a
-// click in the content pane is forwarded (in widget-local coordinates) to
-// whichever row control it lands on. Clicking anywhere on a switch row toggles
-// it, for a comfortable macOS-sized hit target. Returns true if a redraw is
-// needed.
+// --- content page ---------------------------------------------------------
+
+// page is one category's content surface: the page title above a white rounded
+// card that groups the category's rows. It owns a rows VBox positioned inside the
+// card and translates events into the rows' local space.
+type page struct {
+	toolkit.Base
+	name    string
+	rows    *toolkit.VBox
+	numRows int
+	card    toolkit.Rect
+}
+
+// SetBounds derives the card rectangle from the content bounds b (inset by
+// cardMarginX on the sides, cardTop from the top, exactly numRows*rowH tall) and
+// lays the rows out inside it.
+func (pg *page) SetBounds(b toolkit.Rect) {
+	pg.Base.SetBounds(b)
+	pg.card = toolkit.Rect{X: b.X + cardMarginX, Y: b.Y + cardTop, W: b.W - 2*cardMarginX, H: pg.numRows * rowH}
+	pg.rows.SetBounds(pg.card)
+}
+
+// Draw paints the page title, the white card fill + border, then the rows.
+func (pg *page) Draw(p painter.Painter, th *toolkit.Theme) {
+	b := pg.Bounds()
+	toolkit.DrawText(p, b.X+cardMarginX, b.Y+titleTop, pg.name, th.OnSurface)
+	p.FillRoundRect(pg.card, cardRadius, th.Surface)
+	p.StrokeRoundRect(pg.card, cardRadius, th.Border, 1)
+	pg.rows.Draw(p, th)
+}
+
+// OnEvent forwards the click to the rows VBox, translated from page-local into
+// the card's (rows') local coordinate space.
+func (pg *page) OnEvent(ev toolkit.Event) {
+	pb, rb := pg.Bounds(), pg.rows.Bounds()
+	ev.X += pb.X - rb.X
+	ev.Y += pb.Y - rb.Y
+	pg.rows.OnEvent(ev)
+}
+
+// --- content setting row --------------------------------------------------
+
+// settingRowW is one preference row inside a card: its title on the left, a 1px
+// divider along the bottom (except the last row), and its Switch or Scale control
+// right-aligned and vertically centred. A click anywhere on a switch row toggles
+// the switch (a comfortable macOS-sized target); a scale row only responds to
+// clicks that land on the slider itself.
+type settingRowW struct {
+	toolkit.Base
+	title   string
+	kind    rowKind
+	sw      *toolkit.Switch
+	sc      *toolkit.Scale
+	divider bool
+	notify  func() // marks the scene dirty when the control changed
+}
+
+// control returns the row's single control widget.
+func (r *settingRowW) control() toolkit.Widget {
+	if r.kind == rowSwitch {
+		return r.sw
+	}
+	return r.sc
+}
+
+// SetBounds right-aligns the control within the row band b (rowPadX inset from
+// the right edge) and vertically centres it.
+func (r *settingRowW) SetBounds(b toolkit.Rect) {
+	r.Base.SetBounds(b)
+	switch r.kind {
+	case rowSwitch:
+		r.sw.SetBounds(toolkit.Rect{X: b.X + b.W - rowPadX - switchW, Y: b.Y + (rowH-switchH)/2, W: switchW, H: switchH})
+	case rowScale:
+		r.sc.SetBounds(toolkit.Rect{X: b.X + b.W - rowPadX - scaleW, Y: b.Y + (rowH-scaleH)/2, W: scaleW, H: scaleH})
+	}
+}
+
+// Draw paints the title, the optional divider, then the control.
+func (r *settingRowW) Draw(p painter.Painter, th *toolkit.Theme) {
+	b := r.Bounds()
+	toolkit.DrawText(p, b.X+rowPadX, b.Y+(rowH-toolkit.GlyphHeight())/2, r.title, th.OnSurface)
+	if r.divider {
+		p.FillRect(toolkit.Rect{X: b.X + rowPadX, Y: b.Y + b.H - 1, W: b.W - 2*rowPadX, H: 1}, th.Border)
+	}
+	r.control().Draw(p, th)
+}
+
+// OnEvent toggles the switch on any click, or forwards a scale click (with the
+// x-position preserved) only when it lands on the slider.
+func (r *settingRowW) OnEvent(ev toolkit.Event) {
+	if ev.Kind != toolkit.EventClick {
+		return
+	}
+	if r.kind == rowSwitch {
+		r.sw.OnEvent(toolkit.Event{Kind: toolkit.EventClick})
+		r.notify()
+		return
+	}
+	b := r.Bounds()
+	sx, sy := ev.X+b.X, ev.Y+b.Y
+	cb := r.sc.Bounds()
+	if cb.Contains(sx, sy) {
+		r.sc.OnEvent(toolkit.Event{Kind: toolkit.EventClick, X: sx - cb.X, Y: sy - cb.Y})
+		r.notify()
+	}
+}
+
+// --- scene plumbing -------------------------------------------------------
+
+// Render paints the whole panel: the grey window ground and the sidebar/content
+// hairline, the fixed "Settings" title, then the container tree.
+func Render(s *State, buf []byte) {
+	p := painter.NewPixelPainter(buf, s.W, s.H)
+	th := s.theme
+	p.FillRect(toolkit.Rect{X: 0, Y: 0, W: s.W, H: s.H}, th.Background)
+	p.FillRect(toolkit.Rect{X: sidebarW, Y: 0, W: 1, H: s.H}, th.Border)
+	toolkit.DrawText(p, sidePad, titleTop, "Settings", th.OnBackground)
+	s.root.Draw(p, th)
+}
+
+// HandleMouse routes a click at surface coordinates (x, y) through the container
+// tree (translated into the root's local space). A click in the sidebar selects
+// a category; a click in the content pane toggles a switch row or moves a slider.
+// Returns true if the click mutated the model (the scene should re-render).
 func (s *State) HandleMouse(x, y int) bool {
-	if x < sidebarW {
-		for i := range s.cats {
-			ry := catTop + i*catRowH
-			if y >= ry && y < ry+catRowH {
-				if s.selected != i {
-					s.selected = i
-					return true
-				}
-				return false
-			}
-		}
-		return false
-	}
-	cat := &s.cats[s.selected]
-	card := s.cardRect(len(cat.rows))
-	for ri := range cat.rows {
-		row := &cat.rows[ri]
-		var b toolkit.Rect
-		if row.kind == rowSwitch {
-			b = row.sw.Bounds()
-		} else {
-			b = row.sc.Bounds()
-		}
-		if x >= b.X && x < b.X+b.W && y >= b.Y && y < b.Y+b.H {
-			ev := toolkit.Event{Kind: toolkit.EventClick, X: x - b.X, Y: y - b.Y}
-			if row.kind == rowSwitch {
-				row.sw.OnEvent(ev)
-			} else {
-				row.sc.OnEvent(ev)
-			}
-			return true
-		}
-		ry := card.Y + ri*rowH
-		if row.kind == rowSwitch && y >= ry && y < ry+rowH && x >= card.X && x < card.X+card.W {
-			row.sw.OnEvent(toolkit.Event{Kind: toolkit.EventClick})
-			return true
-		}
-	}
-	return false
+	s.dirty = false
+	rb := s.root.Bounds()
+	s.root.OnEvent(toolkit.Event{Kind: toolkit.EventClick, X: x - rb.X, Y: y - rb.Y})
+	return s.dirty
 }
 
 // HandleKey lets Up/Down move between categories. Returns true if the selection
@@ -245,12 +376,12 @@ func (s *State) HandleKey(code string) bool {
 	switch code {
 	case "ArrowDown":
 		if s.selected < len(s.cats)-1 {
-			s.selected++
+			s.selectCat(s.selected + 1)
 			return true
 		}
 	case "ArrowUp":
 		if s.selected > 0 {
-			s.selected--
+			s.selectCat(s.selected - 1)
 			return true
 		}
 	}
