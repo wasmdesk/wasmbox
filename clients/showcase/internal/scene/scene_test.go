@@ -24,7 +24,7 @@ func TestNewAndRender(t *testing.T) {
 
 func TestHandleMouseRoutesToMenuBar(t *testing.T) {
 	s := New(surfaceW, surfaceH)
-	// Click on the MenuBar (Y < MenuBarH).
+	// Click on the MenuBar (Y < MenuBarH) must not panic + requests re-render.
 	if !s.HandleMouse(20, 5) {
 		t.Fatal("HandleMouse must request re-render")
 	}
@@ -35,21 +35,21 @@ func TestHandleMouseRoutesToToolbar(t *testing.T) {
 	s.HandleMouse(12, toolkit.MenuBarH+5)
 }
 
-func TestHandleMouseRoutesToNotebook(t *testing.T) {
+func TestHandleMouseRoutesToStatusBar(t *testing.T) {
 	s := New(surfaceW, surfaceH)
-	// Click well inside the notebook area on a tab strip cell.
-	s.HandleMouse(150, toolkit.MenuBarH+toolkit.ToolbarButtonH+5)
+	s.HandleMouse(20, surfaceH-5) // status bar area — routes, no panic
 }
 
-func TestHandleMouseStatusBarNoOp(t *testing.T) {
+func TestHandleMouseRoutesToCardBody(t *testing.T) {
 	s := New(surfaceW, surfaceH)
-	s.HandleMouse(20, surfaceH-5) // status bar area
+	// Click well inside the gallery body (below the tab strip).
+	s.HandleMouse(150, toolkit.MenuBarH+toolkit.ToolbarButtonH+toolkit.NotebookTabStripH+40)
 }
 
 func TestClickFiresHelloButton(t *testing.T) {
 	s := New(surfaceW, surfaceH)
-	// Notebook active=0 by default (Button tab). Locate the helloButton
-	// rect + click its centre.
+	// Card 0 (Button) is active by default. Locate the helloButton rect + click
+	// its centre; the click must route through the container tree to OnClick.
 	b := s.helloButton.Bounds()
 	cx := b.X + b.W/2
 	cy := b.Y + b.H/2
@@ -59,42 +59,169 @@ func TestClickFiresHelloButton(t *testing.T) {
 	}
 }
 
-func TestHandleKeyOnNonInputTab(t *testing.T) {
+func TestTabButtonSwitchesCard(t *testing.T) {
 	s := New(surfaceW, surfaceH)
-	// Active tab 0 (Button). HandleKey must return false (no input).
+	// The Input tab is button index 2; click its centre in the strip.
+	stripY := toolkit.MenuBarH + toolkit.ToolbarButtonH
+	tb := s.tabButtons[inputCard].Bounds()
+	if tb.Y != stripY {
+		t.Fatalf("tab strip Y = %d, want %d", tb.Y, stripY)
+	}
+	s.HandleMouse(tb.X+tb.W/2, tb.Y+tb.H/2)
+	if s.cardLayout.Active != inputCard {
+		t.Fatalf("clicking the Input tab must activate card %d, got %d", inputCard, s.cardLayout.Active)
+	}
+	// The active tab reads prominent; the others default.
+	if s.tabButtons[inputCard].Style != toolkit.ButtonProminent {
+		t.Fatal("active tab button must be ButtonProminent")
+	}
+	if s.tabButtons[0].Style != toolkit.ButtonDefault {
+		t.Fatal("inactive tab button must be ButtonDefault")
+	}
+}
+
+func TestHandleKeyOnNonInputCard(t *testing.T) {
+	s := New(surfaceW, surfaceH)
+	// Card 0 (Button) active. HandleKey must return false (no input).
 	if s.HandleKey("Enter") {
-		t.Fatal("HandleKey on Button tab must return false")
+		t.Fatal("HandleKey on the Button card must return false")
 	}
 }
 
-func TestHandleKeyOnInputTab(t *testing.T) {
+func TestHandleKeyOnInputCard(t *testing.T) {
 	s := New(surfaceW, surfaceH)
-	s.notebook.Active = 2 // Input tab
+	s.setActiveCard(inputCard)
 	if !s.HandleKey("Enter") {
-		t.Fatal("HandleKey on Input tab must return true")
+		t.Fatal("HandleKey on the Input card must return true")
 	}
 }
 
-func TestHandleCharOnNonInputTab(t *testing.T) {
+func TestHandleCharOnNonInputCard(t *testing.T) {
 	s := New(surfaceW, surfaceH)
 	if s.HandleChar("x") {
-		t.Fatal("HandleChar on Button tab must return false")
+		t.Fatal("HandleChar on the Button card must return false")
 	}
 }
 
-func TestHandleCharOnInputTab(t *testing.T) {
+func TestHandleCharOnInputCard(t *testing.T) {
 	s := New(surfaceW, surfaceH)
-	s.notebook.Active = 2
+	s.setActiveCard(inputCard)
 	if !s.HandleChar("hello") {
-		t.Fatal("HandleChar on Input tab must return true")
+		t.Fatal("HandleChar on the Input card must return true")
 	}
 }
 
-func TestRenderAllTabs(t *testing.T) {
+func TestRenderAllCards(t *testing.T) {
 	s := New(surfaceW, surfaceH)
-	for tab := 0; tab < 7; tab++ {
-		s.notebook.Active = tab
+	for card := range tabLabels {
+		s.setActiveCard(card)
 		Render(s, newSurface())
+	}
+}
+
+// TestGoldenLayoutRects is the behaviour-preserving proof: the Sencha
+// container tree lays every demo widget out to the EXACT toolkit.Rect the old
+// hand-placed code produced. Expected rects are recomputed here with the
+// ORIGINAL arithmetic (the offsets from the pre-Sencha scene.New). Because a
+// CardLayout collapses inactive cards to an empty rect, each card is activated
+// before its widgets are asserted.
+func TestGoldenLayoutRects(t *testing.T) {
+	s := New(surfaceW, surfaceH)
+	w := surfaceW
+
+	// Original app-shell geometry.
+	bodyY := toolkit.MenuBarH + toolkit.ToolbarButtonH
+	statusH := toolkit.StatusbarH
+	bodyH := surfaceH - bodyY - statusH
+	tabBodyY := bodyY + toolkit.NotebookTabStripH
+	tabBodyH := bodyH - toolkit.NotebookTabStripH
+
+	// App-shell widgets (always laid out, card-independent).
+	shell := []struct {
+		name string
+		got  toolkit.Rect
+		want toolkit.Rect
+	}{
+		{"menuBar", s.menuBar.Bounds(), toolkit.Rect{X: 0, Y: 0, W: w, H: toolkit.MenuBarH}},
+		{"toolbar", s.toolbar.Bounds(), toolkit.Rect{X: 0, Y: toolkit.MenuBarH, W: w, H: toolkit.ToolbarButtonH}},
+		{"status", s.status.Bounds(), toolkit.Rect{X: 0, Y: surfaceH - statusH, W: w, H: statusH}},
+	}
+	for _, c := range shell {
+		if c.got != c.want {
+			t.Fatalf("%s bounds = %+v, want %+v", c.name, c.got, c.want)
+		}
+	}
+
+	// Per-card widget rects, keyed by the card that must be active. Each want is
+	// the original hand-computed rect from the pre-Sencha New().
+	type widgetRect struct {
+		name string
+		w    toolkit.Widget
+		want toolkit.Rect
+	}
+	cards := map[int][]widgetRect{
+		0: {
+			{"helloButton", s.helloButton, toolkit.Rect{X: w/2 - 60, Y: tabBodyY + 20, W: 120, H: 28}},
+			{"clickLabel", s.clickLabel, toolkit.Rect{X: w/2 - 80, Y: tabBodyY + 60, W: 160, H: 20}},
+		},
+		1: {
+			{"check1", s.check1, toolkit.Rect{X: 8, Y: tabBodyY + 8, W: 200, H: 24}},
+			{"check2", s.check2, toolkit.Rect{X: 8, Y: tabBodyY + 32, W: 200, H: 24}},
+			{"radioA", s.radioA, toolkit.Rect{X: 8, Y: tabBodyY + 60, W: 120, H: 20}},
+			{"radioB", s.radioB, toolkit.Rect{X: 8, Y: tabBodyY + 80, W: 120, H: 20}},
+			{"dropdown", s.dropdown, toolkit.Rect{X: 8, Y: tabBodyY + 110, W: 150, H: 24}},
+		},
+		2: {
+			{"entry", s.entry, toolkit.Rect{X: 8, Y: tabBodyY + 8, W: w - 16, H: 24}},
+			{"textView", s.textView, toolkit.Rect{X: 8, Y: tabBodyY + 40, W: w - 16, H: tabBodyH - 60}},
+		},
+		3: {
+			{"tree", s.tree, toolkit.Rect{X: 8, Y: tabBodyY + 8, W: (w - 24) / 2, H: tabBodyH - 16}},
+			{"listBox", s.listBox, toolkit.Rect{X: 16 + (w-24)/2, Y: tabBodyY + 8, W: (w - 24) / 2, H: tabBodyH - 16}},
+		},
+		4: {
+			{"calendar", s.calendar, toolkit.Rect{X: w/2 - 100, Y: tabBodyY + 8, W: 200, H: tabBodyH - 16}},
+		},
+		5: {
+			{"colorPick", s.colorPick, toolkit.Rect{X: 8, Y: tabBodyY + 8, W: w - 16, H: 100}},
+		},
+		6: {
+			{"progress", s.progress, toolkit.Rect{X: 16, Y: tabBodyY + 20, W: w - 32, H: 18}},
+			{"scale", s.scale, toolkit.Rect{X: 16, Y: tabBodyY + 60, W: w - 32, H: 20}},
+			{"spin", s.spin, toolkit.Rect{X: 16, Y: tabBodyY + 100, W: 100, H: 24}},
+		},
+	}
+	for card := 0; card < len(tabLabels); card++ {
+		s.setActiveCard(card)
+		for _, wr := range cards[card] {
+			if got := wr.w.Bounds(); got != wr.want {
+				t.Fatalf("card %d %s bounds = %+v, want %+v", card, wr.name, got, wr.want)
+			}
+		}
+	}
+}
+
+// TestInactiveCardCollapsed proves the CardLayout hides non-active cards: it
+// collapses every card but the active one to an empty rect, so Container.Draw +
+// OnEvent skip them (they guard on a non-empty item rect). The invariant lives
+// at the card-container level — exactly one card item has a non-empty Bounds.
+func TestInactiveCardCollapsed(t *testing.T) {
+	s := New(surfaceW, surfaceH)
+	for _, active := range []int{6, 0, inputCard} {
+		s.setActiveCard(active)
+		nonEmpty := -1
+		for i, it := range s.cards.Items() {
+			b := it.Widget.Bounds()
+			if b.W > 0 && b.H > 0 {
+				if nonEmpty != -1 {
+					t.Fatalf("active=%d: cards %d and %d both non-empty", active, nonEmpty, i)
+				}
+				nonEmpty = i
+			}
+		}
+		if nonEmpty != active {
+			t.Fatalf("active=%d: the only non-empty card should be %d, got %d", active, active, nonEmpty)
+		}
 	}
 }
 
@@ -114,16 +241,6 @@ func TestFillOutOfBuffer(t *testing.T) {
 	// Fill with a rect bigger than the buffer triggers the bounds guard.
 	buf := make([]byte, 16)
 	fill(buf, 4, toolkit.Rect{X: 0, Y: 0, W: 100, H: 100}, toolkit.RGB(0xFF, 0, 0))
-}
-
-func TestInsideRect(t *testing.T) {
-	r := toolkit.Rect{X: 10, Y: 10, W: 20, H: 20}
-	if !insideRect(15, 15, r) {
-		t.Fatal("centre must be inside")
-	}
-	if insideRect(0, 0, r) {
-		t.Fatal("(0,0) must be outside")
-	}
 }
 
 func TestViewMenuThemePicker(t *testing.T) {
@@ -289,6 +406,10 @@ func TestSetActiveFrameMarker(t *testing.T) {
 	if starred != 1 {
 		t.Fatalf("exactly one entry should be starred, got %d", starred)
 	}
+	// The status bar's frame segment tracks the active frame too.
+	if got := s.status.Segments[3]; got != "frame: aqua" {
+		t.Fatalf("status[3] = %q, want %q", got, "frame: aqua")
+	}
 	// Click the "* aqua" entry again — Action must still fire the
 	// setter (test the wire flow after re-marking).
 	var got string
@@ -313,10 +434,8 @@ func TestSetActiveFrameDefensiveGuard(t *testing.T) {
 	s.SetActiveFrame("aqua") // must not panic
 }
 
-func TestParseQueryParamRoundtrip(t *testing.T) {
-	// The main.go helper — but it's package main, so re-implement
-	// the assertion at the shape level via the seed. Set a fake
-	// active frame + verify the Frame menu marker updates.
+func TestSetActiveFrameSeed(t *testing.T) {
+	// SetActiveFrame with a real registry name marks the menu.
 	s := New(surfaceW, surfaceH)
 	s.SetActiveFrame("openbox-juno")
 	menu := s.menuBar.Menus[3]
@@ -352,12 +471,5 @@ func TestPrettify(t *testing.T) {
 		if got := prettify(c.in); got != c.want {
 			t.Errorf("prettify(%q) = %q, want %q", c.in, got, c.want)
 		}
-	}
-}
-
-func TestLocalize(t *testing.T) {
-	ev := localize(toolkit.Event{X: 25, Y: 15}, toolkit.Rect{X: 10, Y: 5})
-	if ev.X != 15 || ev.Y != 10 {
-		t.Fatalf("localize wrong: %+v", ev)
 	}
 }
