@@ -6,6 +6,13 @@
 // showcase — validates that Grid + Button + Entry compose cleanly in a
 // production layout, and that click handling flows through a chain of
 // (button → scene handler → display update).
+//
+// Layout is built from the toolkit's Sencha container model (VBox/HBox with
+// fixed/flex items) rather than hand-computed toolkit.Rect placement: the
+// display is a fixed-height row at the top and the button grid fills the rest,
+// each button a fixed-size cell of a row box. A single root.SetBounds lays the
+// whole tree out, root.Draw paints it, and root.OnEvent routes clicks into
+// child-local space — no per-widget rect arithmetic and no manual hit-testing.
 
 package scene
 
@@ -21,8 +28,14 @@ type State struct {
 	W, H int
 
 	theme   *toolkit.Theme
+	root    *toolkit.VBox
 	display *toolkit.Entry
 	buttons []*toolkit.Button
+
+	// dirty is set by a button's OnClick when a press mutates the model, so
+	// HandleMouse can report to the render loop whether a click did anything
+	// (the container routing itself has no hit/miss return value).
+	dirty bool
 
 	// Model. accum is the "left" operand once an op is picked; op is
 	// the pending operator ('+', '-', '*', '/', or 0 for none). When
@@ -54,13 +67,41 @@ var keys = [5][4]string{
 }
 
 // New builds a Calculator sized W×H.
+//
+// The widget tree mirrors the visual structure declaratively:
+//
+//	root  VBox (Spacing=buttonGap)             — the whole scene
+//	├─ displayRow  HBox (fixed height displayH)
+//	│  ├─ display  Entry (fixed width w-2*sideMargin)
+//	│  └─ spacer   empty Container (flex)       — the display's right inset
+//	└─ grid  VBox (flex, Spacing=buttonGap)
+//	   └─ row  HBox ×5 (fixed height rowH, Spacing=buttonGap)
+//	      └─ button ×N (fixed width colW)
+//
+// Fixed sizes (displayH/rowH/colW) become AddFixed extents and the gutters
+// become box Spacing, so the layout is declared, not arithmetic'd per widget.
+// The grid is a full-width flex child of root, which keeps the right-most
+// button column (which reaches the surface edge, wider than the inset display)
+// fully hit-testable.
 func New(w, h int) *State {
 	s := &State{W: w, H: h, theme: toolkit.WhiteSurLight()}
-	s.display = toolkit.NewEntry("0")
-	s.display.SetBounds(toolkit.Rect{X: sideMargin, Y: buttonPadTop, W: w - 2*sideMargin, H: displayH})
 
-	baseY := buttonPadTop + displayH + buttonGap
+	// Display row: the Entry at its historical width (w-2*sideMargin) plus a
+	// flex spacer that carries the right-hand inset, so the Entry lands at the
+	// exact same rect as the old hand-placed one without an Align dependency.
+	s.display = toolkit.NewEntry("0")
+	displayRow := toolkit.NewHBox()
+	displayRow.AddFixed(s.display, w-2*sideMargin)
+	displayRow.AddFlex(toolkit.NewContainer(nil), 1) // invisible right-margin spacer
+
+	// Button grid: a column of fixed-height rows, each a row of fixed-width
+	// buttons with buttonGap gutters — reproduces the 60×40 keys + 4px gaps
+	// declaratively instead of one toolkit.Rect per key.
+	grid := toolkit.NewVBox()
+	grid.Spacing = buttonGap
 	for r := 0; r < 5; r++ {
+		row := toolkit.NewHBox()
+		row.Spacing = buttonGap
 		for c := 0; c < 4; c++ {
 			label := keys[r][c]
 			if label == "" {
@@ -68,17 +109,26 @@ func New(w, h int) *State {
 			}
 			b := toolkit.NewButton(label, nil)
 			b.Style = keyStyle(label)
-			b.SetBounds(toolkit.Rect{
-				X: sideMargin + c*(colW+buttonGap),
-				Y: baseY + r*(rowH+buttonGap),
-				W: colW,
-				H: rowH,
-			})
 			key := label // capture
-			b.OnClick = func() { s.press(key) }
+			b.OnClick = func() {
+				s.press(key)
+				s.dirty = true
+			}
+			row.AddFixed(b, colW)
 			s.buttons = append(s.buttons, b)
 		}
+		grid.AddFixed(row, rowH)
 	}
+
+	root := toolkit.NewVBox()
+	root.Spacing = buttonGap
+	root.AddFixed(displayRow, displayH)
+	root.AddFlex(grid, 1)
+	// One layout pass positions the entire tree; the content region is inset by
+	// the top pad + left margin, and spans to the surface's right/bottom edge
+	// (the right-most button column reaches w).
+	root.SetBounds(toolkit.Rect{X: sideMargin, Y: buttonPadTop, W: w - sideMargin, H: h - buttonPadTop})
+	s.root = root
 	return s
 }
 
@@ -96,27 +146,22 @@ func keyStyle(label string) toolkit.ButtonStyle {
 	}
 }
 
-// Render paints every widget.
+// Render paints the whole scene: a background fill, then the container tree.
 func Render(s *State, buf []byte) {
 	p := painter.NewPixelPainter(buf, s.W, s.H)
 	fill(buf, s.W, toolkit.Rect{X: 0, Y: 0, W: s.W, H: s.H}, s.theme.Background)
-	s.display.Draw(p, s.theme)
-	for _, b := range s.buttons {
-		b.Draw(p, s.theme)
-	}
+	s.root.Draw(p, s.theme)
 }
 
-// HandleMouse dispatches to whichever button contains (x, y). Returns
-// true if the scene should re-render.
+// HandleMouse routes a click at surface coordinates (x, y) through the
+// container tree (translated into the root's local space); a button whose
+// bounds contain the point fires its OnClick, which sets dirty. Returns true
+// when a click triggered an action (the scene should re-render).
 func (s *State) HandleMouse(x, y int) bool {
-	for _, b := range s.buttons {
-		if insideRect(x, y, b.Bounds()) {
-			ev := toolkit.Event{Kind: toolkit.EventClick, X: x, Y: y}
-			b.OnEvent(ev)
-			return true
-		}
-	}
-	return false
+	s.dirty = false
+	rb := s.root.Bounds()
+	s.root.OnEvent(toolkit.Event{Kind: toolkit.EventClick, X: x - rb.X, Y: y - rb.Y})
+	return s.dirty
 }
 
 // HandleKey maps a keyboard event's Code string to the equivalent
@@ -271,8 +316,4 @@ func fill(buf []byte, surfaceW int, r toolkit.Rect, c toolkit.RGBA) {
 			buf[off+3] = c.A
 		}
 	}
-}
-
-func insideRect(x, y int, r toolkit.Rect) bool {
-	return x >= r.X && x < r.X+r.W && y >= r.Y && y < r.Y+r.H
 }
