@@ -4,7 +4,7 @@
 // composed from the go-widgets/toolkit widgets. Layout (top to bottom):
 //
 //   +--------------------------------------------------+
-//   | Toolbar   [N] [O] [S]  [C] [X] [V]  [?]           | ← DrawIcon* helpers
+//   | Toolbar   [N] [O] [S]  [C] [X] [V]  [?]           | ← North docked band
 //   +--------------------------------------------------+
 //   | +----------+ +------------------------------------+
 //   | | Untitled | | // TextView with the current doc   |
@@ -12,13 +12,24 @@
 //   | | todo.txt | |                                     |
 //   | +----------+ +------------------------------------+
 //   +--------------------------------------------------+
-//   | 3 docs   ln 5, col 12   utf-8         Notepad     | ← Statusbar
+//   | 3 docs   ln 5, col 12   utf-8         Notepad     | ← South statusbar
 //   +--------------------------------------------------+
 //
+// The chrome is arranged with the toolkit's Sencha container model — a
+// Container driven by a BorderLayout — rather than hand-computed
+// toolkit.Rect placement: the toolbar docks North (fixed height), the
+// statusbar docks South (fixed height), the documents list docks West
+// (fixed width), and the editor's TextView fills the Center. A single
+// root.SetBounds lays the whole tree out, root.Draw paints it, and
+// root.OnEvent routes clicks into child-local space — no per-widget rect
+// arithmetic and no manual hit-testing. The transient notification toast
+// is a free-floating overlay (host-positioned in the editor pane's top
+// right), so it stays outside the border tree and is painted last on top.
+//
 // A real toolkit consumer: exercises Toolbar (icons), ListBox (docs
-// panel), TextView (editor with IME), Statusbar (readout), Paned
-// (draggable split). No fake data; docs live only in memory (host
-// integration with sharedvfs is deferred to a follow-up).
+// panel), TextView (editor with IME), Statusbar (readout). No fake data;
+// docs live only in memory (host integration with sharedvfs is deferred
+// to a follow-up).
 
 package scene
 
@@ -39,12 +50,13 @@ type Doc struct {
 type State struct {
 	W, H int
 
-	theme    *toolkit.Theme
-	toolbar  *toolkit.Toolbar
-	docs     *toolkit.ListBox
-	editor   *toolkit.TextView
-	status   *toolkit.Statusbar
-	notify   *toolkit.Notification
+	theme   *toolkit.Theme
+	root    *toolkit.Container
+	toolbar *toolkit.Toolbar
+	docs    *toolkit.ListBox
+	editor  *toolkit.TextView
+	status  *toolkit.Statusbar
+	notify  *toolkit.Notification
 
 	docSet    []Doc
 	activeIdx int
@@ -60,6 +72,19 @@ const (
 
 // New builds a Notepad with two demo docs so the first-run experience
 // is not blank.
+//
+// The widget tree mirrors the visual structure declaratively:
+//
+//	root  Container (BorderLayout)      — the whole scene, laid out N,S,W,Center
+//	├─ toolbar  Toolbar   (North, fixed height toolbarH)
+//	├─ status   Statusbar (South, fixed height statusH)
+//	├─ docs     ListBox   (West,  fixed width  docsW)
+//	└─ editor   TextView  (Center, fills the remainder)
+//
+// The fixed sizes become each Item's Size (the edge band's thickness); the
+// editor is the Center region and absorbs whatever the edges leave. The
+// notification toast is deliberately NOT a border region — it is a floating
+// overlay drawn on top of the tree.
 func New(w, h int) *State {
 	s := &State{W: w, H: h, theme: toolkit.DefaultLight()}
 	s.docSet = []Doc{
@@ -81,7 +106,6 @@ func New(w, h int) *State {
 		{Separator: true},
 		{Label: "?", OnClick: func() { s.notif("Notepad v0.1 — a toolkit consumer") }},
 	})
-	s.toolbar.SetBounds(toolkit.Rect{X: 0, Y: 0, W: w, H: toolbarH})
 
 	// Docs list on the left.
 	items := make([]string, len(s.docSet))
@@ -91,55 +115,52 @@ func New(w, h int) *State {
 	s.docs = toolkit.NewListBox(items)
 	s.docs.Selected = 0
 	s.docs.OnActivate = func(idx int) { s.switchDoc(idx) }
-	s.docs.SetBounds(toolkit.Rect{X: 0, Y: toolbarH, W: docsW, H: h - toolbarH - statusH})
 
 	// Editor on the right.
 	s.editor = toolkit.NewTextView(s.docSet[s.activeIdx].Content)
 	s.editor.Focused = true
 	s.editor.OnChange = func() { s.updateStatus() }
-	s.editor.SetBounds(toolkit.Rect{X: docsW, Y: toolbarH, W: w - docsW, H: h - toolbarH - statusH})
 
 	// Status bar.
 	s.status = toolkit.NewStatusbar([]string{"", "", "utf-8", "Notepad"})
-	s.status.SetBounds(toolkit.Rect{X: 0, Y: h - statusH, W: w, H: statusH})
+
+	// Border-layout container: docked toolbar (North) + statusbar (South) +
+	// docs list (West), the editor filling the Center. One SetBounds lays
+	// out the whole tree.
+	s.root = toolkit.NewContainer(toolkit.BorderLayout{}).
+		Add(toolkit.Item{Widget: s.toolbar, Region: toolkit.RegionNorth, Size: toolbarH}).
+		Add(toolkit.Item{Widget: s.status, Region: toolkit.RegionSouth, Size: statusH}).
+		Add(toolkit.Item{Widget: s.docs, Region: toolkit.RegionWest, Size: docsW}).
+		Add(toolkit.Item{Widget: s.editor, Region: toolkit.RegionCenter})
+	s.root.SetBounds(toolkit.Rect{X: 0, Y: 0, W: w, H: h})
+
 	s.updateStatus()
 
 	// Notification toast (host-positioned in the top-right of the
-	// editor pane). Reused across notif() calls.
+	// editor pane). A floating overlay outside the border tree; reused
+	// across notif() calls.
 	s.notify = toolkit.NewNotification("")
 	s.notify.SetBounds(toolkit.Rect{X: w - 220, Y: toolbarH + 8, W: 210, H: 24})
 
 	return s
 }
 
-// Render paints every widget in draw-order (bg → toolbar → docs list →
-// editor → status → notification on top).
+// Render paints the whole scene: a background fill, the container tree, then
+// the notification toast on top.
 func Render(s *State, buf []byte) {
 	fill(buf, s.W, toolkit.Rect{X: 0, Y: 0, W: s.W, H: s.H}, s.theme.Background)
 	p := painter.NewPixelPainter(buf, s.W, s.H)
-	s.toolbar.Draw(p, s.theme)
-	s.docs.Draw(p, s.theme)
-	s.editor.Draw(p, s.theme)
-	s.status.Draw(p, s.theme)
+	s.root.Draw(p, s.theme)
 	s.notify.Draw(p, s.theme)
 }
 
-// HandleMouse dispatches a click at (x, y) to whichever pane it lands
-// in. Returns true if the scene should re-render.
+// HandleMouse routes a click at surface coordinates (x, y) through the
+// container tree (translated into the root's local space). Whichever docked
+// bar or the centre editor contains the point receives the event in its own
+// local coordinates. Returns true so the scene re-renders.
 func (s *State) HandleMouse(x, y int) bool {
-	ev := toolkit.Event{Kind: toolkit.EventClick, X: x, Y: y}
-	switch {
-	case insideRect(x, y, s.toolbar.Bounds()):
-		s.toolbar.OnEvent(localize(ev, s.toolbar.Bounds()))
-	case insideRect(x, y, s.docs.Bounds()):
-		r := s.docs.Bounds()
-		local := ev
-		local.X -= r.X
-		local.Y -= r.Y
-		s.docs.OnEvent(local)
-	case insideRect(x, y, s.editor.Bounds()):
-		s.editor.OnEvent(localize(ev, s.editor.Bounds()))
-	}
+	rb := s.root.Bounds()
+	s.root.OnEvent(toolkit.Event{Kind: toolkit.EventClick, X: x - rb.X, Y: y - rb.Y})
 	return true
 }
 
@@ -264,14 +285,4 @@ func fill(buf []byte, surfaceW int, r toolkit.Rect, c toolkit.RGBA) {
 			buf[off+3] = c.A
 		}
 	}
-}
-
-func insideRect(x, y int, r toolkit.Rect) bool {
-	return x >= r.X && x < r.X+r.W && y >= r.Y && y < r.Y+r.H
-}
-
-func localize(ev toolkit.Event, r toolkit.Rect) toolkit.Event {
-	ev.X -= r.X
-	ev.Y -= r.Y
-	return ev
 }

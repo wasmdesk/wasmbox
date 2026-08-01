@@ -256,19 +256,65 @@ func TestFillOutOfBuffer(t *testing.T) {
 	fill(buf, 4, toolkit.Rect{X: 0, Y: 0, W: 100, H: 100}, toolkit.RGB(0xFF, 0, 0))
 }
 
-func TestInsideRect(t *testing.T) {
-	r := toolkit.Rect{X: 10, Y: 10, W: 20, H: 20}
-	if !insideRect(15, 15, r) {
-		t.Fatal("centre must be inside")
+// TestGoldenLayoutRects is the behaviour-preserving proof: the Sencha
+// BorderLayout container tree lays every chrome widget out to the EXACT same
+// toolkit.Rect the old hand-placed code produced. The expected rects are
+// recomputed here with the original arithmetic — toolbar spanning the top at
+// height toolbarH, statusbar spanning the bottom at height statusH, the docs
+// list a docsW-wide column on the left below the toolbar and above the status
+// bar, and the editor filling the remainder.
+func TestGoldenLayoutRects(t *testing.T) {
+	s := New(surfaceW, surfaceH)
+
+	wantToolbar := toolkit.Rect{X: 0, Y: 0, W: surfaceW, H: toolbarH}
+	if got := s.toolbar.Bounds(); got != wantToolbar {
+		t.Fatalf("toolbar bounds = %+v, want %+v", got, wantToolbar)
 	}
-	if insideRect(0, 0, r) {
-		t.Fatal("(0,0) must be outside")
+
+	wantStatus := toolkit.Rect{X: 0, Y: surfaceH - statusH, W: surfaceW, H: statusH}
+	if got := s.status.Bounds(); got != wantStatus {
+		t.Fatalf("status bounds = %+v, want %+v", got, wantStatus)
+	}
+
+	wantDocs := toolkit.Rect{X: 0, Y: toolbarH, W: docsW, H: surfaceH - toolbarH - statusH}
+	if got := s.docs.Bounds(); got != wantDocs {
+		t.Fatalf("docs bounds = %+v, want %+v", got, wantDocs)
+	}
+
+	wantEditor := toolkit.Rect{X: docsW, Y: toolbarH, W: surfaceW - docsW, H: surfaceH - toolbarH - statusH}
+	if got := s.editor.Bounds(); got != wantEditor {
+		t.Fatalf("editor bounds = %+v, want %+v", got, wantEditor)
 	}
 }
 
-func TestLocalize(t *testing.T) {
-	ev := localize(toolkit.Event{X: 25, Y: 15}, toolkit.Rect{X: 10, Y: 5})
-	if ev.X != 15 || ev.Y != 10 {
-		t.Fatalf("localize wrong: %+v", ev)
+// TestClickRoutesToEditorCenter proves a click landing in the Center region
+// (past the docsW-wide West column) routes to the editor and focuses it —
+// the container translates the surface point into the editor's local space.
+func TestClickRoutesToEditorCenter(t *testing.T) {
+	s := New(surfaceW, surfaceH)
+	s.editor.Focused = false
+	er := s.editor.Bounds()
+	if !s.HandleMouse(er.X+20, er.Y+20) {
+		t.Fatal("HandleMouse in the editor region must return true")
+	}
+	if !s.editor.Focused {
+		t.Fatal("a click in the Center region should focus the editor")
+	}
+}
+
+// TestClickRoutesToDocsWest proves a click in the West docs column reaches the
+// ListBox and activates the row under the pointer — routing the doc switch
+// through the container tree instead of the old insideRect dispatch.
+func TestClickRoutesToDocsWest(t *testing.T) {
+	s := New(surfaceW, surfaceH)
+	dr := s.docs.Bounds()
+	// Row height defaults to 18; row 1 spans local Y in [18,36). Click at
+	// local Y = 20 (surface Y = docs.Y+20) inside the docsW-wide column.
+	s.HandleMouse(dr.X+10, dr.Y+20)
+	if s.activeIdx != 1 {
+		t.Fatalf("click on docs row 1 should switch to doc 1; activeIdx=%d", s.activeIdx)
+	}
+	if !strings.Contains(s.editor.Text(), "milk") {
+		t.Fatalf("switching to doc 1 via click didn't load its content: %q", s.editor.Text())
 	}
 }
