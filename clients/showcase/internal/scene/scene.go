@@ -1,10 +1,19 @@
 // SPDX-License-Identifier: BSD-3-Clause
 //
-// Package scene renders the go-widgets/toolkit showcase: one window holding
-// a MenuBar + Toolbar + a Notebook of tabs, each tab exercising a
-// different widget family. The scene's only purpose is to drive the
-// toolkit end-to-end in production conditions — the wasm main below
-// pipes input events in, the scene composes widgets and writes pixels.
+// Package scene renders the go-widgets/toolkit showcase: one window whose
+// layout is built entirely from the toolkit's Sencha container model rather
+// than hand-computed toolkit.Rect placement.
+//
+// The app shell is a BorderLayout Container: a North band stacks the MenuBar,
+// the Toolbar and a tab strip (a VBox of fixed-height rows); a South band docks
+// the Statusbar; the Center holds the widget gallery. The gallery is a
+// CardLayout Container — one card per widget family, exactly one visible at a
+// time — and each card is itself a VBox/HBox composition of that family's demo
+// widgets (fixed sizes via AddFixed, gutters via fixed spacers, centring and
+// insets via flex spacers). Clicking a tab button swaps the CardLayout's Active
+// index; a single root.SetBounds lays the whole tree out, root.Draw paints it,
+// and root.OnEvent routes clicks into child-local space — no per-widget rect
+// arithmetic and no manual hit-testing.
 //
 // scene is pure Go (no syscall/js) so the painter + every widget can
 // be exercised in native unit tests too.
@@ -21,11 +30,18 @@ import (
 type State struct {
 	W, H int
 
-	theme    *toolkit.Theme
-	menuBar  *toolkit.MenuBar
-	toolbar  *toolkit.Toolbar
-	notebook *toolkit.Notebook
-	status   *toolkit.Statusbar
+	theme   *toolkit.Theme
+	root    *toolkit.Container // BorderLayout app shell
+	menuBar *toolkit.MenuBar
+	toolbar *toolkit.Toolbar
+	status  *toolkit.Statusbar
+
+	// cards is the Center gallery (a CardLayout Container); cardLayout is its
+	// layout, so setActiveCard can flip which card is visible. tabButtons is the
+	// North tab strip that drives it.
+	cards      *toolkit.Container
+	cardLayout *toolkit.CardLayout
+	tabButtons []*toolkit.Button
 
 	helloButton *toolkit.Button
 	clickCount  int
@@ -62,6 +78,58 @@ type State struct {
 	progress    *toolkit.ProgressBar
 	scale       *toolkit.Scale
 	spin        *toolkit.SpinButton
+}
+
+// tabLabels names each gallery card in strip order — the same families the
+// pre-Sencha Notebook exposed, in the same order (so the card index is a
+// drop-in for the old notebook.Active index, e.g. the Input card is still 2).
+var tabLabels = []string{
+	"Button", "Toggles", "Input", "Tree+List", "Calendar", "Color", "Feedback",
+}
+
+// inputCard is the index of the Input card (the TextView-hosting one) — the only
+// card that consumes keyboard events. Named so HandleKey/HandleChar don't hide a
+// magic 2.
+const inputCard = 2
+
+// spacer is an invisible, zero-child Container used to reserve fixed gaps
+// (AddFixed) or absorb slack (AddFlex) inside a box — the declarative
+// replacement for the old hand-computed X/Y offsets. Each call returns a fresh
+// instance so it can carry its own bounds in its slot.
+func spacer() toolkit.Widget { return toolkit.NewContainer(nil) }
+
+// rowLeft lays w at a fixed left inset and fixed width inside a full-width,
+// gap-free HBox (trailing flex spacer soaks up the rest): reproduces a
+// left-anchored widget at absolute X=left, width=width.
+func rowLeft(left, width int, w toolkit.Widget) *toolkit.HBox {
+	h := toolkit.NewHBox()
+	h.Spacing = -1 // no inter-child gap; the spacers ARE the geometry
+	h.AddFixed(spacer(), left)
+	h.AddFixed(w, width)
+	h.AddFlex(spacer(), 1)
+	return h
+}
+
+// rowInset lays w flexibly between equal fixed left/right margins m — reproduces
+// a full-bleed widget inset by m on each side (width = box - 2*m).
+func rowInset(m int, w toolkit.Widget) *toolkit.HBox {
+	h := toolkit.NewHBox()
+	h.Spacing = -1
+	h.AddFixed(spacer(), m)
+	h.AddFlex(w, 1)
+	h.AddFixed(spacer(), m)
+	return h
+}
+
+// rowCenter centres a fixed-width widget on the main axis via equal flex spacers
+// — reproduces an X = (box-width)/2 centred widget.
+func rowCenter(width int, w toolkit.Widget) *toolkit.HBox {
+	h := toolkit.NewHBox()
+	h.Spacing = -1
+	h.AddFlex(spacer(), 1)
+	h.AddFixed(w, width)
+	h.AddFlex(spacer(), 1)
+	return h
 }
 
 // New builds a fully-wired showcase State sized W x H.
@@ -105,9 +173,10 @@ func New(w, h int) *State {
 		buildMenu(nil), // placeholder — filled by SetActiveFrame below
 		buildMenu([]toolkit.MenuItem{{Label: "About"}}),
 	}
-	s.menuBar.SetBounds(toolkit.Rect{X: 0, Y: 0, W: w, H: toolkit.MenuBarH})
 	// Seed the Frame menu with no active marker (empty string ≠ any
-	// registered frame name → no "* " prefix). main.go overrides
+	// registered frame name → no "* " prefix). Called while s.status is
+	// still nil, so it only builds the menu — the status segment is
+	// seeded below when the Statusbar is created. main.go overrides
 	// this at boot with the URL's ?frame= value.
 	s.SetActiveFrame("")
 
@@ -117,9 +186,8 @@ func New(w, h int) *State {
 		{Label: "C"}, {Label: "V"}, {Label: "X"}, {Separator: true},
 		{Label: "?"},
 	})
-	s.toolbar.SetBounds(toolkit.Rect{X: 0, Y: toolkit.MenuBarH, W: w, H: toolkit.ToolbarButtonH})
 
-	// Tab widgets.
+	// Card widgets.
 	s.helloButton = toolkit.NewButton("Click me", nil)
 	s.clickLabel = &toolkit.Label{Text: "clicked 0 times"}
 	s.helloButton.OnClick = func() {
@@ -161,48 +229,157 @@ func New(w, h int) *State {
 	s.scale = toolkit.NewScale(0, 100, 50)
 	s.spin = toolkit.NewSpinButton(0, 100, 42, 1)
 
-	// Notebook (one tab per family). The "page" passed to AddTab is
-	// the *primary* widget; auxiliaries are painted on top in Render.
-	s.notebook = toolkit.NewNotebook()
-	s.notebook.AddTab("Button", s.helloButton)
-	s.notebook.AddTab("Toggles", s.check1)
-	s.notebook.AddTab("Input", s.entry)
-	s.notebook.AddTab("Tree+List", s.tree)
-	s.notebook.AddTab("Calendar", s.calendar)
-	s.notebook.AddTab("Color", s.colorPick)
-	s.notebook.AddTab("Feedback", s.progress)
-
-	bodyY := toolkit.MenuBarH + toolkit.ToolbarButtonH
-	statusH := toolkit.StatusbarH
-	bodyH := h - bodyY - statusH
-	s.notebook.SetBounds(toolkit.Rect{X: 0, Y: bodyY, W: w, H: bodyH})
-
+	// Statusbar.
 	s.status = toolkit.NewStatusbar([]string{
 		"35 widgets", "100% cov", "theme: Default Light", "frame: openbox",
 	})
-	s.status.SetBounds(toolkit.Rect{X: 0, Y: h - statusH, W: w, H: statusH})
 
-	// Lay out tab contents inside the Notebook body.
-	tabBodyY := bodyY + toolkit.NotebookTabStripH
-	tabBodyH := bodyH - toolkit.NotebookTabStripH
-	s.helloButton.SetBounds(toolkit.Rect{X: w/2 - 60, Y: tabBodyY + 20, W: 120, H: 28})
-	s.clickLabel.SetBounds(toolkit.Rect{X: w/2 - 80, Y: tabBodyY + 60, W: 160, H: 20})
-	s.check1.SetBounds(toolkit.Rect{X: 8, Y: tabBodyY + 8, W: 200, H: 24})
-	s.check2.SetBounds(toolkit.Rect{X: 8, Y: tabBodyY + 32, W: 200, H: 24})
-	s.radioA.SetBounds(toolkit.Rect{X: 8, Y: tabBodyY + 60, W: 120, H: 20})
-	s.radioB.SetBounds(toolkit.Rect{X: 8, Y: tabBodyY + 80, W: 120, H: 20})
-	s.dropdown.SetBounds(toolkit.Rect{X: 8, Y: tabBodyY + 110, W: 150, H: 24})
-	s.entry.SetBounds(toolkit.Rect{X: 8, Y: tabBodyY + 8, W: w - 16, H: 24})
-	s.textView.SetBounds(toolkit.Rect{X: 8, Y: tabBodyY + 40, W: w - 16, H: tabBodyH - 60})
-	s.tree.SetBounds(toolkit.Rect{X: 8, Y: tabBodyY + 8, W: (w - 24) / 2, H: tabBodyH - 16})
-	s.listBox.SetBounds(toolkit.Rect{X: 16 + (w-24)/2, Y: tabBodyY + 8, W: (w - 24) / 2, H: tabBodyH - 16})
-	s.calendar.SetBounds(toolkit.Rect{X: w/2 - 100, Y: tabBodyY + 8, W: 200, H: tabBodyH - 16})
-	s.colorPick.SetBounds(toolkit.Rect{X: 8, Y: tabBodyY + 8, W: w - 16, H: 100})
-	s.progress.SetBounds(toolkit.Rect{X: 16, Y: tabBodyY + 20, W: w - 32, H: 18})
-	s.scale.SetBounds(toolkit.Rect{X: 16, Y: tabBodyY + 60, W: w - 32, H: 20})
-	s.spin.SetBounds(toolkit.Rect{X: 16, Y: tabBodyY + 100, W: 100, H: 24})
+	// --- Sencha container tree ------------------------------------------
+	//
+	//	root  Container(BorderLayout)                 — the app shell
+	//	├─ North  VBox                                — menu + toolbar + tabs
+	//	│  ├─ menuBar   (fixed MenuBarH)
+	//	│  ├─ toolbar   (fixed ToolbarButtonH)
+	//	│  └─ tabStrip  HBox of tab Buttons (fixed NotebookTabStripH)
+	//	├─ Center cards  Container(CardLayout)        — the widget gallery
+	//	│  └─ card ×7  VBox/HBox composition per family
+	//	└─ South  statusbar (fixed StatusbarH)
+	//
+	// The Center card body occupies exactly the rect the old Notebook body
+	// did — MenuBarH+ToolbarButtonH+NotebookTabStripH down from the top,
+	// StatusbarH up from the bottom — so every demo widget lands on its
+	// historical rect (see the golden-rect test).
+	s.buildCards()
+
+	tabStrip := toolkit.NewHBox()
+	tabStrip.Spacing = -1 // contiguous tabs, like the old notebook strip
+	for i, label := range tabLabels {
+		idx := i
+		b := toolkit.NewButton(label, nil)
+		b.OnClick = func() { s.setActiveCard(idx) }
+		if i == 0 {
+			b.Style = toolkit.ButtonProminent // active tab
+		}
+		tabStrip.AddFixed(b, toolkit.NotebookTabWidth)
+		s.tabButtons = append(s.tabButtons, b)
+	}
+
+	north := toolkit.NewVBox()
+	north.Spacing = -1 // no gaps: the bands abut like the old fixed rects
+	north.AddFixed(s.menuBar, toolkit.MenuBarH)
+	north.AddFixed(s.toolbar, toolkit.ToolbarButtonH)
+	north.AddFixed(tabStrip, toolkit.NotebookTabStripH)
+	northH := toolkit.MenuBarH + toolkit.ToolbarButtonH + toolkit.NotebookTabStripH
+
+	root := toolkit.NewContainer(toolkit.BorderLayout{})
+	// Insert order sets Draw order: North first (an open menu dropdown paints
+	// under the body, as before), then the cards, then the status bar on top.
+	root.Add(toolkit.Item{Widget: north, Region: toolkit.RegionNorth, Size: northH})
+	root.AddWidget(s.cards) // Center
+	root.Add(toolkit.Item{Widget: s.status, Region: toolkit.RegionSouth, Size: toolkit.StatusbarH})
+	root.SetBounds(toolkit.Rect{X: 0, Y: 0, W: w, H: h})
+	s.root = root
 
 	return s
+}
+
+// buildCards constructs the seven gallery cards and wires them into a
+// CardLayout Container (card 0 active). Each card reproduces its family's
+// historical widget rects declaratively: a VBox of fixed-height rows (fixed
+// spacers between them) where each row is an HBox positioning the widget with
+// rowLeft/rowInset/rowCenter.
+func (s *State) buildCards() {
+	// Card 0 — Button: a centred button with a click-count label below it.
+	c0 := toolkit.NewVBox()
+	c0.Spacing = -1
+	c0.AddFixed(spacer(), 20)
+	c0.AddFixed(rowCenter(120, s.helloButton), 28)
+	c0.AddFixed(spacer(), 12)
+	c0.AddFixed(rowCenter(160, s.clickLabel), 20)
+	c0.AddFlex(spacer(), 1)
+
+	// Card 1 — Toggles: two checks, two radios, a dropdown, left-anchored.
+	c1 := toolkit.NewVBox()
+	c1.Spacing = -1
+	c1.AddFixed(spacer(), 8)
+	c1.AddFixed(rowLeft(8, 200, s.check1), 24)
+	c1.AddFixed(rowLeft(8, 200, s.check2), 24)
+	c1.AddFixed(spacer(), 4)
+	c1.AddFixed(rowLeft(8, 120, s.radioA), 20)
+	c1.AddFixed(rowLeft(8, 120, s.radioB), 20)
+	c1.AddFixed(spacer(), 10)
+	c1.AddFixed(rowLeft(8, 150, s.dropdown), 24)
+	c1.AddFlex(spacer(), 1)
+
+	// Card 2 — Input: an entry above a flex-filling text view (20px bottom pad).
+	c2 := toolkit.NewVBox()
+	c2.Spacing = -1
+	c2.AddFixed(spacer(), 8)
+	c2.AddFixed(rowInset(8, s.entry), 24)
+	c2.AddFixed(spacer(), 8)
+	c2.AddFlex(rowInset(8, s.textView), 1)
+	c2.AddFixed(spacer(), 20)
+
+	// Card 3 — Tree+List: two flex columns side by side, 8px gutters/margins.
+	c3 := toolkit.NewVBox()
+	c3.Spacing = -1
+	c3.AddFixed(spacer(), 8)
+	treeRow := toolkit.NewHBox()
+	treeRow.Spacing = -1
+	treeRow.AddFixed(spacer(), 8)
+	treeRow.AddFlex(s.tree, 1)
+	treeRow.AddFixed(spacer(), 8)
+	treeRow.AddFlex(s.listBox, 1)
+	treeRow.AddFixed(spacer(), 8)
+	c3.AddFlex(treeRow, 1)
+	c3.AddFixed(spacer(), 8)
+
+	// Card 4 — Calendar: a centred, flex-tall calendar (8px top/bottom pad).
+	c4 := toolkit.NewVBox()
+	c4.Spacing = -1
+	c4.AddFixed(spacer(), 8)
+	c4.AddFlex(rowCenter(200, s.calendar), 1)
+	c4.AddFixed(spacer(), 8)
+
+	// Card 5 — Color: a full-bleed 100px colour chooser near the top.
+	c5 := toolkit.NewVBox()
+	c5.Spacing = -1
+	c5.AddFixed(spacer(), 8)
+	c5.AddFixed(rowInset(8, s.colorPick), 100)
+	c5.AddFlex(spacer(), 1)
+
+	// Card 6 — Feedback: a progress bar, a scale, and a fixed-width spin button.
+	c6 := toolkit.NewVBox()
+	c6.Spacing = -1
+	c6.AddFixed(spacer(), 20)
+	c6.AddFixed(rowInset(16, s.progress), 18)
+	c6.AddFixed(spacer(), 22)
+	c6.AddFixed(rowInset(16, s.scale), 20)
+	c6.AddFixed(spacer(), 20)
+	c6.AddFixed(rowLeft(16, 100, s.spin), 24)
+	c6.AddFlex(spacer(), 1)
+
+	s.cardLayout = &toolkit.CardLayout{Active: 0}
+	s.cards = toolkit.NewContainer(s.cardLayout)
+	for _, card := range []toolkit.Widget{c0, c1, c2, c3, c4, c5, c6} {
+		s.cards.AddWidget(card)
+	}
+}
+
+// setActiveCard shows the i-th gallery card: it points the CardLayout at i,
+// re-arranges the cards container (so the newly-active card gets bounds and the
+// rest collapse), and re-styles the tab strip so the active tab reads as
+// prominent. Invoked by every tab button's OnClick.
+func (s *State) setActiveCard(i int) {
+	s.cardLayout.Active = i
+	s.cards.SetBounds(s.cards.Bounds()) // re-run CardLayout with the new Active
+	for j, b := range s.tabButtons {
+		if j == i {
+			b.Style = toolkit.ButtonProminent
+		} else {
+			b.Style = toolkit.ButtonDefault
+		}
+	}
 }
 
 func buildMenu(items []toolkit.MenuItem) *toolkit.Menu {
@@ -278,55 +455,30 @@ func (s *State) setActiveThemeName(name string) {
 	s.status.SetSegment(2, "theme: "+name)
 }
 
-// Render paints the full scene into buf (a 4*W*H RGBA byte slice).
+// Render paints the full scene into buf (a 4*W*H RGBA byte slice): a background
+// fill, then the whole container tree in one Draw.
 func Render(s *State, buf []byte) {
 	r := toolkit.Rect{X: 0, Y: 0, W: s.W, H: s.H}
 	fill(buf, s.W, r, s.theme.Background)
 	p := painter.NewPixelPainter(buf, s.W, s.H)
-
-	s.menuBar.Draw(p, s.theme)
-	s.toolbar.Draw(p, s.theme)
-	s.notebook.Draw(p, s.theme)
-
-	switch s.notebook.Active {
-	case 0:
-		s.clickLabel.Draw(p, s.theme)
-	case 1:
-		s.check2.Draw(p, s.theme)
-		s.radioA.Draw(p, s.theme)
-		s.radioB.Draw(p, s.theme)
-		s.dropdown.Draw(p, s.theme)
-	case 2:
-		s.textView.Draw(p, s.theme)
-	case 3:
-		s.listBox.Draw(p, s.theme)
-	case 6:
-		s.scale.Draw(p, s.theme)
-		s.spin.Draw(p, s.theme)
-	}
-	s.status.Draw(p, s.theme)
+	s.root.Draw(p, s.theme)
 }
 
-// HandleMouse delivers a click at (x, y). Returns true if the scene
-// should re-render.
+// HandleMouse delivers a click at (x, y) by routing it through the container
+// tree (translated into the root's local space); the matched leaf — a tab
+// button, a menu, a demo widget — fires its own handler. Always returns true
+// (the compositor re-renders on every click, as before).
 func (s *State) HandleMouse(x, y int) bool {
-	ev := toolkit.Event{Kind: toolkit.EventClick, X: x, Y: y}
-	switch {
-	case insideRect(x, y, s.menuBar.Bounds()):
-		s.menuBar.OnEvent(localize(ev, s.menuBar.Bounds()))
-	case insideRect(x, y, s.toolbar.Bounds()):
-		s.toolbar.OnEvent(localize(ev, s.toolbar.Bounds()))
-	case insideRect(x, y, s.status.Bounds()):
-	default:
-		s.notebook.OnEvent(localize(ev, s.notebook.Bounds()))
-	}
+	rb := s.root.Bounds()
+	s.root.OnEvent(toolkit.Event{Kind: toolkit.EventClick, X: x - rb.X, Y: y - rb.Y})
 	return true
 }
 
 // HandleKey delivers a keydown to the focused widget (the TextView on
-// tab 2 of the showcase).
+// the Input card). Returns true when the Input card is active (the key
+// was consumed), false otherwise.
 func (s *State) HandleKey(code string) bool {
-	if s.notebook.Active == 2 {
+	if s.cardLayout.Active == inputCard {
 		s.textView.Focused = true
 		s.textView.OnEvent(toolkit.Event{Kind: toolkit.EventKeyDown, Code: code})
 		return true
@@ -336,7 +488,7 @@ func (s *State) HandleKey(code string) bool {
 
 // HandleChar delivers a printable rune sequence to the TextView.
 func (s *State) HandleChar(text string) bool {
-	if s.notebook.Active == 2 {
+	if s.cardLayout.Active == inputCard {
 		s.textView.OnEvent(toolkit.Event{Kind: toolkit.EventChar, Code: text})
 		return true
 	}
@@ -358,16 +510,6 @@ func fill(buf []byte, surfaceW int, r toolkit.Rect, c toolkit.RGBA) {
 			buf[off+3] = c.A
 		}
 	}
-}
-
-func insideRect(x, y int, r toolkit.Rect) bool {
-	return x >= r.X && x < r.X+r.W && y >= r.Y && y < r.Y+r.H
-}
-
-func localize(ev toolkit.Event, r toolkit.Rect) toolkit.Event {
-	ev.X -= r.X
-	ev.Y -= r.Y
-	return ev
 }
 
 func itoa(n int) string {
