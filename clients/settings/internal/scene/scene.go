@@ -166,7 +166,7 @@ func Render(s *State, buf []byte) {
 			p.FillRoundRect(toolkit.Rect{X: catMargin, Y: ry, W: sidebarW - 2*catMargin, H: catRowH - 4}, 7, th.Accent)
 			ink = onAccent
 		}
-		toolkit.DrawText(p, sidePad+5, ry+(catRowH-4-toolkit.GlyphHeight)/2, c.name, ink)
+		toolkit.DrawText(p, sidePad+5, ry+(catRowH-4-toolkit.GlyphHeight())/2, c.name, ink)
 	}
 
 	// Content: page title, then the selected category's rows grouped inside a
@@ -179,7 +179,7 @@ func Render(s *State, buf []byte) {
 	for ri := range cat.rows {
 		row := cat.rows[ri]
 		ry := card.Y + ri*rowH
-		toolkit.DrawText(p, card.X+rowPadX, ry+(rowH-toolkit.GlyphHeight)/2, row.title, th.OnSurface)
+		toolkit.DrawText(p, card.X+rowPadX, ry+(rowH-toolkit.GlyphHeight())/2, row.title, th.OnSurface)
 		if ri < len(cat.rows)-1 {
 			p.FillRect(toolkit.Rect{X: card.X + rowPadX, Y: ry + rowH - 1, W: card.W - 2*rowPadX, H: 1}, th.Border)
 		}

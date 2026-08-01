@@ -140,7 +140,7 @@ func Render(s *State, buf []byte) {
 	if !s.onSite {
 		urlInk = dim(th)
 	}
-	toolkit.DrawText(p, s.addrRect.X+12, s.addrRect.Y+(addrH-toolkit.GlyphHeight)/2, s.addressText(), urlInk)
+	toolkit.DrawText(p, s.addrRect.X+12, s.addrRect.Y+(addrH-toolkit.GlyphHeight())/2, s.addressText(), urlInk)
 
 	if s.onSite {
 		renderSite(s, p, th)
@@ -167,7 +167,7 @@ func renderStart(s *State, p *painter.PixelPainter, th *toolkit.Theme) {
 		iy := r.Y + 14
 		p.FillRoundRect(toolkit.Rect{X: ix, Y: iy, W: iconSz, H: iconSz}, 10, th.Accent)
 		initial := string(upper(f.name[0]))
-		toolkit.DrawText(p, ix+(iconSz-toolkit.TextWidth(initial))/2, iy+(iconSz-toolkit.GlyphHeight)/2, initial, onAccent)
+		toolkit.DrawText(p, ix+(iconSz-toolkit.TextWidth(initial))/2, iy+(iconSz-toolkit.GlyphHeight())/2, initial, onAccent)
 		// Label under the icon.
 		lw := toolkit.TextWidth(f.name)
 		toolkit.DrawText(p, r.X+(r.W-lw)/2, r.Y+r.H-16, f.name, th.OnSurface)
@@ -179,7 +179,7 @@ func renderSite(s *State, p *painter.PixelPainter, th *toolkit.Theme) {
 	f := s.favs[s.cur]
 	x := gridLeft
 	toolkit.DrawText(p, x, toolbarH+50, f.name, th.OnSurface)
-	toolkit.DrawText(p, x, toolbarH+50+toolkit.GlyphHeight+10, "https://"+f.url, dim(th))
+	toolkit.DrawText(p, x, toolbarH+50+toolkit.GlyphHeight()+10, "https://"+f.url, dim(th))
 	msg := []string{
 		"This is a local placeholder page.",
 		"wasmbox runs under COEP:require-corp, so a live",
@@ -188,7 +188,7 @@ func renderSite(s *State, p *painter.PixelPainter, th *toolkit.Theme) {
 		"Click < (Back) to return to Favourites.",
 	}
 	for i, line := range msg {
-		toolkit.DrawText(p, x, toolbarH+96+i*(toolkit.GlyphHeight+8), line, th.OnSurface)
+		toolkit.DrawText(p, x, toolbarH+96+i*(toolkit.GlyphHeight()+8), line, th.OnSurface)
 	}
 }
 
@@ -250,7 +250,7 @@ func (s *State) HandleKey(code string) bool {
 func drawButton(p *painter.PixelPainter, th *toolkit.Theme, r toolkit.Rect, label string, ink toolkit.RGBA) {
 	p.FillRoundRect(r, 6, th.SurfaceAlt)
 	p.StrokeRoundRect(r, 6, th.Border, 1)
-	toolkit.DrawText(p, r.X+(r.W-toolkit.TextWidth(label))/2, r.Y+(r.H-toolkit.GlyphHeight)/2, label, ink)
+	toolkit.DrawText(p, r.X+(r.W-toolkit.TextWidth(label))/2, r.Y+(r.H-toolkit.GlyphHeight())/2, label, ink)
 }
 
 // dim returns a muted ink for placeholder / disabled text.

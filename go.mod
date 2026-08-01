@@ -4,8 +4,8 @@ go 1.26.4
 
 require (
 	github.com/go-embedded-ruby/ruby v0.0.0-20260623171000-045761e10d36
-	github.com/go-widgets/painter v0.1.1-0.20260706183023-1373a47de8fc
-	github.com/go-widgets/toolkit v0.9.4-0.20260707074045-9fcfc25f2aa8
+	github.com/go-widgets/painter v0.1.3
+	github.com/go-widgets/toolkit v0.62.0
 	github.com/wasmdesk/coreutils v0.0.0-20260629060422-c37bd87ae249
 )
 
@@ -22,6 +22,9 @@ require (
 	github.com/go-fft/fft v0.0.0-20260620110530-0e3ca1747acb // indirect
 	github.com/go-images/images v0.0.0-20260620184442-aa6cd1c0beb7 // indirect
 	github.com/go-ndarray/ndarray v0.0.0-20260620170009-555bfc31e7a3 // indirect
+	github.com/go-opentype/bidi v0.2.0 // indirect
+	github.com/go-opentype/opentype v0.3.7 // indirect
+	github.com/go-opentype/shape v0.3.2 // indirect
 	github.com/go-ruby-marshal/marshal v0.0.0-20260622114304-27ed1baddd9f // indirect
 	github.com/go-ruby-parser/parser v0.0.0-20260623170906-753af1b3721a // indirect
 	github.com/go-ruby-regexp/regexp v0.0.0-20260622075631-3a277cf71b81 // indirect
