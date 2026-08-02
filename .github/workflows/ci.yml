@@ -192,6 +192,10 @@ jobs:
         working-directory: test
         run: node probe-desktop.mjs
 
+      - name: Run headless frame-decoration probe (widgets WindowDecoration titlebar + buttons + body z-order)
+        working-directory: test
+        run: node probe-frame-widgets.mjs
+
       - name: Run headless Files client probe
         working-directory: test
         run: node probe-files.mjs

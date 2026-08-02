@@ -5,7 +5,7 @@ go 1.26.4
 require (
 	github.com/go-embedded-ruby/ruby v0.0.0-20260802114511-bf858f337d2c
 	github.com/go-widgets/painter v0.1.3
-	github.com/go-widgets/toolkit v0.71.0
+	github.com/go-widgets/toolkit v0.72.0
 	github.com/wasmdesk/coreutils v0.0.0-20260629060422-c37bd87ae249
 )
 
@@ -272,7 +272,7 @@ require (
 	github.com/go-ruby-webrick/webrick v0.0.0-20260630133907-a1380ee7733b // indirect
 	github.com/go-ruby-widgets/mvvm v0.1.0 // indirect
 	github.com/go-ruby-widgets/tui v0.1.0 // indirect
-	github.com/go-ruby-widgets/widgets v0.2.0 // indirect
+	github.com/go-ruby-widgets/widgets v0.3.0 // indirect
 	github.com/go-ruby-xslt/xslt v0.0.0-20260702171958-146eaf3f0176 // indirect
 	github.com/go-ruby-yaml/yaml v0.0.0-20260706120500-56d458798003 // indirect
 	github.com/go-ruby-zeitwerk/zeitwerk v0.0.0-20260706163820-cda238c0e98c // indirect

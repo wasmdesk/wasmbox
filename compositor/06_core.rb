@@ -401,6 +401,10 @@ class Compositor
   # body iframe lives in the main-thread DOM (not a worker), so we instead
   # post C2M_IFRAME_DETACH so the overlay manager removes the element.
   def notify_closed(win, reason)
+    # Drop the closed window's cached widgets-frame buffer (see
+    # 11_frame_widgets.rb) so a later window reusing the id never re-presents a
+    # stale decoration.
+    forget_frame_cache(win.id) if respond_to?(:forget_frame_cache)
     if win.dom?
       JS.global.call("wasmboxIframeDetach", win.id)
       return nil
@@ -1004,6 +1008,21 @@ class Compositor
     active = win.focused?
     chrome = Frame.current
 
+    # WIDGETS paint path (2026-08-02): when Compositor::FRAME_WIDGETS is on (see
+    # 11_frame_widgets.rb), paint the whole decoration (titlebar + buttons +
+    # border + shadow + grip) through the go-widgets binding into one per-window
+    # buffer and composite it OVER the body (source-over), instead of the
+    # hand-drawn chrome.paint / chrome.paint_frame below. The body is painted
+    # FIRST so the decoration's transparent body hole lets it show through and
+    # the border + grip land on top of its edges. Hit-testing (Window#*_rect) is
+    # unchanged, so the window behaves identically. The flag keeps the
+    # hand-drawn path below as the shippable fallback during the live co-edit.
+    if FRAME_WIDGETS
+      paint_window_body(win) unless win.shaded?
+      draw_window_frame_widgets(win, active)
+      return
+    end
+
     # Chrome-owned titlebar + buttons. The current chrome handles all paint
     # ops for the bar (background, hairline, title text, close/min/max
     # glyphs). Both Openbox and Aqua chromes implement this method.
@@ -1014,11 +1033,21 @@ class Compositor
     # window.
     return if win.shaded?
 
-    # Client body. In-process windows paint a solid fill; external windows
-    # blit their SharedArrayBuffer through a cached ImageData view; dom
-    # windows do NOT paint a body -- the body is a real <iframe> the main
-    # thread overlays on the canvas at the body-rect coords, and we just
-    # republish those coords every frame so the iframe tracks the WM.
+    paint_window_body(win)
+
+    # Chrome-owned frame chrome: resize grip + 1px border (Openbox), plus
+    # the faked 1px drop shadow + slightly heavier border on Aqua. Painted
+    # AFTER the body so it lands on top.
+    chrome.paint_frame(@ctx, win, active, self)
+  end
+
+  # Paint a decorated window's client body. In-process windows paint a solid
+  # fill; external windows blit their SharedArrayBuffer through a cached
+  # ImageData view; dom windows do NOT paint a body -- the body is a real
+  # <iframe> the main thread overlays on the canvas at the body-rect coords, and
+  # we just republish those coords every frame so the iframe tracks the WM.
+  # Shared by the hand-drawn + widgets frame paths.
+  def paint_window_body(win)
     if win.dom?
       bx, by, bw, bh = win.body_rect
       JS.global.call("wasmboxIframeMove", win.id, bx, by, bw, bh)
@@ -1027,11 +1056,6 @@ class Compositor
     else
       fill_rect(win.body_rect, win.fill)
     end
-
-    # Chrome-owned frame chrome: resize grip + 1px border (Openbox), plus
-    # the faked 1px drop shadow + slightly heavier border on Aqua. Painted
-    # AFTER the body so it lands on top.
-    chrome.paint_frame(@ctx, win, active, self)
   end
 
   # Blit an external window's SharedArrayBuffer onto the canvas. Chrome forbids

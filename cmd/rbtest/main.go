@@ -1042,5 +1042,62 @@ assert_eq(res, :ignored, "set_frame with missing name is :ignored")
 # Reset to openbox so downstream state is stable.
 FrameRegistry.select("openbox")
 
+# ---- Frame#decoration_spec (widgets paint path, 11_frame_widgets.rb) --------
+# decoration_spec re-expresses the same colours + geometry as #paint /
+# #paint_frame as a go-widgets WindowDecoration spec Hash, with every rect
+# FRAME-LOCAL. Hit-testing (Window#*_rect) is unchanged; these assertions pin
+# the spec so the paint can never drift from the geometry the compositor
+# hit-tests against.
+wmd = WindowManager.new
+FrameRegistry.select("openbox")
+dw = wmd.spawn("Deco", 240, 150)   # decorated, w=240
+
+ob = Frame.current.decoration_spec(dw, true)
+assert_eq(ob["title"], "Deco", "openbox spec carries the title")
+assert_eq(ob["title_center"], false, "openbox title is left-aligned")
+assert_eq(ob["titlebar"], [0, 0, 240, 22], "openbox titlebar is frame-local at the origin")
+assert_eq(ob["title_color"], Theme::TITLE_ACTIVE, "openbox active titlebar colour")
+assert_eq(ob["buttons"].length, 2, "openbox has close + minimize (no maximize)")
+assert_eq(ob["buttons"][0]["glyph"], "close", "openbox button 0 is close")
+assert_eq(ob["buttons"][1]["glyph"], "minimize", "openbox button 1 is minimize")
+assert_eq(ob["buttons"][0]["shape"], "rect", "openbox buttons are box-shaped")
+assert(ob["show_grip"], "openbox unshaded window shows the grip")
+assert(!ob["border"].nil?, "openbox unshaded window has a border")
+
+# Inactive focus swaps the titlebar colour.
+obi = Frame.current.decoration_spec(dw, false)
+assert_eq(obi["title_color"], Theme::TITLE_INACTIVE, "openbox inactive titlebar colour")
+
+# Shaded window: titlebar only — no border, no grip.
+dw.instance_variable_set(:@shaded, true)
+obs = Frame.current.decoration_spec(dw, true)
+assert(obs["border"].nil?, "shaded window omits the border")
+assert(obs["show_grip"].nil?, "shaded window omits the grip")
+dw.instance_variable_set(:@shaded, false)
+
+# Aqua: centred title, hairline, drop shadow, three traffic-light circles.
+FrameRegistry.select("aqua")
+aq = Frame.current.decoration_spec(dw, true)
+assert_eq(aq["title_center"], true, "aqua title is centred")
+assert_eq(aq["titlebar"], [0, 0, 240, 28], "aqua titlebar is 28px tall, frame-local")
+assert_eq(aq["buttons"].length, 3, "aqua has close + minimize + maximize")
+assert_eq(aq["buttons"][0]["shape"], "circle", "aqua buttons are traffic-light circles")
+assert(!aq["hairline"].nil?, "aqua paints a titlebar hairline")
+assert(!aq["shadow"].nil?, "aqua paints a faux drop shadow")
+# Traffic-lights stay canonical red active, grey out inactive.
+assert_eq(aq["buttons"][0]["face"], AquaFrame::CLOSE_RED, "active close light is canonical red")
+aqi = Frame.current.decoration_spec(dw, false)
+assert_eq(aqi["buttons"][0]["face"], AquaFrame::TL_DIM_FILL, "inactive close light greys out")
+
+# Themed variants pull their palette (proves the 7-palette matrix stays distinct).
+FrameRegistry.select("openbox-juno")
+tj = Frame.current.decoration_spec(dw, true)
+assert_eq(tj["title_color"], PALETTES::JUNO[:title_active], "themed openbox uses the Juno palette")
+FrameRegistry.select("aqua-whitesur-light")
+tw = Frame.current.decoration_spec(dw, true)
+assert_eq(tw["title_color"], PALETTES::WHITESUR_LIGHT[:title_active], "themed aqua uses the WhiteSur palette")
+assert_eq(tw["buttons"][0]["face"], AquaFrame::CLOSE_RED, "themed aqua keeps canonical traffic-lights")
+FrameRegistry.select("openbox")
+
 puts "rbtest: ran all pure-WM assertions"
 `

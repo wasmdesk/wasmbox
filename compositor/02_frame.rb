@@ -83,6 +83,26 @@ class Frame
   # is the Compositor (used for fill_rect/stroke_rect helpers + the @ctx).
   # Implemented per subclass.
   def paint(_ctx, _win, _active, _host) ; raise NotImplementedError ; end
+
+  # --- widgets paint path (2026-08-02) -----------------------------------
+  # decoration_spec(win, active) returns the go-widgets WindowDecoration
+  # spec Hash (see Widgets.decoration) that paints this chrome for `win`,
+  # with EVERY rect in FRAME-LOCAL coordinates (origin = win.x, frame_top)
+  # so the compositor can render it into a per-window buffer and blit it
+  # around the SAB body (see 11_frame_widgets.rb). This is the widgets
+  # twin of #paint / #paint_frame: it re-expresses the same colours +
+  # geometry as data, so hit-testing (Window#*_rect) stays the single
+  # source of truth and only the PAINT moves to the toolkit. Implemented
+  # per family (OpenboxFrame / AquaFrame); themed subclasses override only
+  # #deco_colors.
+  def decoration_spec(_win, _active) ; raise NotImplementedError ; end
+
+  # frame_local translates a surface rect [x, y, w, h] into the frame's own
+  # coordinate space (origin at the frame's top-left = win.x, frame_top),
+  # the space the WindowDecoration widget paints in.
+  def frame_local(win, rect)
+    [rect[0] - win.x, rect[1] - win.frame_top, rect[2], rect[3]]
+  end
 end
 
 # OpenboxFrame — the existing wasmbox look. Geometry inherits Chrome
@@ -113,6 +133,47 @@ class OpenboxFrame < Frame
     ctx.call("moveTo", mx + 3,      my + mh - 4)
     ctx.call("lineTo", mx + mw - 3, my + mh - 4)
     ctx.call("stroke")
+  end
+
+  # The Openbox palette for the current focus state. Themed subclasses
+  # override this (reading their @palette) and inherit #decoration_spec.
+  def deco_colors(active)
+    {
+      title:       active ? Theme::TITLE_ACTIVE : Theme::TITLE_INACTIVE,
+      title_ink:   Theme::TITLE_TEXT,
+      close_face:  Theme::CLOSE_BG,
+      close_glyph: Theme::CLOSE_GLYPH,
+      min_glyph:   active ? Theme::CLOSE_GLYPH : Theme::BORDER_INACTIVE,
+      border:      active ? Theme::BORDER_ACTIVE : Theme::BORDER_INACTIVE,
+      grip:        Theme::RESIZE_GRIP,
+    }
+  end
+
+  # Openbox spec: left-aligned title, two right-clustered box buttons
+  # (minimize "_" + close "×"), no maximize, a plain 1-px border + grip.
+  def decoration_spec(win, active)
+    c = deco_colors(active)
+    spec = {
+      "title"        => win.title,
+      "title_ink"    => c[:title_ink],
+      "title_color"  => c[:title],
+      "titlebar"     => frame_local(win, titlebar_rect(win)),
+      "title_center" => false,
+      "grip_color"   => c[:grip],
+      "buttons"      => [
+        { "rect" => frame_local(win, close_rect(win)),    "shape" => "rect",
+          "face" => c[:close_face], "glyph" => "close",    "glyph_ink" => c[:close_glyph] },
+        { "rect" => frame_local(win, minimize_rect(win)), "shape" => "rect",
+          "face" => c[:close_face], "glyph" => "minimize", "glyph_ink" => c[:min_glyph] },
+      ],
+    }
+    unless win.shaded?
+      spec["border"]       = frame_local(win, frame_rect(win))
+      spec["border_color"] = c[:border]
+      spec["grip"]         = frame_local(win, resize_rect(win))
+      spec["show_grip"]    = true
+    end
+    spec
   end
 
   def paint_frame(ctx, win, active, host)
@@ -242,6 +303,58 @@ class AquaFrame < Frame
     ctx.call("arc", cx, cy, BTN_R - 0.5, 0, 6.283185307179586)
     ctx.call("stroke")
   end
+
+  # Inactive traffic-lights grey out (matches #draw_traffic_light). Kept as
+  # a constant pair so both the canvas + widget paths agree.
+  TL_DIM_FILL = "#C7C7CC"
+  TL_DIM_OUT  = "#B0B0B5"
+
+  # The Aqua palette for the current focus state. Traffic-light colours are
+  # a canonical macOS affordance (red/yellow/green), NOT a theme variable —
+  # they live in #decoration_spec, not here. Themed subclasses override
+  # this (reading their @palette) and inherit #decoration_spec.
+  def deco_colors(active)
+    {
+      title:        active ? TITLE_ACTIVE : TITLE_INACTIVE,
+      title_border: TITLE_BORDER,
+      title_ink:    active ? TITLE_TEXT_ON : TITLE_TEXT_OFF,
+      border:       active ? BORDER_ACTIVE : BORDER_INACTIVE,
+      grip:         RESIZE_GRIP,
+      shadow:       SHADOW,
+    }
+  end
+
+  # Aqua spec: centred title, a bottom hairline, three left-clustered
+  # traffic-light circles (close/minimize/maximize), a border + faux drop
+  # shadow + grip. The traffic-lights grey out when inactive.
+  def decoration_spec(win, active)
+    c = deco_colors(active)
+    cf = active ? CLOSE_RED  : TL_DIM_FILL ; co = active ? CLOSE_RED_OUT  : TL_DIM_OUT
+    mf = active ? MIN_YELLOW : TL_DIM_FILL ; mo = active ? MIN_YELLOW_OUT : TL_DIM_OUT
+    xf = active ? MAX_GREEN  : TL_DIM_FILL ; xo = active ? MAX_GREEN_OUT  : TL_DIM_OUT
+    spec = {
+      "title"        => win.title,
+      "title_ink"    => c[:title_ink],
+      "title_color"  => c[:title],
+      "titlebar"     => frame_local(win, titlebar_rect(win)),
+      "title_center" => true,
+      "hairline"     => c[:title_border],
+      "grip_color"   => c[:grip],
+      "buttons"      => [
+        { "rect" => frame_local(win, close_rect(win)),    "shape" => "circle", "face" => cf, "outline" => co },
+        { "rect" => frame_local(win, minimize_rect(win)), "shape" => "circle", "face" => mf, "outline" => mo },
+        { "rect" => frame_local(win, maximize_rect(win)), "shape" => "circle", "face" => xf, "outline" => xo },
+      ],
+    }
+    unless win.shaded?
+      spec["border"]       = frame_local(win, frame_rect(win))
+      spec["border_color"] = c[:border]
+      spec["shadow"]       = c[:shadow]
+      spec["grip"]         = frame_local(win, resize_rect(win))
+      spec["show_grip"]    = true
+    end
+    spec
+  end
 end
 
 # ThemedOpenboxFrame — same geometry as OpenboxFrame but reads its
@@ -263,6 +376,21 @@ end
 class ThemedOpenboxFrame < OpenboxFrame
   def initialize(palette = {})
     @palette = palette || {}
+  end
+
+  # Same layout as OpenboxFrame (inherits #decoration_spec) but the colours
+  # come from @palette, mirroring #paint / #paint_frame's fallbacks.
+  def deco_colors(active)
+    p = @palette
+    {
+      title:       active ? (p[:title_active] || Theme::TITLE_ACTIVE) : (p[:title_inactive] || Theme::TITLE_INACTIVE),
+      title_ink:   p[:title_text] || Theme::TITLE_TEXT,
+      close_face:  p[:close_bg] || Theme::CLOSE_BG,
+      close_glyph: p[:close_glyph] || Theme::CLOSE_GLYPH,
+      min_glyph:   active ? (p[:close_glyph] || Theme::CLOSE_GLYPH) : (p[:border_inactive] || Theme::BORDER_INACTIVE),
+      border:      active ? (p[:border_active] || Theme::BORDER_ACTIVE) : (p[:border_inactive] || Theme::BORDER_INACTIVE),
+      grip:        p[:resize_grip] || Theme::RESIZE_GRIP,
+    }
   end
 
   def paint(ctx, win, active, host)
@@ -330,6 +458,21 @@ end
 class ThemedAquaFrame < AquaFrame
   def initialize(palette = {})
     @palette = palette || {}
+  end
+
+  # Same layout as AquaFrame (inherits #decoration_spec, so the traffic-
+  # lights stay canonical red/yellow/green) but the titlebar / border /
+  # grip / shadow colours come from @palette, mirroring #paint's fallbacks.
+  def deco_colors(active)
+    p = @palette
+    {
+      title:        active ? (p[:title_active] || TITLE_ACTIVE) : (p[:title_inactive] || TITLE_INACTIVE),
+      title_border: p[:title_border] || TITLE_BORDER,
+      title_ink:    active ? (p[:title_text_on] || TITLE_TEXT_ON) : (p[:title_text_off] || TITLE_TEXT_OFF),
+      border:       active ? (p[:border_active] || BORDER_ACTIVE) : (p[:border_inactive] || BORDER_INACTIVE),
+      grip:         p[:resize_grip] || RESIZE_GRIP,
+      shadow:       p[:shadow] || SHADOW,
+    }
   end
 
   def paint(ctx, win, active, host)
