@@ -4,9 +4,18 @@
 //
 // Headless Playwright probe for the WhiteSur/Safari browser client
 // (clients/browser). Boots the compositor, spawns a Browser window, raises it,
-// verifies the Favourites start page (accent tile icons), clicks a tile to
-// navigate to a placeholder site page (content turns white), and saves a
-// screenshot to /tmp/browser-whitesur.png.
+// verifies the Favourites start page (accent tile icons), asserts the anti-
+// aliased/shaped OpenType text signature (toolkit.UseOpenTypeText, v0.77.0;
+// enabled in scene.New), clicks a tile to navigate to a placeholder site page
+// (content turns white), and saves a screenshot to /tmp/browser-whitesur.png.
+//
+// AA assertion: the built-in 5x7 bitmap font paints only fully-lit ink or
+// untouched ground, so a bitmap render yields ~0 neutral mid-grey pixels. The AA
+// face scan-converts glyph outlines to partial-coverage masks, so its edges blend
+// the neutral ink (#242424 / #363636) toward the neutral WhiteSur grounds into
+// hundreds of neutral greys (R==G==B, strictly between). We count those inside
+// the located content box — their presence in the hundreds is proof AA text
+// actually painted.
 
 import { createServer } from "node:http";
 import { readFile, writeFile } from "node:fs/promises";
@@ -66,6 +75,23 @@ const findContent = (png, c) => {
   return maxX < 0 ? null : { x: minX, y: minY, w: maxX - minX + 1, h: maxY - minY + 1 };
 };
 
+// aaSignature counts, inside box b, the neutral partial-coverage greys
+// (R==G==B, strictly between glyph ink and ground) that ONLY an anti-aliased
+// face produces. Colored chrome (the #0860F2 accent) is non-neutral, so it is
+// excluded — the count is text AA only.
+const aaSignature = (png, b) => {
+  const { width, height, data } = png;
+  const x0 = Math.max(0, b.x), x1 = Math.min(width, b.x + b.w);
+  const y0 = Math.max(0, b.y), y1 = Math.min(height, b.y + b.h);
+  let aaGrey = 0;
+  for (let y = y0; y < y1; y++) for (let x = x0; x < x1; x++) {
+    const o = (y * width + x) * 4;
+    const r = data[o], g = data[o + 1], bl = data[o + 2];
+    if (r === g && g === bl && r > 40 && r < 243) aaGrey++;
+  }
+  return aaGrey;
+};
+
 const { server, base } = await startServer();
 const browser = await chromium.launch({ headless: true });
 const out = {};
@@ -91,6 +117,8 @@ try {
   png = PNG.sync.read(await page.screenshot({ type: "png" }));
   out.accentStart = countColor(png, ACCENT); // tile icon squares on the start page
   out.whiteStart = countColor(png, WHITE);
+  // AA-text signature over the located content box (heading + tile labels).
+  out.aaGrey = c ? aaSignature(png, c) : 0;
 
   // Click favourite tile 0 (grid left 40, first row 56px below content origin,
   // tile 150x98 -> centre ~ content.x+115, content.y+105).
@@ -106,7 +134,8 @@ try {
 }
 
 console.log(JSON.stringify(out, null, 2));
-const pass = out.content && out.accentStart > 200 &&
+const pass = out.content && out.accentStart > 200 && out.aaGrey > 300 &&
   out.whiteAfterNav > out.whiteStart + 20000 && (out.pageerrors || []).length === 0;
-console.log(pass ? "\nPASS ✅ Browser start page + navigate-to-site works" : "\nFAIL ❌");
+console.log(out.aaGrey > 300 ? "ok  AA/shaped text painted (neutral greys)" : "FAIL ❌ no AA text signature");
+console.log(pass ? "\nPASS ✅ Browser start page + navigate-to-site + AA text works" : "\nFAIL ❌");
 process.exit(pass ? 0 : 1);

@@ -7,7 +7,7 @@
 // compose into a real preferences surface driven by (sidebar select -> page
 // switch) and (row control -> model update).
 //
-// The panel is built from the toolkit's Sencha container/layout model rather
+// The panel is built from the toolkit's box-layout container model rather
 // than hand-computed toolkit.Rect placement:
 //
 //	root  Container(BorderLayout)                — the app shell
@@ -25,9 +25,27 @@
 package scene
 
 import (
+	"sync"
+
 	"github.com/go-widgets/painter"
 	"github.com/go-widgets/toolkit"
 )
+
+// aaOnce flips the toolkit's active font to anti-aliased, shaped OpenType text
+// exactly once for this client process. It is package-scoped because SetFont is
+// a process-global; a single opt-in matches the toolkit's "flip it once at
+// start-up" contract.
+var aaOnce sync.Once
+
+// enableAAText installs the toolkit's bundled AA/shaped OpenType face (Atkinson
+// Hyperlegible @16px, toolkit v0.77.0), so the "Settings" title, sidebar
+// categories and row titles render as the shaped vector face. The bundled face
+// never fails to parse (the error is documented as never-returned); on the
+// impossible error path the toolkit leaves the still-working bitmap default
+// active, so a swallowed error degrades to legible bitmap text, never to none.
+// Every label is placed with toolkit.GlyphHeight-centred DrawText, so the taller
+// face re-centres itself in its band and no widget rect moves.
+func enableAAText() { aaOnce.Do(func() { _ = toolkit.UseOpenTypeText() }) }
 
 // rowKind selects which control a settings row carries.
 type rowKind int
@@ -94,6 +112,7 @@ const (
 
 // New builds the Settings panel sized W×H.
 func New(w, h int) *State {
+	enableAAText() // sidebar + card text render with the AA/shaped OpenType face.
 	s := &State{W: w, H: h, theme: toolkit.WhiteSurLight()}
 	s.cats = []category{
 		{name: "Appearance", rows: []settingRow{
@@ -138,7 +157,7 @@ func New(w, h int) *State {
 	return s
 }
 
-// buildTree assembles the Sencha container tree over the category model and lays
+// buildTree assembles the box-layout container tree over the category model and lays
 // it out once with a single root.SetBounds.
 func (s *State) buildTree() {
 	// Sidebar: a fixed top spacer under the "Settings" title, then one catRow

@@ -173,8 +173,8 @@ func TestHandleKeyArrows(t *testing.T) {
 	}
 }
 
-// TestGoldenLayoutRects is the behaviour-preserving proof: the Sencha container
-// tree lays every widget out to the EXACT same toolkit.Rect the old hand-placed
+// TestGoldenLayoutRects is the behaviour-preserving proof: the box-layout
+// container tree lays every widget out to the EXACT same toolkit.Rect the old hand-placed
 // code produced. Sidebar catRows land at catTop+i*catRowH (full sidebar width);
 // each page's card matches the old cardRect; and each row's control is right-
 // aligned (rowPadX inset) and vertically centred inside its rowH band.
@@ -257,5 +257,79 @@ func TestHandleMouseOffCanvas(t *testing.T) {
 	s := newState()
 	if s.HandleMouse(-10, -10) {
 		t.Fatal("off-canvas click must return false")
+	}
+}
+
+// --- anti-aliased text proof ----------------------------------------------
+
+// distinctLuma counts how many distinct R+G+B sums appear inside region r of an
+// RGBA buffer. The 5x7 bitmap font paints each text pixel either full ink or
+// untouched ground, so a bitmap render holds only the ground's handful of levels
+// plus one ink level; the AA/shaped face scan-converts glyph outlines to
+// partial-coverage masks, adding a whole ramp of intermediate levels. A strictly
+// higher distinct-luma count over the SAME region is a ground-independent proof
+// the AA face is active.
+func distinctLuma(buf []byte, W int, r toolkit.Rect) int {
+	seen := map[int]struct{}{}
+	for y := r.Y; y < r.Y+r.H; y++ {
+		for x := r.X; x < r.X+r.W; x++ {
+			o := (y*W + x) * 4
+			seen[int(buf[o])+int(buf[o+1])+int(buf[o+2])] = struct{}{}
+		}
+	}
+	return len(seen)
+}
+
+// TestAATextIsAntiAliased proves the Settings panel renders its labels with the
+// toolkit's AA/shaped OpenType face rather than the 5x7 bitmap. It scans the
+// "Settings" title band, rendering it once with the AA face (New enabled it) and
+// once with the bitmap default, and asserts the AA render carries strictly more
+// distinct luma levels — the partial-coverage ramp only anti-aliasing produces.
+func TestAATextIsAntiAliased(t *testing.T) {
+	s := newState()
+	region := toolkit.Rect{X: sidePad, Y: titleTop - 4, W: 130, H: toolkit.GlyphHeight() + 8}
+
+	aa := make([]byte, 4*s.W*s.H)
+	Render(s, aa) // AA face (enableAAText ran in New)
+
+	toolkit.SetFont(nil) // bitmap default
+	defer func() { _ = toolkit.UseOpenTypeText() }()
+	bm := make([]byte, 4*s.W*s.H)
+	Render(newState(), bm)
+
+	aaN := distinctLuma(aa, s.W, region)
+	bmN := distinctLuma(bm, s.W, region)
+	if aaN <= bmN {
+		t.Fatalf("Settings title: distinct luma aa=%d not > bitmap=%d — AA face not active", aaN, bmN)
+	}
+	t.Logf("title distinct luma: aa=%d bm=%d", aaN, bmN)
+}
+
+// TestAAFaceFits asserts the taller AA line box + shaped label widths fit the
+// Settings bands: the 20px face sits inside the sidebar pill and the row band,
+// and every category name fits the sidebar text column.
+func TestAAFaceFits(t *testing.T) {
+	s := newState() // switches the global font to the AA face
+	f, err := toolkit.DefaultOpenTypeFont(toolkit.DefaultOpenTypeSizePx)
+	if err != nil {
+		t.Fatalf("DefaultOpenTypeFont: %v", err)
+	}
+	h := f.Height()
+	if h != 20 {
+		t.Fatalf("AA face height = %d, want 20 (retune bands if this changes)", h)
+	}
+	if h > catRowH-4 {
+		t.Fatalf("AA height %d overflows sidebar pill height %d", h, catRowH-4)
+	}
+	if h > rowH {
+		t.Fatalf("AA height %d overflows row height %d", h, rowH)
+	}
+	// Category names fit the sidebar text column (inset by sidePad+5 on the left,
+	// catMargin on the right).
+	maxW := sidebarW - (sidePad + 5) - catMargin
+	for _, c := range s.cats {
+		if w := toolkit.TextWidth(c.name); w > maxW {
+			t.Fatalf("category %q width %d overflows sidebar column %d", c.name, w, maxW)
+		}
 	}
 }

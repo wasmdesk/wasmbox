@@ -15,7 +15,7 @@
 //   | 3 docs   ln 5, col 12   utf-8         Notepad     | ← South statusbar
 //   +--------------------------------------------------+
 //
-// The chrome is arranged with the toolkit's Sencha container model — a
+// The chrome is arranged with the toolkit's box-layout container model — a
 // Container driven by a BorderLayout — rather than hand-computed
 // toolkit.Rect placement: the toolbar docks North (fixed height), the
 // statusbar docks South (fixed height), the documents list docks West
@@ -35,10 +35,27 @@ package scene
 
 import (
 	"strconv"
+	"sync"
 
 	"github.com/go-widgets/painter"
 	"github.com/go-widgets/toolkit"
 )
+
+// aaOnce flips the toolkit's active font to anti-aliased, shaped OpenType text
+// exactly once for this client process. It is package-scoped because SetFont is
+// a process-global; a single opt-in matches the toolkit's "flip it once at
+// start-up" contract.
+var aaOnce sync.Once
+
+// enableAAText installs the toolkit's bundled AA/shaped OpenType face (Atkinson
+// Hyperlegible @16px, toolkit v0.77.0), so the toolbar, docs list, editor
+// TextView and status bar render as the shaped vector face. The bundled face
+// never fails to parse (the error is documented as never-returned); on the
+// impossible error path the toolkit leaves the still-working bitmap default
+// active, so a swallowed error degrades to legible bitmap text, never to none.
+// Every widget centres its 20px line box within its band, so the taller face
+// re-centres itself and no widget rect moves.
+func enableAAText() { aaOnce.Do(func() { _ = toolkit.UseOpenTypeText() }) }
 
 // Doc is one open document. Content persists via TextView.Text() when
 // the user switches docs; Notepad restores it on switch-back.
@@ -86,6 +103,7 @@ const (
 // notification toast is deliberately NOT a border region — it is a floating
 // overlay drawn on top of the tree.
 func New(w, h int) *State {
+	enableAAText() // toolbar/list/editor/status render with the AA/shaped face.
 	s := &State{W: w, H: h, theme: toolkit.DefaultLight()}
 	s.docSet = []Doc{
 		{Title: "Untitled", Content: "# Notepad\n\nA toolkit-consumer sample app.\n\n- Click a doc on the left to switch.\n- Type here to edit; content persists across switches.\n"},

@@ -9,7 +9,7 @@
 // toolbar + address-bar + tile-grid composition and a back/forward history
 // model.
 //
-// Layout is built from the toolkit's Sencha container model (Dock + Box +
+// Layout is built from the toolkit's box-layout container model (Dock + Box +
 // Card containers) rather than hand-computed toolkit.Rect placement. The whole
 // chrome is one tree:
 //
@@ -32,9 +32,27 @@
 package scene
 
 import (
+	"sync"
+
 	"github.com/go-widgets/painter"
 	"github.com/go-widgets/toolkit"
 )
+
+// aaOnce flips the toolkit's active font to anti-aliased, shaped OpenType text
+// exactly once for this client process. It is package-scoped because SetFont is
+// a process-global; a single opt-in matches the toolkit's "flip it once at
+// start-up" contract.
+var aaOnce sync.Once
+
+// enableAAText installs the toolkit's bundled AA/shaped OpenType face (Atkinson
+// Hyperlegible @16px, toolkit v0.77.0), so the toolbar controls, address bar,
+// favourites heading, tile labels and placeholder page render as the shaped
+// vector face. The bundled face never fails to parse (the error is documented as
+// never-returned); on the impossible error path the toolkit leaves the still-
+// working bitmap default active, so a swallowed error degrades to legible bitmap
+// text, never to none. All chrome text is placed with toolkit.TextWidth /
+// toolkit.GlyphHeight, so the taller face re-centres itself and no rect moves.
+func enableAAText() { aaOnce.Do(func() { _ = toolkit.UseOpenTypeText() }) }
 
 // link is one favourite: a display name + the URL shown in the address bar.
 type link struct {
@@ -110,6 +128,7 @@ const (
 
 // New builds the browser sized W×H and lays out its widget tree.
 func New(w, h int) *State {
+	enableAAText() // chrome + page text render with the AA/shaped OpenType face.
 	s := &State{W: w, H: h, theme: toolkit.WhiteSurLight()}
 	s.favs = []link{
 		{"weft", "weft.dev"},

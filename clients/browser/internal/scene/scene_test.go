@@ -22,8 +22,10 @@ func newSurface() []byte { return make([]byte, 4*surfaceW*surfaceH) }
 
 // TestGoldenRects recomputes every chrome + tile rect with the ORIGINAL
 // hand-placement arithmetic and asserts the container tree lays each widget
-// out at exactly the same bounds — proving the Sencha migration is pixel-for-
-// pixel equivalent to the old manual toolkit.Rect placement.
+// out at exactly the same bounds — proving the box-layout migration is pixel-
+// for-pixel equivalent to the old manual toolkit.Rect placement. These rects are
+// font-independent (fixed pixel tracks), so switching to the AA/shaped OpenType
+// face leaves every widget rect byte-identical — only the glyph pixels differ.
 func TestGoldenRects(t *testing.T) {
 	s := newState()
 	w := surfaceW
@@ -211,5 +213,77 @@ func TestHandleKey(t *testing.T) {
 	}
 	if s.HandleKey("KeyA") {
 		t.Error("unhandled key should return false")
+	}
+}
+
+// --- anti-aliased text proof ----------------------------------------------
+
+// distinctLuma counts how many distinct R+G+B sums appear inside region r of an
+// RGBA buffer. The 5x7 bitmap font paints each text pixel either full ink or
+// untouched ground, so a bitmap render holds only the ground's handful of levels
+// plus one ink level; the AA/shaped face scan-converts glyph outlines to
+// partial-coverage masks, adding a whole ramp of intermediate levels. A strictly
+// higher distinct-luma count over the SAME region is a ground-independent proof
+// the AA face is active.
+func distinctLuma(buf []byte, W int, r toolkit.Rect) int {
+	seen := map[int]struct{}{}
+	for y := r.Y; y < r.Y+r.H; y++ {
+		for x := r.X; x < r.X+r.W; x++ {
+			o := (y*W + x) * 4
+			seen[int(buf[o])+int(buf[o+1])+int(buf[o+2])] = struct{}{}
+		}
+	}
+	return len(seen)
+}
+
+// TestAATextIsAntiAliased proves the browser renders its chrome + page text with
+// the toolkit's AA/shaped OpenType face rather than the 5x7 bitmap. It scans the
+// "Favourites" heading band, rendering it once with the AA face (New enabled it)
+// and once with the bitmap default, and asserts the AA render carries strictly
+// more distinct luma levels — the partial-coverage ramp only anti-aliasing
+// produces.
+func TestAATextIsAntiAliased(t *testing.T) {
+	// The Favourites heading is drawn at (gridLeft, toolbarH+headingOffset).
+	region := toolkit.Rect{X: gridLeft, Y: toolbarH + headingOffset - 4, W: 200, H: toolkit.GlyphHeight() + 8}
+
+	aa := newSurface()
+	Render(newState(), aa) // AA face (enableAAText ran in New)
+
+	toolkit.SetFont(nil) // bitmap default
+	defer func() { _ = toolkit.UseOpenTypeText() }()
+	bm := newSurface()
+	Render(newState(), bm)
+
+	aaN := distinctLuma(aa, surfaceW, region)
+	bmN := distinctLuma(bm, surfaceW, region)
+	if aaN <= bmN {
+		t.Fatalf("Favourites heading: distinct luma aa=%d not > bitmap=%d — AA face not active", aaN, bmN)
+	}
+	t.Logf("heading distinct luma: aa=%d bm=%d", aaN, bmN)
+}
+
+// TestAAFaceFits asserts the taller AA line box + shaped label widths fit the
+// browser's fixed bands: the 20px face sits inside the toolbar button / address
+// bar height and every tile label fits its tile width.
+func TestAAFaceFits(t *testing.T) {
+	s := newState() // switches the global font to the AA face
+	f, err := toolkit.DefaultOpenTypeFont(toolkit.DefaultOpenTypeSizePx)
+	if err != nil {
+		t.Fatalf("DefaultOpenTypeFont: %v", err)
+	}
+	h := f.Height()
+	if h != 20 {
+		t.Fatalf("AA face height = %d, want 20 (retune bands if this changes)", h)
+	}
+	if h > btnH {
+		t.Fatalf("AA height %d overflows toolbar button height %d", h, btnH)
+	}
+	if h > addrH {
+		t.Fatalf("AA height %d overflows address bar height %d", h, addrH)
+	}
+	for _, fv := range s.favs {
+		if w := toolkit.TextWidth(fv.name); w > tileW {
+			t.Fatalf("tile label %q width %d overflows tileW %d", fv.name, w, tileW)
+		}
 	}
 }

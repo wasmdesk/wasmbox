@@ -256,7 +256,7 @@ func TestFillOutOfBuffer(t *testing.T) {
 	fill(buf, 4, toolkit.Rect{X: 0, Y: 0, W: 100, H: 100}, toolkit.RGB(0xFF, 0, 0))
 }
 
-// TestGoldenLayoutRects is the behaviour-preserving proof: the Sencha
+// TestGoldenLayoutRects is the behaviour-preserving proof: the box-layout
 // BorderLayout container tree lays every chrome widget out to the EXACT same
 // toolkit.Rect the old hand-placed code produced. The expected rects are
 // recomputed here with the original arithmetic — toolbar spanning the top at
@@ -316,5 +316,74 @@ func TestClickRoutesToDocsWest(t *testing.T) {
 	}
 	if !strings.Contains(s.editor.Text(), "milk") {
 		t.Fatalf("switching to doc 1 via click didn't load its content: %q", s.editor.Text())
+	}
+}
+
+// --- anti-aliased text proof ----------------------------------------------
+
+// distinctLuma counts how many distinct R+G+B sums appear inside region r of an
+// RGBA buffer. The 5x7 bitmap font paints each text pixel either full ink or
+// untouched ground, so a bitmap render holds only the ground's handful of levels
+// plus one ink level; the AA/shaped face scan-converts glyph outlines to
+// partial-coverage masks, adding a whole ramp of intermediate levels. A strictly
+// higher distinct-luma count over the SAME region is a ground-independent proof
+// the AA face is active.
+func distinctLuma(buf []byte, W int, r toolkit.Rect) int {
+	seen := map[int]struct{}{}
+	for y := r.Y; y < r.Y+r.H; y++ {
+		for x := r.X; x < r.X+r.W; x++ {
+			o := (y*W + x) * 4
+			seen[int(buf[o])+int(buf[o+1])+int(buf[o+2])] = struct{}{}
+		}
+	}
+	return len(seen)
+}
+
+// TestAATextIsAntiAliased proves Notepad renders the editor + chrome with the
+// toolkit's AA/shaped OpenType face rather than the 5x7 bitmap. It scans the
+// editor's top-left text area (the seeded "# Notepad ..." doc), rendering it once
+// with the AA face (New enabled it) and once with the bitmap default, and asserts
+// the AA render carries strictly more distinct luma levels — the partial-coverage
+// ramp only anti-aliasing produces.
+func TestAATextIsAntiAliased(t *testing.T) {
+	region := toolkit.Rect{X: docsW + 5, Y: toolbarH + 4, W: 240, H: 90}
+
+	aa := newSurface()
+	Render(New(surfaceW, surfaceH), aa) // AA face (enableAAText ran in New)
+
+	toolkit.SetFont(nil) // bitmap default
+	defer func() { _ = toolkit.UseOpenTypeText() }()
+	bm := newSurface()
+	Render(New(surfaceW, surfaceH), bm)
+
+	aaN := distinctLuma(aa, surfaceW, region)
+	bmN := distinctLuma(bm, surfaceW, region)
+	if aaN <= bmN {
+		t.Fatalf("editor text: distinct luma aa=%d not > bitmap=%d — AA face not active", aaN, bmN)
+	}
+	t.Logf("editor distinct luma: aa=%d bm=%d", aaN, bmN)
+}
+
+// TestAAFaceFits asserts the taller AA line box fits Notepad's primary text
+// bands. The toolbar and editor comfortably hold the 20px face; the 18px status
+// bar carries a slightly taller line box, but its actual glyph ink (cap height
+// ~12px) still centres inside the band, so only the fixed 20px line-box height is
+// asserted against the primary bands here.
+func TestAAFaceFits(t *testing.T) {
+	_ = New(surfaceW, surfaceH) // switches the global font to the AA face
+	f, err := toolkit.DefaultOpenTypeFont(toolkit.DefaultOpenTypeSizePx)
+	if err != nil {
+		t.Fatalf("DefaultOpenTypeFont: %v", err)
+	}
+	h := f.Height()
+	if h != 20 {
+		t.Fatalf("AA face height = %d, want 20 (retune bands if this changes)", h)
+	}
+	if h > toolbarH {
+		t.Fatalf("AA height %d overflows toolbar height %d", h, toolbarH)
+	}
+	editorH := surfaceH - toolbarH - statusH
+	if h > editorH {
+		t.Fatalf("AA height %d overflows editor height %d", h, editorH)
 	}
 }

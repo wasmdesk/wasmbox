@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: BSD-3-Clause
 //
 // Package scene renders the go-widgets/toolkit showcase: one window whose
-// layout is built entirely from the toolkit's Sencha container model rather
+// layout is built entirely from the toolkit's box-layout container model rather
 // than hand-computed toolkit.Rect placement.
 //
 // The app shell is a BorderLayout Container: a North band stacks the MenuBar,
@@ -20,9 +20,27 @@
 package scene
 
 import (
+	"sync"
+
 	"github.com/go-widgets/painter"
 	"github.com/go-widgets/toolkit"
 )
+
+// aaOnce flips the toolkit's active font to anti-aliased, shaped OpenType text
+// exactly once for this client process. It is package-scoped because SetFont is
+// a process-global; a single opt-in matches the toolkit's "flip it once at
+// start-up" contract.
+var aaOnce sync.Once
+
+// enableAAText installs the toolkit's bundled AA/shaped OpenType face (Atkinson
+// Hyperlegible @16px, toolkit v0.77.0), so the menu bar, toolbar, tab strip,
+// gallery widgets and status bar render as the shaped vector face. The bundled
+// face never fails to parse (the error is documented as never-returned); on the
+// impossible error path the toolkit leaves the still-working bitmap default
+// active, so a swallowed error degrades to legible bitmap text, never to none.
+// Every widget centres its 20px line box within its band, so the taller face
+// re-centres itself and no widget rect moves.
+func enableAAText() { aaOnce.Do(func() { _ = toolkit.UseOpenTypeText() }) }
 
 // State is the showcase model. The toolkit composition lives here so
 // the scene_test.go file can poke widgets without going through the
@@ -81,7 +99,7 @@ type State struct {
 }
 
 // tabLabels names each gallery card in strip order — the same families the
-// pre-Sencha Notebook exposed, in the same order (so the card index is a
+// pre-migration Notebook exposed, in the same order (so the card index is a
 // drop-in for the old notebook.Active index, e.g. the Input card is still 2).
 var tabLabels = []string{
 	"Button", "Toggles", "Input", "Tree+List", "Calendar", "Color", "Feedback",
@@ -134,6 +152,7 @@ func rowCenter(width int, w toolkit.Widget) *toolkit.HBox {
 
 // New builds a fully-wired showcase State sized W x H.
 func New(w, h int) *State {
+	enableAAText() // whole gallery renders with the AA/shaped OpenType face.
 	s := &State{W: w, H: h, theme: toolkit.DefaultLight()}
 
 	// MenuBar — the View menu is built from the embedded GTK themes so
@@ -234,7 +253,7 @@ func New(w, h int) *State {
 		"35 widgets", "100% cov", "theme: Default Light", "frame: openbox",
 	})
 
-	// --- Sencha container tree ------------------------------------------
+	// --- box-layout container tree ------------------------------------------
 	//
 	//	root  Container(BorderLayout)                 — the app shell
 	//	├─ North  VBox                                — menu + toolbar + tabs

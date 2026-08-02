@@ -770,3 +770,78 @@ func TestRowIconSelectedVariant(t *testing.T) {
 		t.Error("RowIcon(len) should be (nil,false)")
 	}
 }
+
+// --- anti-aliased text proof ----------------------------------------------
+
+// distinctLuma counts how many distinct R+G+B sums appear inside region r of an
+// RGBA buffer. The 5x7 bitmap font paints each text pixel either full ink or
+// untouched ground, so a bitmap render holds only the ground's handful of levels
+// plus one ink level; the AA/shaped face scan-converts glyph outlines to
+// partial-coverage masks, adding a whole ramp of intermediate levels. A strictly
+// higher distinct-luma count over the SAME region is a ground-independent proof
+// the AA face is active.
+func distinctLuma(buf []byte, w int, r toolkit.Rect) int {
+	seen := map[int]struct{}{}
+	for y := r.Y; y < r.Y+r.H; y++ {
+		for x := r.X; x < r.X+r.W; x++ {
+			o := (y*w + x) * 4
+			seen[int(buf[o])+int(buf[o+1])+int(buf[o+2])] = struct{}{}
+		}
+	}
+	return len(seen)
+}
+
+// TestAATextIsAntiAliased proves Files renders its table + chrome with the
+// toolkit's AA/shaped OpenType face rather than the 5x7 bitmap. It scans the
+// first few file-list rows (entry names on the white pane), rendering them once
+// with the AA face (New enabled it) and once with the bitmap default, and asserts
+// the AA render carries strictly more distinct luma levels — the partial-coverage
+// ramp only anti-aliasing produces.
+func TestAATextIsAntiAliased(t *testing.T) {
+	region := toolkit.Rect{X: SidebarWidth + 24, Y: listTop(), W: 240, H: 3 * toolkit.TableRowHeight}
+
+	aa := newSurface(surfW, surfH)
+	Render(New(surfW, surfH), aa) // AA face (enableAAText ran in New)
+
+	toolkit.SetFont(nil) // bitmap default
+	defer func() { _ = toolkit.UseOpenTypeText() }()
+	bm := newSurface(surfW, surfH)
+	Render(New(surfW, surfH), bm)
+
+	aaN := distinctLuma(aa, surfW, region)
+	bmN := distinctLuma(bm, surfW, region)
+	if aaN <= bmN {
+		t.Fatalf("file list: distinct luma aa=%d not > bitmap=%d — AA face not active", aaN, bmN)
+	}
+	t.Logf("file list distinct luma: aa=%d bm=%d", aaN, bmN)
+}
+
+// TestAAFaceFits asserts the taller AA line box fits Files' fixed bands: the 20px
+// face sits inside the 22px table row and the 28px sidebar row, and every visible
+// entry name fits the Name column budget (surface width minus sidebar + Size
+// column).
+func TestAAFaceFits(t *testing.T) {
+	s := New(surfW, surfH) // switches the global font to the AA face
+	f, err := toolkit.DefaultOpenTypeFont(toolkit.DefaultOpenTypeSizePx)
+	if err != nil {
+		t.Fatalf("DefaultOpenTypeFont: %v", err)
+	}
+	h := f.Height()
+	if h != 20 {
+		t.Fatalf("AA face height = %d, want 20 (retune bands if this changes)", h)
+	}
+	if h > toolkit.TableRowHeight {
+		t.Fatalf("AA height %d overflows table row height %d", h, toolkit.TableRowHeight)
+	}
+	if h > SidebarRowHeight {
+		t.Fatalf("AA height %d overflows sidebar row height %d", h, SidebarRowHeight)
+	}
+	// Name column budget: surface minus the sidebar and the right-aligned Size
+	// column, less the icon gutter + a little cell padding.
+	nameBudget := surfW - SidebarWidth - SizeColWidth - toolkit.TableIconSize - 12
+	for _, e := range s.Browser.Entries {
+		if w := toolkit.TextWidth(e.Name); w > nameBudget {
+			t.Fatalf("entry name %q width %d overflows Name column budget %d", e.Name, w, nameBudget)
+		}
+	}
+}

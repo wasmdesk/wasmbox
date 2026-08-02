@@ -4,8 +4,16 @@
 //
 // Headless Playwright probe for the WhiteSur Settings client
 // (clients/settings). Boots the compositor, spawns a Settings window, raises
-// it, samples the WhiteSur roles, exercises a switch toggle, and saves a
-// screenshot to /tmp/settings-whitesur.png.
+// it, samples the WhiteSur roles, asserts the anti-aliased/shaped OpenType text
+// signature (toolkit.UseOpenTypeText, v0.77.0; enabled in scene.New), exercises
+// a switch toggle, and saves a screenshot to /tmp/settings-whitesur.png.
+//
+// AA assertion: the 5x7 bitmap font paints only fully-lit ink or untouched
+// ground, so a bitmap render yields ~0 neutral mid-grey pixels; the AA face
+// blends the neutral ink (#242424 / #363636) toward the neutral WhiteSur grounds
+// into hundreds of neutral partial-coverage greys (R==G==B, strictly between).
+// We count those inside the located window box — their presence is proof AA text
+// painted. The #0860F2 accent is non-neutral and excluded.
 
 import { createServer } from "node:http";
 import { readFile, writeFile } from "node:fs/promises";
@@ -64,6 +72,23 @@ const findWindow = (png, c) => {
   return maxX < 0 ? null : { x: minX, y: minY, w: maxX - minX + 1, h: maxY - minY + 1 };
 };
 
+// aaSignature counts, inside box b, the neutral partial-coverage greys
+// (R==G==B, strictly between glyph ink and ground) that ONLY an anti-aliased
+// face produces. The accent blue is non-neutral, so it is excluded — the count
+// is text AA only.
+const aaSignature = (png, b) => {
+  const { width, height, data } = png;
+  const x0 = Math.max(0, b.x), x1 = Math.min(width, b.x + b.w);
+  const y0 = Math.max(0, b.y), y1 = Math.min(height, b.y + b.h);
+  let aaGrey = 0;
+  for (let y = y0; y < y1; y++) for (let x = x0; x < x1; x++) {
+    const o = (y * width + x) * 4;
+    const r = data[o], g = data[o + 1], bl = data[o + 2];
+    if (r === g && g === bl && r > 40 && r < 243) aaGrey++;
+  }
+  return aaGrey;
+};
+
 const { server, base } = await startServer();
 const browser = await chromium.launch({ headless: true });
 const out = {};
@@ -110,6 +135,8 @@ try {
   await writeFile(SHOT, PNG.sync.write(png));
   out.pageerrors = errs;
   out.windowGroundPx = countColor(png, WINDOW_BG);
+  // AA-text signature over the located window box (title + categories + rows).
+  out.aaGrey = win ? aaSignature(png, win) : 0;
 } finally {
   await browser.close();
   server.close();
@@ -117,6 +144,7 @@ try {
 
 console.log(JSON.stringify(out, null, 2));
 const pass = out.located && out.windowGroundPx > 2000 && out.accentBefore > 100 &&
-  out.accentAfterToggle > out.accentBefore && (out.pageerrors || []).length === 0;
-console.log(pass ? "\nPASS ✅ Settings renders WhiteSur; switch toggle increased accent" : "\nFAIL ❌");
+  out.aaGrey > 300 && out.accentAfterToggle > out.accentBefore && (out.pageerrors || []).length === 0;
+console.log(out.aaGrey > 300 ? "ok  AA/shaped text painted (neutral greys)" : "FAIL ❌ no AA text signature");
+console.log(pass ? "\nPASS ✅ Settings renders WhiteSur + AA text; switch toggle increased accent" : "\nFAIL ❌");
 process.exit(pass ? 0 : 1);

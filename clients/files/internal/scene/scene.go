@@ -41,9 +41,28 @@
 package scene
 
 import (
+	"sync"
+
 	"github.com/go-widgets/painter"
 	"github.com/go-widgets/toolkit"
 )
+
+// aaOnce flips the toolkit's active font to anti-aliased, shaped OpenType text
+// exactly once for this client process. It is package-scoped because SetFont is
+// a process-global; a single opt-in matches the toolkit's "flip it once at
+// start-up" contract.
+var aaOnce sync.Once
+
+// enableAAText installs the toolkit's bundled AA/shaped OpenType face (Atkinson
+// Hyperlegible @16px, toolkit v0.77.0), so the header breadcrumbs, sidebar
+// labels, the Name/Size table and the text preview render as the shaped vector
+// face. The bundled face never fails to parse (the error is documented as
+// never-returned); on the impossible error path the toolkit leaves the still-
+// working bitmap default active, so a swallowed error degrades to legible bitmap
+// text, never to none. The Table auto-centres its 20px line box in the fixed
+// 22px rows (TableRowHeight) and the sidebar labels are GlyphHeight-centred, so
+// the taller face re-centres itself and no widget rect moves.
+func enableAAText() { aaOnce.Do(func() { _ = toolkit.UseOpenTypeText() }) }
 
 // Visual constants -- exported so tests + the Playwright probes can pin layout
 // invariants. The defaults reproduce GTK4 / libadwaita proportions on a
@@ -169,6 +188,7 @@ func New(width, height int) *State {
 // State around the caller-supplied VFS so the browser-side code can hand in an
 // IndexedDB-backed instance for persistence.
 func NewWithVFS(width, height int, vfs VFS) *State {
+	enableAAText() // chrome + table + sidebar render with the AA/shaped face.
 	bs := &BrowserState{CurrentPath: "/"}
 	bs.Refresh(vfs)
 	s := &State{
