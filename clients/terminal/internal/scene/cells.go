@@ -2,81 +2,131 @@
 // Use of this source code is governed by a BSD-3-Clause license that can be
 // found in the LICENSE file at the root of this repository.
 
-// Package scene's cells.go owns the terminal's character grid: a fixed
-// Cols x Rows array of TerminalCell, plus the bookkeeping a real shell needs
-// (cursor, line wrap, CR/LF, backspace, scroll, clear). The grid is the only
-// piece of mutable terminal state -- the renderer reads it without taking a
-// lock; only one goroutine (the main wasm goroutine) mutates it.
+// Package scene's cells.go adapts the go-widgets/toolkit TerminalView (a
+// Cols×Rows grid of coloured character cells with its own block cursor and
+// scroll bookkeeping) to the byte/palette-index editing API the terminal
+// scene drives: Print / PrintString / Backspace / CRLF / Clear plus a current
+// pen (FG / BG palette index). The TerminalView owns the cell buffer and the
+// pixel rasterisation (its Draw blits every cell + the block cursor), so the
+// old hand-rolled 8×8 upscaler is gone -- only this thin translation layer
+// and the shell logic remain client-side.
 //
-// Why a struct-of-arrays-of-structs (not a flat byte buffer): per-cell ink
-// colour overrides are useful for prompts (cyan), errors (red), and the
-// builtin help text (white). Keeping FG/BG per cell costs three bytes per
-// cell -- 80 x 25 = 2 KiB total -- which is negligible for our use case.
+// Colour model: the scene talks in palette indices (0 = green ink, 1 = cyan
+// prompt, 2 = red error, 3 = white help), which map here to explicit RGBA pen
+// colours the TerminalView stamps into each written cell. Keeping the index
+// vocabulary means scene.go / shell.go did not have to change when the
+// rasteriser moved into the toolkit.
 
 package scene
 
-// TerminalCell is the per-cell payload: a glyph byte (ASCII 0x20..0x7F)
-// plus a foreground/background palette index. A glyph of 0 is rendered as
-// the empty space.
-type TerminalCell struct {
-	Glyph byte
-	FG    uint8 // palette index into PaletteFG (0 = default ink)
-	BG    uint8 // palette index into PaletteBG (0 = default background)
+import (
+	"github.com/go-widgets/painter"
+	"github.com/go-widgets/toolkit"
+)
+
+// terminalScale upscales the toolkit's built-in 5×7 bitmap font so the glyphs
+// read well at modern DPIs -- the same intent the previous 8×8-upscaled-by-2
+// rasteriser had. Scale 2 yields 12×14 pixel glyphs.
+const terminalScale = 2
+
+// cellW / cellH are the fixed terminal cell size in pixels. They match the
+// previous renderer's 16×16 cells exactly so the grid keeps the SAME on-screen
+// geometry (columns, rows, line pitch) the client always had -- the scaled
+// glyph (12×14) is drawn top-left within the cell, leaving the historical
+// inter-cell gap. Holding the geometry constant across the rasteriser swap
+// keeps the pixel-calibrated e2e probes valid unchanged.
+const (
+	cellW = 16
+	cellH = 16
+)
+
+// cellFont adapts the toolkit's scaled bitmap font to a fixed cellW×cellH cell:
+// it reports the padded cell metrics (so TerminalView lays out a 16×16 grid)
+// while delegating glyph drawing to the inner toolkit font. It is a metrics
+// shim, NOT a rasteriser -- every pixel is still drawn by the toolkit font.
+type cellFont struct{ inner toolkit.Font }
+
+// newCellFont wraps the ×terminalScale bitmap font in the fixed-cell metrics.
+func newCellFont() *cellFont { return &cellFont{inner: toolkit.NewBitmapFont(terminalScale)} }
+
+// Advance / Height report the fixed cell size, pinning the grid geometry.
+func (f *cellFont) Advance() int { return cellW }
+func (f *cellFont) Height() int  { return cellH }
+
+// Measure is the monospace width: one cell per rune. The terminal is ASCII, so
+// byte length equals rune count; this keeps any toolkit layout that consults
+// Measure aligned with the fixed grid.
+func (f *cellFont) Measure(text string) int { return len([]rune(text)) * cellW }
+
+// Draw paints the glyphs through the inner toolkit font at the cell origin.
+func (f *cellFont) Draw(p painter.Painter, x, y int, text string, ink toolkit.RGBA) {
+	f.inner.Draw(p, x, y, text, ink)
 }
 
-// Grid is the terminal screen buffer + cursor. Cells is row-major; the cell
-// at (col, row) lives at index row*Cols + col. The cursor is the next write
-// position -- Print(b) writes to Cells[cursor], then advances.
+// Palette colours. The values match the previous PaletteFG / PaletteBG tables
+// byte-for-byte so the terminal keeps its exact look (soft-green ink, cyan
+// prompt, red errors, bright-white help on a near-black panel).
+var (
+	inkGreen = toolkit.RGBA{R: 0xa0, G: 0xe0, B: 0xa0, A: 0xff} // 0: default ink
+	inkCyan  = toolkit.RGBA{R: 0x8a, G: 0xe1, B: 0xff, A: 0xff} // 1: prompt
+	inkRed   = toolkit.RGBA{R: 0xff, G: 0x9b, B: 0x9b, A: 0xff} // 2: errors
+	inkWhite = toolkit.RGBA{R: 0xff, G: 0xff, B: 0xff, A: 0xff} // 3: help
+	panelBG  = toolkit.RGBA{R: 0x10, G: 0x10, B: 0x10, A: 0xff} // terminal panel
+)
+
+// paletteFG maps a pen index to its ink colour. Out-of-range indices fall back
+// to entry 0 (the default ink), mirroring the old fgOf helper so a stray index
+// can never crash a write.
+var paletteFG = []toolkit.RGBA{inkGreen, inkCyan, inkRed, inkWhite}
+
+// penColor returns the ink for pen index i, clamping to the default ink on an
+// out-of-range value.
+func penColor(i uint8) toolkit.RGBA {
+	if int(i) >= len(paletteFG) {
+		return paletteFG[0]
+	}
+	return paletteFG[i]
+}
+
+// Grid is the terminal screen buffer + cursor. It embeds a toolkit.TerminalView
+// (which supplies Cols / Rows / Cells / CursorCol / CursorRow / ScrollUp /
+// Resize / SetCell / Draw and the block cursor) and adds the byte-oriented pen
+// the scene edits through. FG / BG are palette indices the next Print stamps.
 type Grid struct {
-	Cols, Rows int
-	Cells      []TerminalCell
-	CursorCol  int
-	CursorRow  int
-	// FG / BG are the colours the next Print writes into TerminalCell.FG/BG.
-	// PrintString uses them as-is; callers wanting coloured output set them,
-	// print, then restore.
+	*toolkit.TerminalView
+	// FG / BG are the palette indices the next Print writes. PrintString /
+	// writePrompt set them, print, then restore -- exactly as the previous
+	// Grid did.
 	FG, BG uint8
 }
 
-// NewGrid allocates a fresh Cols x Rows grid with cursor at (0, 0) and the
-// default palette. A non-positive dimension panics -- the terminal cannot
-// usefully render a zero-sized buffer and a silent fallback would hide bugs.
+// NewGrid allocates a fresh Cols×Rows terminal grid with the cursor homed at
+// (0, 0), the default green pen, and the block cursor visible. A non-positive
+// dimension panics (via the toolkit) -- a zero-sized buffer is an upstream bug,
+// not a recoverable state.
 func NewGrid(cols, rows int) *Grid {
-	if cols <= 0 || rows <= 0 {
-		panic("scene: NewGrid requires positive cols + rows")
-	}
-	return &Grid{
-		Cols:  cols,
-		Rows:  rows,
-		Cells: make([]TerminalCell, cols*rows),
-	}
+	tv := toolkit.NewTerminalView(cols, rows)
+	tv.SetFont(newCellFont())
+	tv.DefaultFG = inkGreen
+	tv.DefaultBG = panelBG
+	tv.CursorVisible = true
+	return &Grid{TerminalView: tv}
 }
 
-// Print writes one printable byte at the cursor, advancing it; wraps to the
-// next row at end-of-line; scrolls one row when it would overflow the bottom.
-// Non-printable bytes that have semantic meaning are handled by the caller
-// (CRLF for '\n', Backspace for 0x08). An unknown byte renders as the font's
-// fallback glyph -- caller-driven control is simpler than a per-byte switch.
+// Print writes one printable byte at the cursor using the current pen, then
+// advances the cursor -- wrapping to the next row at end-of-line and scrolling
+// one row when it would overflow the bottom. It delegates the cursor/wrap/
+// scroll bookkeeping to the TerminalView by pointing its pen at the current
+// palette colour and issuing a single-rune Write.
 func (g *Grid) Print(b byte) {
-	g.Cells[g.CursorRow*g.Cols+g.CursorCol] = TerminalCell{
-		Glyph: b,
-		FG:    g.FG,
-		BG:    g.BG,
-	}
-	g.CursorCol++
-	if g.CursorCol >= g.Cols {
-		g.CursorCol = 0
-		g.CursorRow++
-		if g.CursorRow >= g.Rows {
-			g.Scroll()
-			g.CursorRow = g.Rows - 1
-		}
-	}
+	g.TerminalView.DefaultFG = penColor(g.FG)
+	g.TerminalView.Write(string(rune(b)))
+	g.TerminalView.DefaultFG = inkGreen
 }
 
-// PrintString writes a Go string byte-by-byte. CR and LF are routed through
-// CRLF; backspace through Backspace; everything else through Print. This
-// keeps the shell layer free of low-level cursor mechanics.
+// PrintString writes a Go string byte-by-byte. CR homes the column, LF routes
+// through CRLF, backspace through Backspace, and everything else through Print.
+// This keeps the shell layer free of low-level cursor mechanics.
 func (g *Grid) PrintString(s string) {
 	for i := 0; i < len(s); i++ {
 		switch s[i] {
@@ -92,78 +142,34 @@ func (g *Grid) PrintString(s string) {
 	}
 }
 
-// Backspace moves the cursor one column left and clears that cell. At the
-// start of a row it is a no-op (real terminals likewise do not wrap a BS
-// across a line boundary by default).
+// Backspace moves the cursor one column left and clears that cell. At the start
+// of a row it is a no-op (real terminals likewise do not wrap a BS across a
+// line boundary by default).
 func (g *Grid) Backspace() {
 	if g.CursorCol == 0 {
 		return
 	}
 	g.CursorCol--
-	g.Cells[g.CursorRow*g.Cols+g.CursorCol] = TerminalCell{}
+	g.SetCell(g.CursorCol, g.CursorRow, 0, toolkit.RGBA{}, toolkit.RGBA{})
 }
 
-// CRLF moves the cursor to the next row, column 0; scrolls if necessary.
-// Named CRLF rather than NewLine because it does both carriage return and
-// line feed in one step -- TTY-style.
+// CRLF moves the cursor to column 0 of the next row, scrolling one row when it
+// would leave the bottom. Named CRLF (not NewLine) because it does both the
+// carriage return and the line feed in one step -- TTY-style.
 func (g *Grid) CRLF() {
 	g.CursorCol = 0
 	g.CursorRow++
 	if g.CursorRow >= g.Rows {
-		g.Scroll()
+		g.ScrollUp(1)
 		g.CursorRow = g.Rows - 1
-	}
-}
-
-// Scroll consumes the top row: rows 1..Rows-1 shift up by one, the last row
-// is blanked. The cursor row is NOT updated -- callers that scroll because
-// of an overflow have already decided where the cursor should land.
-func (g *Grid) Scroll() {
-	copy(g.Cells, g.Cells[g.Cols:])
-	tail := g.Cells[(g.Rows-1)*g.Cols:]
-	for i := range tail {
-		tail[i] = TerminalCell{}
 	}
 }
 
 // Clear zeroes every cell and homes the cursor. Used by the `clear` builtin.
 func (g *Grid) Clear() {
 	for i := range g.Cells {
-		g.Cells[i] = TerminalCell{}
+		g.Cells[i] = toolkit.TermCell{}
 	}
 	g.CursorCol = 0
 	g.CursorRow = 0
-}
-
-// Resize reshapes the grid to newCols x newRows, preserving the top-left
-// rectangle of content that still fits. Content outside the new bounds is
-// dropped; the cursor is clamped into the new grid. Used when the compositor
-// grants a different surface than requested.
-func (g *Grid) Resize(newCols, newRows int) {
-	if newCols <= 0 || newRows <= 0 {
-		panic("scene: Resize requires positive cols + rows")
-	}
-	out := make([]TerminalCell, newCols*newRows)
-	copyCols := newCols
-	if g.Cols < copyCols {
-		copyCols = g.Cols
-	}
-	copyRows := newRows
-	if g.Rows < copyRows {
-		copyRows = g.Rows
-	}
-	for r := 0; r < copyRows; r++ {
-		for c := 0; c < copyCols; c++ {
-			out[r*newCols+c] = g.Cells[r*g.Cols+c]
-		}
-	}
-	g.Cells = out
-	g.Cols = newCols
-	g.Rows = newRows
-	if g.CursorCol >= g.Cols {
-		g.CursorCol = g.Cols - 1
-	}
-	if g.CursorRow >= g.Rows {
-		g.CursorRow = g.Rows - 1
-	}
 }

@@ -8,17 +8,22 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/go-widgets/toolkit"
 	"github.com/wasmdesk/wasmbox/clients/sharedvfs"
 )
 
 // newBuf allocates a buffer the right size for state s.
 func newBuf(s *State) []byte { return make([]byte, 4*s.W*s.H) }
 
-// New produces a state whose grid fits the chosen surface at 2x scale.
+// New produces a state whose grid fits the chosen surface: the cols/rows are
+// the surface size divided by the TerminalView's (scaled-font) cell size.
 func TestNewSizesGrid(t *testing.T) {
 	s := New(640, 400)
-	if s.Grid.Cols != 40 || s.Grid.Rows != 25 {
-		t.Fatalf("New(640,400): grid = %dx%d, want 40x25", s.Grid.Cols, s.Grid.Rows)
+	cw, ch := s.Grid.CellWidth(), s.Grid.CellHeight()
+	wantCols, wantRows := 640/cw, 400/ch
+	if s.Grid.Cols != wantCols || s.Grid.Rows != wantRows {
+		t.Fatalf("New(640,400): grid = %dx%d, want %dx%d (cell %dx%d)",
+			s.Grid.Cols, s.Grid.Rows, wantCols, wantRows, cw, ch)
 	}
 	if s.W != 640 || s.H != 400 {
 		t.Fatalf("New stored dims = (%d,%d), want (640,400)", s.W, s.H)
@@ -37,6 +42,20 @@ func TestNewClampsToMinimum(t *testing.T) {
 func TestRenderFillsExactSize(t *testing.T) {
 	s := New(160, 100)
 	Render(s, newBuf(s))
+}
+
+// Render paints the panel background into the margin around the centred grid:
+// with a surface whose height is not a whole number of cells there is a top
+// margin, whose corner pixel must be the panel colour (not left unpainted).
+func TestRenderFillsMargin(t *testing.T) {
+	s := New(160, 100) // 100/16 = 6 rows -> gridH 96 -> 2px top margin
+	buf := newBuf(s)
+	Render(s, buf)
+	// Top-left corner is inside the top margin strip.
+	got := toolkit.RGBA{R: buf[0], G: buf[1], B: buf[2], A: buf[3]}
+	if got != panelBG {
+		t.Fatalf("margin corner = %+v, want panel %+v", got, panelBG)
+	}
 }
 
 // Render panics on a wrongly-sized buffer.
@@ -59,6 +78,38 @@ func TestHandleKeyPrintable(t *testing.T) {
 	}
 	if len(s.Shell.Line) != startLine+1 || s.Shell.Line[len(s.Shell.Line)-1] != 'a' {
 		t.Fatalf("Shell.Line = %q, want trailing 'a'", string(s.Shell.Line))
+	}
+}
+
+// OnEvent (the widget event path): a keydown event routed through the
+// TerminalView's OnEvent reaches OnKey, which drives the shell via HandleKey.
+// This is the seam main.go's root.OnEvent would use.
+func TestOnEventDrivesShell(t *testing.T) {
+	s := New(160, 100)
+	s.Grid.OnEvent(toolkit.Event{Kind: toolkit.EventChar, Code: "z"})
+	if string(s.Shell.Line) != "z" {
+		t.Fatalf("after OnEvent 'z', Shell.Line = %q, want \"z\"", string(s.Shell.Line))
+	}
+}
+
+// The prompt is painted in cyan (pen index 1): the first prompt cell carries
+// the cyan ink, distinguishing it from green echoed input.
+func TestPromptPaintedInCyan(t *testing.T) {
+	s := New(320, 200)
+	// The prompt starts at (0,0). Its first glyph cell must be cyan ink.
+	c := s.Grid.Cell(0, 0)
+	if c.Rune == 0 {
+		t.Fatal("no prompt glyph at (0,0)")
+	}
+	if c.FG != inkCyan {
+		t.Fatalf("prompt cell (0,0) FG = %+v, want cyan", c.FG)
+	}
+	// Echoed input lands in green: type a char and check its cell.
+	s.HandleKey("x")
+	promptLen := len(s.Shell.PromptString())
+	xc := s.Grid.Cell(promptLen, 0)
+	if xc.Rune != 'x' || xc.FG != inkGreen {
+		t.Fatalf("echoed input cell = %+v, want 'x' in green", xc)
 	}
 }
 
@@ -113,7 +164,7 @@ func TestHandleKeyEnterEcho(t *testing.T) {
 	// The grid should now contain "hi" somewhere -- find the 'h' followed by 'i'.
 	found := false
 	for i := 0; i+1 < len(s.Grid.Cells); i++ {
-		if s.Grid.Cells[i].Glyph == 'h' && s.Grid.Cells[i+1].Glyph == 'i' {
+		if s.Grid.Cells[i].Rune == 'h' && s.Grid.Cells[i+1].Rune == 'i' {
 			found = true
 			break
 		}
@@ -134,7 +185,7 @@ func TestHandleKeyEnterClear(t *testing.T) {
 	// glyph cells -- should equal len(prompt).
 	nonZero := 0
 	for _, c := range s.Grid.Cells {
-		if c.Glyph != 0 {
+		if c.Rune != 0 {
 			nonZero++
 		}
 	}
@@ -200,11 +251,11 @@ func gridString(s *State) string {
 	var b strings.Builder
 	for r := 0; r < g.Rows; r++ {
 		for c := 0; c < g.Cols; c++ {
-			ch := g.Cells[r*g.Cols+c].Glyph
+			ch := g.Cells[r*g.Cols+c].Rune
 			if ch == 0 {
 				b.WriteByte(' ')
 			} else {
-				b.WriteByte(ch)
+				b.WriteRune(ch)
 			}
 		}
 		b.WriteByte('\n')

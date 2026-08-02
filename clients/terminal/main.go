@@ -81,10 +81,36 @@ func main() {
 	// Initial paint so the compositor has something to blit immediately.
 	render()
 
+	// Render coalescing: keystrokes can arrive faster than a full-grid repaint
+	// completes, and repainting synchronously inside every keydown lets a burst
+	// (e.g. a fast paste or an autotyped test) queue N blocking renders behind
+	// the input events -- the canvas then trails the shell state by the whole
+	// backlog. Instead, a keydown only mutates the shell and flags the frame
+	// dirty; a single setTimeout(0) task drains the flag with one render of the
+	// LATEST state. A burst therefore collapses to ~one repaint per event-loop
+	// turn, keeping the canvas in step with the shell no matter the CPU speed.
+	// (Web Workers have no requestAnimationFrame, so setTimeout is the schedule
+	// primitive here.)
+	renderScheduled := false
+	var flushCb js.Func
+	flushCb = js.FuncOf(func(_ js.Value, _ []js.Value) any {
+		renderScheduled = false
+		render()
+		return nil
+	})
+	scheduleRender := func() {
+		if renderScheduled {
+			return
+		}
+		renderScheduled = true
+		js.Global().Call("setTimeout", flushCb, 0)
+	}
+
 	// Input handler: routes keydown events into the shell. The compositor
 	// sends one event per keystroke with kind=="keydown" + key=="<char>" for
 	// printable keys, "Enter" / "Backspace" for the control keys we care
-	// about. The handler re-renders only when HandleKey reports a change.
+	// about. It schedules a coalesced repaint only when HandleKey reports a
+	// change.
 	cb := js.FuncOf(func(_ js.Value, args []js.Value) any {
 		if len(args) == 0 {
 			return nil
@@ -96,7 +122,7 @@ func main() {
 		}
 		key := ev.Get("key").String()
 		if state.HandleKey(key) {
-			render()
+			scheduleRender()
 		}
 		return nil
 	})
