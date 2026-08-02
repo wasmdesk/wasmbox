@@ -7,6 +7,7 @@ package scene
 import (
 	"testing"
 
+	"github.com/go-widgets/toolkit"
 	"github.com/wasmdesk/wasmbox/clients/sharedvfs"
 )
 
@@ -14,43 +15,75 @@ func newTestState(t *testing.T) *SceneState {
 	t.Helper()
 	v := sharedvfs.NewInMemoryVFS()
 	sharedvfs.SeedDemoTree(v)
-	return NewWithVFS(900, 540, v)
+	return NewWithVFS(900, 460, v)
 }
 
+// brokenVFS errors on every op so refreshTree + SaveCurrent error branches
+// are exercised.
+type brokenVFS struct{}
+
+func (brokenVFS) List(string) ([]sharedvfs.Entry, error) { return nil, sharedvfs.ErrNotFound }
+func (brokenVFS) Stat(string) (sharedvfs.Entry, error) {
+	return sharedvfs.Entry{}, sharedvfs.ErrNotFound
+}
+func (brokenVFS) IsDir(string) bool           { return false }
+func (brokenVFS) Read(string) ([]byte, error) { return nil, sharedvfs.ErrNotFound }
+func (brokenVFS) Write(string, []byte) error  { return sharedvfs.ErrNotFound }
+func (brokenVFS) Mkdir(string) error          { return sharedvfs.ErrNotFound }
+func (brokenVFS) Remove(string) error         { return sharedvfs.ErrNotFound }
+
 func TestNew_UsesDemoVFS(t *testing.T) {
-	s := New(900, 540)
+	s := New(900, 460)
 	if s.VFS == nil {
 		t.Fatal("VFS nil")
 	}
 	if len(s.FileTree) == 0 {
 		t.Fatal("FileTree empty -- demo seed missing")
 	}
+	if s.Editor == nil {
+		t.Fatal("Editor nil")
+	}
 }
 
-func TestNewWithVFS_RefreshFails_NilFileTree(t *testing.T) {
-	// A VFS whose List always errors (use an empty raw VFS without root via
-	// our broken stub).
+func TestNewWithVFS_RefreshFails_NilTree(t *testing.T) {
 	s := NewWithVFS(100, 100, brokenVFS{})
 	if s.FileTree != nil {
 		t.Fatalf("expected nil tree on broken VFS, got %+v", s.FileTree)
 	}
+	if s.sidebar.Items != nil {
+		t.Fatalf("expected nil sidebar items, got %+v", s.sidebar.Items)
+	}
 }
-
-// brokenVFS errors on List so refreshTree's error branch is exercised.
-type brokenVFS struct{}
-
-func (brokenVFS) List(string) ([]sharedvfs.Entry, error) { return nil, sharedvfs.ErrNotFound }
-func (brokenVFS) Stat(string) (sharedvfs.Entry, error)   { return sharedvfs.Entry{}, sharedvfs.ErrNotFound }
-func (brokenVFS) IsDir(string) bool                      { return false }
-func (brokenVFS) Read(string) ([]byte, error)            { return nil, sharedvfs.ErrNotFound }
-func (brokenVFS) Write(string, []byte) error             { return sharedvfs.ErrNotFound }
-func (brokenVFS) Mkdir(string) error                     { return sharedvfs.ErrNotFound }
-func (brokenVFS) Remove(string) error                    { return sharedvfs.ErrNotFound }
 
 func TestNewDemoVFS_Seeded(t *testing.T) {
 	v := NewDemoVFS()
 	if !v.IsDir("/Documents") {
 		t.Fatal("demo VFS missing /Documents")
+	}
+}
+
+func TestRefreshTree_MirrorsPrefixes(t *testing.T) {
+	s := newTestState(t)
+	if len(s.sidebar.Items) != len(s.FileTree) {
+		t.Fatalf("items=%d tree=%d", len(s.sidebar.Items), len(s.FileTree))
+	}
+	sawDir, sawFile := false, false
+	for i, e := range s.FileTree {
+		it := s.sidebar.Items[i]
+		if e.IsDir {
+			sawDir = true
+			if it[:2] != "> " {
+				t.Errorf("dir row %q missing prefix", it)
+			}
+		} else {
+			sawFile = true
+			if it[:2] != "  " {
+				t.Errorf("file row %q missing prefix", it)
+			}
+		}
+	}
+	if !sawDir || !sawFile {
+		t.Fatalf("demo tree needs both a dir and a file (dir=%v file=%v)", sawDir, sawFile)
 	}
 }
 
@@ -62,12 +95,21 @@ func TestOpenFile_SuccessAndMissing(t *testing.T) {
 	if s.CurrentPath != "/about.txt" {
 		t.Fatalf("CurrentPath: %q", s.CurrentPath)
 	}
-	if s.Buffer.String() == "" {
-		t.Fatal("buffer not loaded")
+	if s.Editor.Text() == "" {
+		t.Fatal("editor not loaded")
 	}
-	// Missing file: no change.
+	if s.tabLabel() != "about.txt" {
+		t.Fatalf("tabLabel = %q", s.tabLabel())
+	}
 	if s.OpenFile("/nope.txt") {
 		t.Fatal("OpenFile missing should return false")
+	}
+}
+
+func TestTabLabel_Untitled(t *testing.T) {
+	s := newTestState(t)
+	if s.tabLabel() != "untitled" {
+		t.Fatalf("tabLabel with no file = %q", s.tabLabel())
 	}
 }
 
@@ -95,8 +137,8 @@ func TestSaveCurrent_Success(t *testing.T) {
 	if !s.OpenFile("/about.txt") {
 		t.Fatal("open")
 	}
-	s.Buffer.SetCursor(0, 0)
-	s.Buffer.Insert("X")
+	s.Editor.CursorLine, s.Editor.CursorCol = 0, 0
+	s.Editor.OnEvent(toolkit.Event{Kind: toolkit.EventChar, Code: "X"})
 	if !s.SaveCurrent() {
 		t.Fatal("save")
 	}
@@ -107,7 +149,7 @@ func TestSaveCurrent_Success(t *testing.T) {
 	if err != nil {
 		t.Fatalf("post-save read: %v", err)
 	}
-	if string(data)[0] != 'X' {
+	if data[0] != 'X' {
 		t.Fatalf("post-save body: %q", data)
 	}
 }
@@ -125,84 +167,101 @@ func TestSaveCurrent_WriteError(t *testing.T) {
 
 func TestHandleKey_CursorMovement(t *testing.T) {
 	s := newTestState(t)
-	s.Buffer = NewTextBuffer("ab\ncd")
+	s.Editor.SetText("ab\ncd")
 
-	// ArrowRight.
-	s.Buffer.SetCursor(0, 0)
+	s.Editor.CursorLine, s.Editor.CursorCol = 0, 0
 	if !s.HandleKey("ArrowRight") {
 		t.Fatal("ArrowRight should report change")
 	}
-	if s.Buffer.Cursor.Col != 1 {
-		t.Fatalf("col: %d", s.Buffer.Cursor.Col)
+	if s.Editor.CursorCol != 1 {
+		t.Fatalf("col: %d", s.Editor.CursorCol)
 	}
-	// ArrowLeft.
 	if !s.HandleKey("ArrowLeft") {
 		t.Fatal("ArrowLeft should report change")
 	}
-	// ArrowDown.
 	if !s.HandleKey("ArrowDown") {
 		t.Fatal("ArrowDown should report change")
 	}
-	if s.Buffer.Cursor.Row != 1 {
-		t.Fatalf("row: %d", s.Buffer.Cursor.Row)
+	if s.Editor.CursorLine != 1 {
+		t.Fatalf("row: %d", s.Editor.CursorLine)
 	}
-	// ArrowUp.
 	if !s.HandleKey("ArrowUp") {
 		t.Fatal("ArrowUp should report change")
 	}
+	// Home / End move within the line.
+	s.Editor.CursorCol = 1
+	if !s.HandleKey("Home") {
+		t.Fatal("Home should report change")
+	}
+	if s.Editor.CursorCol != 0 {
+		t.Fatalf("Home col: %d", s.Editor.CursorCol)
+	}
+	if !s.HandleKey("End") {
+		t.Fatal("End should report change")
+	}
 }
 
-func TestHandleKey_Backspace_DeleteAtOrigin(t *testing.T) {
+func TestHandleKey_NonMovingArrowReturnsFalse(t *testing.T) {
 	s := newTestState(t)
-	s.Buffer = NewTextBuffer("")
+	s.Editor.SetText("ab")
+	s.Editor.CursorLine, s.Editor.CursorCol = 0, 0
+	// ArrowLeft at buffer start does not move -> no visible change.
+	if s.HandleKey("ArrowLeft") {
+		t.Fatal("ArrowLeft at (0,0) should return false")
+	}
+}
+
+func TestHandleKey_BackspaceAtOrigin(t *testing.T) {
+	s := newTestState(t)
+	s.Editor.SetText("")
 	if s.HandleKey("Backspace") {
 		t.Fatal("Backspace at (0,0) should return false")
 	}
 }
 
-func TestHandleKey_Backspace_Effective(t *testing.T) {
+func TestHandleKey_BackspaceEffective(t *testing.T) {
 	s := newTestState(t)
-	s.Buffer = NewTextBuffer("ab")
-	s.Buffer.SetCursor(0, 2)
+	s.Editor.SetText("ab")
+	s.Editor.CursorLine, s.Editor.CursorCol = 0, 2
 	if !s.HandleKey("Backspace") {
 		t.Fatal("Backspace should return true")
 	}
-	if s.Buffer.String() != "a" {
-		t.Fatalf("after BS: %q", s.Buffer.String())
+	if s.Editor.Text() != "a" {
+		t.Fatalf("after BS: %q", s.Editor.Text())
 	}
 }
 
 func TestHandleKey_EnterSplits(t *testing.T) {
 	s := newTestState(t)
-	s.Buffer = NewTextBuffer("abc")
-	s.Buffer.SetCursor(0, 2)
+	s.Editor.SetText("abc")
+	s.Editor.CursorLine, s.Editor.CursorCol = 0, 2
 	if !s.HandleKey("Enter") {
-		t.Fatal("Enter should always return true")
+		t.Fatal("Enter should return true")
 	}
-	if len(s.Buffer.Lines) != 2 {
-		t.Fatalf("split: %q", s.Buffer.Lines)
+	if len(s.Editor.Lines) != 2 {
+		t.Fatalf("split: %q", s.Editor.Lines)
 	}
 }
 
 func TestHandleKey_TabInserts4Spaces(t *testing.T) {
 	s := newTestState(t)
-	s.Buffer = NewTextBuffer("")
+	s.Editor.SetText("")
 	if !s.HandleKey("Tab") {
 		t.Fatal("Tab should return true")
 	}
-	if s.Buffer.Lines[0] != "    " {
-		t.Fatalf("Tab body: %q", s.Buffer.Lines[0])
+	if s.Editor.Lines[0] != "    " {
+		t.Fatalf("Tab body: %q", s.Editor.Lines[0])
 	}
 }
 
 func TestHandleKey_PrintableInsert(t *testing.T) {
 	s := newTestState(t)
-	s.Buffer = NewTextBuffer("")
+	s.Editor.SetText("")
 	if !s.HandleKey("a") {
 		t.Fatal("printable should return true")
 	}
-	if s.Buffer.Lines[0] != "a" {
-		t.Fatalf("body: %q", s.Buffer.Lines[0])
+	if s.Editor.Lines[0] != "a" {
+		t.Fatalf("body: %q", s.Editor.Lines[0])
 	}
 }
 
@@ -214,17 +273,15 @@ func TestHandleKey_UnknownIgnored(t *testing.T) {
 	if s.HandleKey("") {
 		t.Fatal("empty key should return false")
 	}
-	// 2-byte non-special name like "PageDown".
 	if s.HandleKey("PageDown") {
 		t.Fatal("PageDown should return false")
 	}
-	// Non-printable single byte.
 	if s.HandleKey(string([]byte{0x01})) {
 		t.Fatal("non-printable should return false")
 	}
 }
 
-func TestHandleKey_CmdSAndCtrlS(t *testing.T) {
+func TestHandleKey_SaveKeys(t *testing.T) {
 	s := newTestState(t)
 	if !s.OpenFile("/about.txt") {
 		t.Fatal("open")
@@ -235,14 +292,13 @@ func TestHandleKey_CmdSAndCtrlS(t *testing.T) {
 	if s.Flash != FlashSaveOK {
 		t.Fatalf("flash: %d", s.Flash)
 	}
-	// Reset.
 	s.Flash = FlashNone
 	if !s.HandleKey("Ctrl+S") {
 		t.Fatal("Ctrl+S should save")
 	}
 }
 
-func TestHandleKey_CmdS_NoFileReturnsFalse(t *testing.T) {
+func TestHandleKey_SaveNoFileFalse(t *testing.T) {
 	s := newTestState(t)
 	if s.HandleKey("Cmd+S") {
 		t.Fatal("Cmd+S with no file should return false")
@@ -251,8 +307,7 @@ func TestHandleKey_CmdS_NoFileReturnsFalse(t *testing.T) {
 
 func TestHandleMouse_SidebarRowOpensFile(t *testing.T) {
 	s := newTestState(t)
-	// Find the index of "about.txt" in the file tree.
-	var idx int = -1
+	idx := -1
 	for i, e := range s.FileTree {
 		if e.Name == "about.txt" {
 			idx = i
@@ -262,7 +317,8 @@ func TestHandleMouse_SidebarRowOpensFile(t *testing.T) {
 	if idx < 0 {
 		t.Fatal("about.txt missing from tree")
 	}
-	y := TabStripHeight + idx*SidebarRowHeight + 2
+	sd := s.sidebar.Bounds()
+	y := sd.Y + idx*SidebarRowHeight + 2
 	if !s.HandleMouse(10, y) {
 		t.Fatal("sidebar click should open file")
 	}
@@ -273,17 +329,23 @@ func TestHandleMouse_SidebarRowOpensFile(t *testing.T) {
 
 func TestHandleMouse_SidebarRowOutOfBounds(t *testing.T) {
 	s := newTestState(t)
-	// Click far below last row.
-	y := TabStripHeight + 100*SidebarRowHeight
-	if s.HandleMouse(10, y) {
+	sd := s.sidebar.Bounds()
+	y := sd.Y + 100*SidebarRowHeight
+	// A y past the last row but still inside the sidebar bounds routes into
+	// the ListBox, whose onClick no-ops (idx past len) -> false.
+	if y >= sd.Y+sd.H {
+		y = sd.Y + sd.H - 1
+	}
+	// Ensure it maps past the file rows.
+	if s.HandleMouse(10, sd.Y+len(s.FileTree)*SidebarRowHeight+2) {
 		t.Fatal("out-of-range sidebar click should return false")
 	}
+	_ = y
 }
 
 func TestHandleMouse_SidebarRowOnDirectory(t *testing.T) {
 	s := newTestState(t)
-	// Find the index of a directory entry in the tree (e.g. "Documents").
-	var idx int = -1
+	idx := -1
 	for i, e := range s.FileTree {
 		if e.IsDir {
 			idx = i
@@ -293,7 +355,8 @@ func TestHandleMouse_SidebarRowOnDirectory(t *testing.T) {
 	if idx < 0 {
 		t.Fatal("no directory in tree")
 	}
-	y := TabStripHeight + idx*SidebarRowHeight + 2
+	sd := s.sidebar.Bounds()
+	y := sd.Y + idx*SidebarRowHeight + 2
 	if s.HandleMouse(10, y) {
 		t.Fatal("clicking a directory row should return false")
 	}
@@ -304,23 +367,24 @@ func TestHandleMouse_EditorCursorJump(t *testing.T) {
 	if !s.OpenFile("/about.txt") {
 		t.Fatal("open")
 	}
-	// Click at editor row 0, col ~2.
-	x := SidebarWidth + GutterWidth + 2*(FontW*EditorFontScale) + 1
-	y := TabStripHeight + 4
+	ed := s.Editor.Bounds()
+	adv := toolkit.TextWidth(" ")
+	gutterW := toolkit.TextWidth("1") + 8 // single-digit line count
+	textX := ed.X + 4 + gutterW
+	x := textX + 2*adv + 1
+	y := ed.Y + 4
 	if !s.HandleMouse(x, y) {
 		t.Fatal("editor click should report change")
 	}
-	if s.Buffer.Cursor.Row != 0 || s.Buffer.Cursor.Col != 2 {
-		t.Fatalf("cursor: (%d,%d)", s.Buffer.Cursor.Row, s.Buffer.Cursor.Col)
+	if s.Editor.CursorLine != 0 || s.Editor.CursorCol != 2 {
+		t.Fatalf("cursor: (%d,%d)", s.Editor.CursorLine, s.Editor.CursorCol)
 	}
 }
 
-func TestHandleMouse_StatusBarLiveServerOpensPopup(t *testing.T) {
+func TestHandleMouse_StatusBarOpensPopup(t *testing.T) {
 	s := newTestState(t)
-	x := s.W - 10
-	y := s.H - 5
-	if !s.HandleMouse(x, y) {
-		t.Fatal("status-bar click should open popup")
+	if !s.HandleMouse(s.W-10, s.H-5) {
+		t.Fatal("status-bar right region should open popup")
 	}
 	if !s.LiveServerPopupOpen {
 		t.Fatal("popup not open")
@@ -329,9 +393,7 @@ func TestHandleMouse_StatusBarLiveServerOpensPopup(t *testing.T) {
 
 func TestHandleMouse_StatusBarLeftRegion(t *testing.T) {
 	s := newTestState(t)
-	x := 10
-	y := s.H - 5
-	if s.HandleMouse(x, y) {
+	if s.HandleMouse(10, s.H-5) {
 		t.Fatal("status-bar left region should return false")
 	}
 }
@@ -340,7 +402,9 @@ func TestHandleMouse_PopupConnectFlashes(t *testing.T) {
 	s := newTestState(t)
 	s.LiveServerPopupOpen = true
 	s.LiveServerURL = "wss://example"
-	if !s.HandleMouse(PopupConnectX+10, PopupConnectY+10) {
+	s.layoutDialog()
+	bb := s.connectBtn.Bounds()
+	if !s.HandleMouse(bb.X+bb.W/2, bb.Y+bb.H/2) {
 		t.Fatal("Connect should report change")
 	}
 	if s.LiveServerPopupOpen {
@@ -357,8 +421,7 @@ func TestHandleMouse_PopupConnectFlashes(t *testing.T) {
 func TestHandleMouse_PopupOutsideDismisses(t *testing.T) {
 	s := newTestState(t)
 	s.LiveServerPopupOpen = true
-	// Click far from popup region.
-	if !s.HandleMouse(5, 5) {
+	if !s.HandleMouse(2, 2) {
 		t.Fatal("outside-popup click should report change")
 	}
 	if s.LiveServerPopupOpen {
@@ -366,11 +429,13 @@ func TestHandleMouse_PopupOutsideDismisses(t *testing.T) {
 	}
 }
 
-func TestHandleMouse_PopupInsideButNotConnect_NoOp(t *testing.T) {
+func TestHandleMouse_PopupInsideNotConnect_NoOp(t *testing.T) {
 	s := newTestState(t)
 	s.LiveServerPopupOpen = true
-	// Inside popup, but at top-left corner (not on Connect button).
-	if s.HandleMouse(PopupX+2, PopupY+2) {
+	s.layoutDialog()
+	db := s.dialog.Bounds()
+	// Click inside the dialog title bar (not on a button).
+	if s.HandleMouse(db.X+4, db.Y+4) {
 		t.Fatal("popup body click should be a no-op")
 	}
 	if !s.LiveServerPopupOpen {
@@ -380,27 +445,54 @@ func TestHandleMouse_PopupInsideButNotConnect_NoOp(t *testing.T) {
 
 func TestHandleMouse_OutsideKnownRegions(t *testing.T) {
 	s := newTestState(t)
-	// Click in the tab strip area above the editor: y < TabStripHeight,
-	// x past the sidebar -- falls through every branch.
+	// A click in the tab strip (above the editor, right of the sidebar) falls
+	// through every hit-zone.
 	if s.HandleMouse(SidebarWidth+50, 4) {
 		t.Fatal("tab strip click should return false")
 	}
 }
 
-func TestInRect(t *testing.T) {
-	if !inRect(5, 5, 0, 0, 10, 10) {
-		t.Fatal("inside")
+func TestPlaceCursorAt_Clamps(t *testing.T) {
+	s := newTestState(t)
+	s.Editor.SetText("ab\ncde")
+	ed := s.Editor.Bounds()
+	// Row above the first line + col left of the text -> clamps to (0,0).
+	s.placeCursorAt(ed.X, ed.Y-100)
+	if s.Editor.CursorLine != 0 || s.Editor.CursorCol != 0 {
+		t.Fatalf("clamp low: (%d,%d)", s.Editor.CursorLine, s.Editor.CursorCol)
 	}
-	if inRect(-1, 5, 0, 0, 10, 10) {
-		t.Fatal("outside-left")
+	// Row + col far past the buffer -> clamps to the last line / its end.
+	s.placeCursorAt(ed.X+10000, ed.Y+10000)
+	if s.Editor.CursorLine != len(s.Editor.Lines)-1 {
+		t.Fatalf("clamp row high: %d", s.Editor.CursorLine)
 	}
-	if inRect(5, -1, 0, 0, 10, 10) {
-		t.Fatal("outside-top")
+	if s.Editor.CursorCol != len([]rune(s.Editor.Lines[s.Editor.CursorLine])) {
+		t.Fatalf("clamp col high: %d", s.Editor.CursorCol)
 	}
-	if inRect(10, 5, 0, 0, 10, 10) {
-		t.Fatal("outside-right")
+}
+
+func TestEditorSig_ChangesWithEdit(t *testing.T) {
+	s := newTestState(t)
+	s.Editor.SetText("a")
+	before := s.editorSig()
+	s.Editor.OnEvent(toolkit.Event{Kind: toolkit.EventChar, Code: "b"})
+	if s.editorSig() == before {
+		t.Fatal("editorSig should change after an edit")
 	}
-	if inRect(5, 10, 0, 0, 10, 10) {
-		t.Fatal("outside-bottom")
+}
+
+func TestActivateSidebar_OutOfRange(t *testing.T) {
+	s := newTestState(t)
+	// Direct call with an index past the tree (ListBox guards this before
+	// OnActivate in practice, but the defensive branch is still exercised).
+	s.dirty = true
+	s.activateSidebar(-1)
+	if s.dirty {
+		t.Fatal("out-of-range activate should leave dirty false")
+	}
+	s.dirty = true
+	s.activateSidebar(len(s.FileTree) + 5)
+	if s.dirty {
+		t.Fatal("out-of-range activate should leave dirty false")
 	}
 }

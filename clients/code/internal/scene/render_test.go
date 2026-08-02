@@ -10,15 +10,21 @@ import (
 	"github.com/wasmdesk/wasmbox/clients/sharedvfs"
 )
 
+// probeGutterWidth is the horizontal offset the playwright probe adds to the
+// sidebar to derive its editor-scan origin (edLeft = left + SidebarWidth +
+// this). The TextView owns a narrower auto gutter now, but the probe scans a
+// wide band from this offset rightward, so the tests mirror the same origin
+// to prove the first keyword paints where the probe looks.
+const probeGutterWidth = 50
+
 // pixelAt reads the RGB triple at (x, y) from a w*h RGBA32 buffer.
 func pixelAt(buf []byte, w, x, y int) [3]uint8 {
 	off := (y*w + x) * 4
 	return [3]uint8{buf[off], buf[off+1], buf[off+2]}
 }
 
-// countColor counts the number of (x, y) pixels in the rectangle (rx,ry,rw,rh)
-// of a w*h RGBA32 buffer that match c.
-func countColor(buf []byte, w int, rx, ry, rw, rh int, c [3]uint8) int {
+// countColor counts pixels in (rx,ry,rw,rh) of a w*h RGBA32 buffer matching c.
+func countColor(buf []byte, w, rx, ry, rw, rh int, c [3]uint8) int {
 	n := 0
 	for y := ry; y < ry+rh; y++ {
 		for x := rx; x < rx+rw; x++ {
@@ -28,6 +34,13 @@ func countColor(buf []byte, w int, rx, ry, rw, rh int, c [3]uint8) int {
 		}
 	}
 	return n
+}
+
+func newSeededState(t *testing.T, w, h int) *SceneState {
+	t.Helper()
+	v := sharedvfs.NewInMemoryVFS()
+	sharedvfs.SeedDemoTree(v)
+	return NewWithVFS(w, h, v)
 }
 
 func TestRender_PanicsOnSizeMismatch(t *testing.T) {
@@ -41,269 +54,171 @@ func TestRender_PanicsOnSizeMismatch(t *testing.T) {
 	Render(s, buf)
 }
 
-func TestRender_BasicLayout(t *testing.T) {
-	w, h := 900, 540
-	v := sharedvfs.NewInMemoryVFS()
-	sharedvfs.SeedDemoTree(v)
-	s := NewWithVFS(w, h, v)
-	s.Buffer = NewTextBuffer("hello")
+// TestRender_RegionBackgrounds asserts the four VS Code Dark+ region colours
+// land where the playwright probe samples them: sidebar #252526, editor
+// #1E1E1E, status bar #007ACC, and tab strip #2D2D30.
+func TestRender_RegionBackgrounds(t *testing.T) {
+	w, h := 900, 460
+	s := newSeededState(t, w, h)
 	buf := make([]byte, 4*w*h)
 	Render(s, buf)
 
-	// Sidebar pixel sample.
-	if got := pixelAt(buf, w, 4, 100); got != ColorSidebarBG {
-		t.Errorf("sidebar @ (4,100) = %v, want %v", got, ColorSidebarBG)
+	// Sidebar band, sampled low (below the file rows) as the probe does.
+	if got := pixelAt(buf, w, 40, h-StatusBarHeight-6); got != ColorSidebarBG {
+		t.Errorf("sidebar @ (40,%d) = %v, want %v", h-StatusBarHeight-6, got, ColorSidebarBG)
 	}
-	// Editor BG sample (right of sidebar+gutter, mid height).
-	if got := pixelAt(buf, w, SidebarWidth+GutterWidth+200, h/2); got != ColorWindowBG {
+	// Editor interior, right of sidebar+probe-gutter.
+	if got := pixelAt(buf, w, SidebarWidth+probeGutterWidth+60, h-StatusBarHeight-6); got != ColorWindowBG {
 		t.Errorf("editor BG = %v, want %v", got, ColorWindowBG)
 	}
-	// Status bar sample (any x, bottom band).
-	if got := pixelAt(buf, w, 400, h-5); got != ColorStatusBarBG {
+	// Status bar (left edge, over no glyph).
+	if got := pixelAt(buf, w, 2, h-StatusBarHeight/2); got != ColorStatusBarBG {
 		t.Errorf("status bar = %v, want %v", got, ColorStatusBarBG)
 	}
-	// Tab strip background -- sample far past the active tab in the empty band.
+	// Tab strip, far past the active tab.
 	if got := pixelAt(buf, w, w-50, 4); got != ColorTabStripBG {
 		t.Errorf("tab strip = %v, want %v", got, ColorTabStripBG)
 	}
 }
 
-func TestPaint_DrawsLineNumbers(t *testing.T) {
+// TestRender_KeywordInkPastProbeOrigin renders "func main() {" into the
+// editor and asserts keyword-blue (#569CD6) pixels appear in the SAME band
+// the probe scans (x >= SidebarWidth+probeGutterWidth). This is the native
+// mirror of the browser probe's keyword-highlight assertion.
+func TestRender_KeywordInkPastProbeOrigin(t *testing.T) {
+	w, h := 900, 460
+	s := newSeededState(t, w, h)
+	s.Editor.SetText("func main() {")
+	buf := make([]byte, 4*w*h)
+	Render(s, buf)
+
+	edLeft := SidebarWidth + probeGutterWidth
+	kw := countColor(buf, w, edLeft, TabStripHeight, w-edLeft, h-TabStripHeight-StatusBarHeight, ColorKeyword)
+	if kw < 12 {
+		t.Fatalf("keyword-blue pixels past probe origin = %d, want >= 12", kw)
+	}
+}
+
+// TestRender_GutterReservesWidth asserts the TextView line-number gutter
+// paints numbers (ColorGutterText) AND reserves width -- the editor text is
+// pushed right of the sidebar by more than the 4 px bare inset, so gutter ink
+// exists between the sidebar edge and the first glyph column.
+func TestRender_GutterReservesWidth(t *testing.T) {
 	w, h := 600, 400
 	s := New(w, h)
-	s.Buffer = NewTextBuffer("a\nb\nc")
+	s.Editor.SetText("a\nb\nc")
 	buf := make([]byte, 4*w*h)
-	Paint(buf, w, h, s)
-	// Look for at least a few gutter-ink pixels inside the gutter region.
-	gut := countColor(buf, w, SidebarWidth, TabStripHeight, GutterWidth, h-StatusBarHeight-TabStripHeight, ColorGutterText)
+	Render(s, buf)
+	// Gutter ink lives just right of the sidebar, within the reserved column.
+	gut := countColor(buf, w, SidebarWidth, TabStripHeight, 40, h-TabStripHeight-StatusBarHeight, ColorGutterText)
 	if gut < 5 {
-		t.Errorf("gutter ink pixels = %d, want >= 5", gut)
+		t.Fatalf("gutter ink pixels = %d, want >= 5 (gutter not reserved?)", gut)
 	}
 }
 
-func TestPaint_KeywordHighlight(t *testing.T) {
-	w, h := 900, 540
-	s := New(w, h)
-	s.Buffer = NewTextBuffer("func main() {")
-	buf := make([]byte, 4*w*h)
-	Paint(buf, w, h, s)
-	// Count keyword-colour pixels in the editor region.
-	kw := countColor(buf, w, SidebarWidth+GutterWidth, TabStripHeight, w-SidebarWidth-GutterWidth, h-TabStripHeight-StatusBarHeight, ColorKeyword)
-	if kw < 20 {
-		t.Errorf("keyword pixels = %d, want >= 20", kw)
-	}
-}
-
-func TestPaint_FlashSaveOK_OverpaintsStatusBar(t *testing.T) {
+func TestRender_FlashSaveOK(t *testing.T) {
 	w, h := 600, 400
 	s := New(w, h)
 	s.Flash = FlashSaveOK
 	buf := make([]byte, 4*w*h)
-	Paint(buf, w, h, s)
-	if got := pixelAt(buf, w, 100, h-5); got != ColorFlashSaveOK {
+	Render(s, buf)
+	if got := pixelAt(buf, w, 2, h-StatusBarHeight/2); got != ColorFlashSaveOK {
 		t.Errorf("flash save: %v, want %v", got, ColorFlashSaveOK)
 	}
 }
 
-func TestPaint_FlashInfo_OverpaintsStatusBar(t *testing.T) {
+func TestRender_FlashInfo(t *testing.T) {
 	w, h := 600, 400
 	s := New(w, h)
 	s.Flash = FlashInfo
 	buf := make([]byte, 4*w*h)
-	Paint(buf, w, h, s)
-	if got := pixelAt(buf, w, 100, h-5); got != ColorFlashInfo {
+	Render(s, buf)
+	if got := pixelAt(buf, w, 2, h-StatusBarHeight/2); got != ColorFlashInfo {
 		t.Errorf("flash info: %v, want %v", got, ColorFlashInfo)
 	}
 }
 
-func TestPaint_PopupRendered(t *testing.T) {
-	w, h := 900, 540
+func TestRender_FlashNoneDefaultBlue(t *testing.T) {
+	w, h := 600, 400
 	s := New(w, h)
-	s.LiveServerPopupOpen = true
-	s.LiveServerURL = "wss://test"
 	buf := make([]byte, 4*w*h)
-	Paint(buf, w, h, s)
-	// Connect button background.
-	if got := pixelAt(buf, w, PopupConnectX+10, PopupConnectY+10); got != ColorPopupButton {
-		t.Errorf("popup button: %v, want %v", got, ColorPopupButton)
-	}
-	// Panel BG at popup centre.
-	if got := pixelAt(buf, w, PopupX+30, PopupY+5); got != ColorPopupBG {
-		t.Errorf("popup BG: %v, want %v", got, ColorPopupBG)
+	Render(s, buf)
+	if got := pixelAt(buf, w, 2, h-StatusBarHeight/2); got != ColorStatusBarBG {
+		t.Errorf("default status: %v, want %v", got, ColorStatusBarBG)
 	}
 }
 
-func TestPaint_TabStripWithOpenFile(t *testing.T) {
-	w, h := 900, 540
-	v := sharedvfs.NewInMemoryVFS()
-	sharedvfs.SeedDemoTree(v)
-	s := NewWithVFS(w, h, v)
+// TestRender_TabWithOpenFile draws the active-tab fill (== editor BG) at the
+// tab strip's left, and exercises tabLabel's file-open branch.
+func TestRender_TabWithOpenFile(t *testing.T) {
+	w, h := 900, 460
+	s := newSeededState(t, w, h)
 	if !s.OpenFile("/about.txt") {
 		t.Fatal("open")
 	}
 	buf := make([]byte, 4*w*h)
-	Paint(buf, w, h, s)
-	// Active tab fill (== editor BG) is present at tab strip area near sidebar.
+	Render(s, buf)
 	if got := pixelAt(buf, w, SidebarWidth+5, 4); got != ColorActiveTabBG {
 		t.Errorf("active tab: %v, want %v", got, ColorActiveTabBG)
 	}
 }
 
-func TestPaint_SidebarShowsDirPrefix(t *testing.T) {
-	w, h := 900, 540
-	v := sharedvfs.NewInMemoryVFS()
-	sharedvfs.SeedDemoTree(v)
-	s := NewWithVFS(w, h, v)
+// TestRender_SidebarInk asserts the file-tree rows paint their dim ink.
+func TestRender_SidebarInk(t *testing.T) {
+	w, h := 900, 460
+	s := newSeededState(t, w, h)
 	buf := make([]byte, 4*w*h)
-	Paint(buf, w, h, s)
-	// Just ensure some sidebar ink is painted (at least one row name pixel).
-	ink := countColor(buf, w, 0, TabStripHeight, SidebarWidth, h-TabStripHeight-StatusBarHeight, ColorSidebarTextDim)
-	if ink < 10 {
-		t.Errorf("sidebar ink = %d, want >= 10", ink)
+	Render(s, buf)
+	ink := countColor(buf, w, 0, 0, SidebarWidth, h-StatusBarHeight, ColorSidebarTextDim)
+	if ink < 20 {
+		t.Fatalf("sidebar ink = %d, want >= 20", ink)
 	}
 }
 
-func TestPaint_FlashNone_DefaultStatusBar(t *testing.T) {
-	w, h := 600, 400
+// TestRender_Popup draws the Live Server dialog when open (exercises the
+// popup branch of Paint + layoutDialog + the Entry showing the URL).
+func TestRender_Popup(t *testing.T) {
+	w, h := 900, 460
 	s := New(w, h)
-	// Flash is FlashNone by default.
+	s.LiveServerPopupOpen = true
+	s.LiveServerURL = "wss://test"
 	buf := make([]byte, 4*w*h)
-	Paint(buf, w, h, s)
-	if got := pixelAt(buf, w, 100, h-5); got != ColorStatusBarBG {
-		t.Errorf("default status: %v, want %v", got, ColorStatusBarBG)
+	Render(s, buf)
+	// The dialog's title bar (SurfaceAlt == #2D2D30) overpaints the editor
+	// near the surface centre, proving the popup rendered over the editor.
+	dialogY := (h - DialogH) / 2
+	if got := pixelAt(buf, w, w/2, dialogY+5); got != ColorTabStripBG {
+		t.Errorf("popup title bar = %v, want %v", got, ColorTabStripBG)
 	}
 }
 
-func TestPaint_SidebarRowsClampedOnTallTree(t *testing.T) {
-	// Make a VFS with so many entries the sidebar overflows below the status
-	// bar; the renderer should break out of the loop rather than draw past.
-	v := sharedvfs.NewInMemoryVFS()
-	for i := 0; i < 200; i++ {
-		_ = v.Write("/f"+itoa(i)+".txt", []byte("x"))
-	}
-	w, h := 600, 400
-	s := NewWithVFS(w, h, v)
-	buf := make([]byte, 4*w*h)
-	Paint(buf, w, h, s)
-	// Status bar still painted.
-	if got := pixelAt(buf, w, 100, h-5); got != ColorStatusBarBG {
-		t.Errorf("status bar overwritten by sidebar overflow: %v", got)
-	}
-}
-
-// itoa is a tiny formatter for the overflow test (we keep strconv out of the
-// hot test path).
-func itoa(n int) string {
-	if n == 0 {
-		return "0"
-	}
-	var buf [16]byte
-	i := len(buf)
-	for n > 0 {
-		i--
-		buf[i] = byte('0' + n%10)
-		n /= 10
-	}
-	return string(buf[i:])
-}
-
-func TestPaint_CursorPainted(t *testing.T) {
-	w, h := 600, 400
-	s := New(w, h)
-	s.Buffer = NewTextBuffer("abc")
-	s.Buffer.SetCursor(0, 1)
-	buf := make([]byte, 4*w*h)
-	Paint(buf, w, h, s)
-	// Cursor at row 0, col 1 -- look inside the cursor rect.
-	cx := SidebarWidth + GutterWidth + 1*FontW*EditorFontScale
-	cy := TabStripHeight + (LineHeight-FontH*EditorFontScale)/2 + 2
-	if got := pixelAt(buf, w, cx, cy); got != ColorCursor {
-		t.Errorf("cursor pixel: %v, want %v", got, ColorCursor)
-	}
-}
-
-func TestPaint_CursorClippedWhenOffScreen(t *testing.T) {
-	w, h := 600, 60
-	s := New(w, h)
-	// Build a buffer with many lines so the cursor's row exceeds visible.
-	body := ""
-	for i := 0; i < 50; i++ {
-		body += "x\n"
-	}
-	s.Buffer = NewTextBuffer(body)
-	s.Buffer.SetCursor(40, 0)
-	buf := make([]byte, 4*w*h)
-	// Should NOT panic and should not paint the cursor.
-	Paint(buf, w, h, s)
-}
-
-func TestDrawText_SkipsNonPrintable(t *testing.T) {
-	w, h := 200, 60
-	buf := make([]byte, 4*w*h)
-	for i := range buf {
-		buf[i] = 0
-	}
-	drawText(buf, w, h, 0, 0, "\x01"+"A", 1, [3]uint8{255, 0, 0})
-	// "A" should render at x=0 since the 0x01 byte is skipped (cx isn't advanced).
-	// Count red pixels in the first 8x8 region.
-	red := 0
-	for y := 0; y < 8; y++ {
-		for x := 0; x < 8; x++ {
-			if pixelAt(buf, w, x, y) == [3]uint8{255, 0, 0} {
-				red++
-			}
-		}
-	}
-	if red == 0 {
-		t.Fatal("no ink after skipping non-printable")
-	}
-}
-
-func TestDrawText_ClipsAtRightEdge(t *testing.T) {
-	w, h := 16, 8
-	buf := make([]byte, 4*w*h)
-	// Three glyphs at scale 1 = 24 px > w=16; loop should break.
-	drawText(buf, w, h, 0, 0, "ABC", 1, [3]uint8{1, 2, 3})
-	// No panic = pass.
-}
-
-func TestFillRect_Clips(t *testing.T) {
-	w, h := 10, 10
-	buf := make([]byte, 4*w*h)
-	// Out-of-bounds top-left + over-extending right/bottom: should clip.
-	fillRect(buf, w, h, -5, -5, 20, 20, [3]uint8{9, 9, 9})
-	// Every pixel inside should now be (9,9,9).
-	for y := 0; y < h; y++ {
-		for x := 0; x < w; x++ {
-			if pixelAt(buf, w, x, y) != [3]uint8{9, 9, 9} {
-				t.Fatalf("(%d,%d)=%v", x, y, pixelAt(buf, w, x, y))
-			}
-		}
-	}
-}
-
-func TestDrawGlyph_ClipsOutOfBounds(t *testing.T) {
-	w, h := 4, 4
-	buf := make([]byte, 4*w*h)
-	// Glyph at (-2, -2) scale 2 spills off all four edges -- should not panic.
-	drawGlyph(buf, w, h, -2, -2, 'A', 2, [3]uint8{1, 2, 3})
-	// And again way past the right edge.
-	drawGlyph(buf, w, h, 100, 100, 'A', 2, [3]uint8{1, 2, 3})
-}
-
-func TestSharedvfsBasename(t *testing.T) {
-	cases := []struct {
-		in   string
-		want string
-	}{
+// TestBasename covers the tab-label path helper, both with and without a
+// slash and the empty case.
+func TestBasename(t *testing.T) {
+	cases := []struct{ in, want string }{
 		{"", ""},
 		{"file.txt", "file.txt"},
 		{"/file.txt", "file.txt"},
 		{"/a/b.txt", "b.txt"},
 	}
 	for _, c := range cases {
-		if got := sharedvfsBasename(c.in); got != c.want {
+		if got := basename(c.in); got != c.want {
 			t.Errorf("basename(%q) = %q, want %q", c.in, got, c.want)
 		}
 	}
+}
+
+// TestRender_ShortTabLabel exercises tabStrip.Draw's minimum-width branch:
+// a one-character basename produces a natural tab narrower than the 100 px
+// floor, so the floor clamps it.
+func TestRender_ShortTabLabel(t *testing.T) {
+	w, h := 900, 460
+	v := sharedvfs.NewInMemoryVFS()
+	_ = v.Write("/x", []byte("hi"))
+	s := NewWithVFS(w, h, v)
+	if !s.OpenFile("/x") {
+		t.Fatal("open /x")
+	}
+	buf := make([]byte, 4*w*h)
+	Render(s, buf) // must not panic; tab floor applies
 }

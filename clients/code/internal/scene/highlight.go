@@ -11,8 +11,20 @@
 //
 // Pure Go, no syscall/js -- testable natively on every architecture this
 // repo targets.
+//
+// The tokenizer is the client's own lexer; Highlight adapts its per-line
+// Token stream to the go-widgets/toolkit TextView.Highlighter hook shape
+// (rune-coordinate TextSpans) so the editor renders through the toolkit's
+// TextView widget instead of a hand-drawn loop, while keeping the exact
+// same Dark+ colours.
 
 package scene
+
+import (
+	"unicode/utf8"
+
+	"github.com/go-widgets/toolkit"
+)
 
 // VS Code Dark+ syntactic palette. Exported so render.go + tests can pin
 // the exact RGB triples without re-reading hex strings; the playwright
@@ -145,6 +157,37 @@ func Tokenize(line string) []Token {
 		i = j
 	}
 	return out
+}
+
+// rgb converts a Dark+ palette RGB triple into the toolkit's RGBA (alpha
+// forced opaque). Keeping the palette as [3]uint8 preserves the exact hex
+// triples the playwright probe duplicates while letting widgets consume a
+// toolkit.RGBA.
+func rgb(c [3]uint8) toolkit.RGBA { return toolkit.RGB(c[0], c[1], c[2]) }
+
+// Highlight adapts the per-line Tokenize output to toolkit.TextView's
+// Highlighter signature: it emits one TextSpan per token in rune
+// coordinates, painting keywords / strings / comments / numbers (and the
+// default text) in the SAME Dark+ colours the hand-drawn renderer used, so
+// the migration to TextView is pixel-faithful (e.g. keyword `func` stays
+// #569CD6, the colour the probe samples). lineIndex is unused -- the
+// tokenizer is stateless per line -- but kept to satisfy the hook shape.
+//
+// Every token, including the default #D4D4D4 text runs, becomes a span, so
+// the painted colours never depend on the TextView theme's OnSurface ink.
+func Highlight(_ int, line string) []toolkit.TextSpan {
+	toks := Tokenize(line)
+	spans := make([]toolkit.TextSpan, 0, len(toks))
+	pos := 0
+	for _, tok := range toks {
+		n := utf8.RuneCountInString(tok.Text)
+		if n == 0 {
+			continue // empty-line sentinel token: nothing to paint
+		}
+		spans = append(spans, toolkit.TextSpan{Start: pos, End: pos + n, Color: rgb(tok.Color)})
+		pos += n
+	}
+	return spans
 }
 
 // isIdentStart reports whether c may start an identifier ([A-Za-z_]).

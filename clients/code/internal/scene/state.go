@@ -2,37 +2,50 @@
 // Use of this source code is governed by a BSD-3-Clause license that can be
 // found in the LICENSE file at the root of this repository.
 
-// Package scene's state.go is the VS Code-inspired editor's UI state: a
-// loaded TextBuffer + the current file's path + a flat top-level file tree
-// (rooted at "/") + a transient status flash + a Live Server popup flag.
+// Package scene's state.go is the VS Code-inspired editor's UI state and
+// widget tree. The editing model is a go-widgets/toolkit TextView (a superset
+// of the previous hand-rolled TextBuffer: it ships lines + cursor + insert /
+// split / backspace + undo/redo + selection); the sidebar is a ListBox, the
+// tab band a small tabStrip widget, the status bar a Statusbar, and the Live
+// Server popup a Dialog with an Entry + Button. HandleKey / HandleMouse route
+// input into that tree; Render (render.go) paints it.
+//
 // Pure Go, no syscall/js, so the whole package builds + tests natively on
 // every architecture this repo targets.
 
 package scene
 
-import "github.com/wasmdesk/wasmbox/clients/sharedvfs"
+import (
+	"strconv"
+
+	"github.com/go-widgets/toolkit"
+	"github.com/wasmdesk/wasmbox/clients/sharedvfs"
+)
 
 // FlashKind classifies the kind of status-bar flash to paint. Default is
 // no flash; SaveOK is the green "saved" pulse the Cmd+S handler triggers;
-// Info is the neutral blue flash the Live Server stub uses for its
-// "protocol pending" message.
+// Info is the neutral blue flash the Live Server stub uses.
 type FlashKind int
 
 const (
-	// FlashNone is the default: no flash, status bar paints its idle colours.
+	// FlashNone is the default: no flash, status bar paints its idle blue.
 	FlashNone FlashKind = iota
 	// FlashSaveOK is the green pulse Cmd+S triggers on a successful Write.
 	FlashSaveOK
-	// FlashInfo is the neutral pulse the Live Server stub triggers when the
-	// user clicks Connect on the popup (the protocol is not wired yet).
+	// FlashInfo is the neutral pulse the Live Server stub triggers.
 	FlashInfo
 )
 
 // TickPerFlash is the (notional) number of HandleTick calls a flash lasts.
-// The wasm side doesn't run a real animation timer in v0 -- the flash
-// is cleared when the next interaction triggers a re-render. The constant
-// is exported so a future timer-driven renderer can pin the duration.
+// The wasm side clears the flash on the next interaction; the constant is
+// exported so a future timer-driven renderer can pin the duration.
 const TickPerFlash = 60
+
+// editorFontScale is the integer scale applied to the toolkit bitmap font in
+// this client -- scale 2 gives ~14 px tall glyphs (comfortable editor text)
+// and, together with the sidebar (SidebarWidth) + the TextView's auto gutter,
+// lands the first keyword past the probe's editor-scan origin.
+const editorFontScale = 2
 
 // SceneState is the top-of-package handle the wasm entry point holds. The
 // renderer reads every field; mutation funnels through HandleKey /
@@ -41,52 +54,115 @@ type SceneState struct {
 	W, H int
 	VFS  sharedvfs.VFS
 
-	// Buffer is the editable text store currently shown in the editor pane.
-	// Always non-nil -- the constructor seeds an empty single-line buffer.
-	Buffer *TextBuffer
-
 	// FileTree is the cached top-level (sorted, dirs-first) listing of the
-	// VFS root. Refreshed when the user writes a new file so the sidebar
-	// reflects the latest tree.
+	// VFS root, mirrored into the sidebar ListBox's Items. Refreshed when the
+	// user writes a file so the sidebar reflects the latest tree.
 	FileTree []sharedvfs.Entry
 
 	// CurrentPath is the path of the file shown in the editor pane, or ""
-	// when no file is open (the tab strip then shows "untitled" and saves
-	// are no-ops).
+	// when no file is open (the tab then shows "untitled" and saves no-op).
 	CurrentPath string
 
 	// Flash drives the bottom-status-bar pulse; FlashKind picks the colour.
-	// The flash is consumed by the next non-typing interaction.
 	Flash FlashKind
 
 	// LiveServerPopupOpen reports whether the "Connect to Live Server"
-	// popup is currently shown; the next non-popup click dismisses it.
+	// popup (a Dialog) is currently shown.
 	LiveServerPopupOpen bool
 
-	// LiveServerURL is the buffered "wss://..." URL the user has typed
-	// into the popup. v0 stores it but does not connect; the Connect
-	// button triggers a FlashInfo + closes the popup.
+	// LiveServerURL is the buffered "wss://..." URL shown in the popup's
+	// Entry. v0 stores it but does not connect; Connect flashes + closes.
 	LiveServerURL string
+
+	// Editor is the toolkit TextView holding the editable document. Always
+	// non-nil -- the constructor seeds an empty single-line buffer.
+	Editor *toolkit.TextView
+
+	// Widget tree (built by buildLayout).
+	root    *toolkit.Dock
+	body    *toolkit.HBox
+	sidebar *toolkit.ListBox
+	tabs    *tabStrip
+	status  *toolkit.Statusbar
+
+	// Live Server popup widgets.
+	dialog     *toolkit.Dialog
+	urlEntry   *toolkit.Entry
+	connectBtn *toolkit.Button
+
+	// Per-region themes (see render.go's package doc for why four are needed).
+	sidebarTheme *toolkit.Theme
+	editorTheme  *toolkit.Theme
+	popupTheme   *toolkit.Theme
+
+	// dirty is set by a routed control's callback (sidebar OnActivate, popup
+	// Connect) so HandleMouse can report whether a click changed visible state.
+	dirty bool
 }
 
 // New constructs a SceneState for a width x height pixel surface backed by
-// the demo (in-memory) VFS, with no file open. Used by tests + by the wasm
-// boot path when IndexedDB is unavailable.
+// the demo (in-memory) VFS, with no file open.
 func New(width, height int) *SceneState {
 	return NewWithVFS(width, height, NewDemoVFS())
 }
 
 // NewWithVFS is the explicit constructor: builds a SceneState around the
 // caller-supplied VFS so the wasm boot path can hand in an IDB-backed
-// instance for persistence. Tests reach for New() (which routes through
-// here with the in-memory demo VFS).
+// instance for persistence.
 func NewWithVFS(width, height int, vfs sharedvfs.VFS) *SceneState {
-	s := &SceneState{
-		W:      width,
-		H:      height,
-		VFS:    vfs,
-		Buffer: NewTextBuffer(""),
+	// The whole toolkit lays out + paints against one active font; scale it so
+	// the editor + sidebar type is legible (replaces the old hand-rolled 8x8).
+	toolkit.SetFont(toolkit.NewBitmapFont(editorFontScale))
+
+	s := &SceneState{W: width, H: height, VFS: vfs}
+
+	s.Editor = toolkit.NewTextView("")
+	s.Editor.ShowLineNumbers = true
+	s.Editor.GutterColor = rgb(ColorGutterText)
+	s.Editor.Highlighter = Highlight
+	s.Editor.Focused = true
+
+	s.sidebar = toolkit.NewListBox(nil)
+	s.sidebar.RowHeight = SidebarRowHeight
+	s.sidebar.OnActivate = s.activateSidebar
+
+	s.tabs = &tabStrip{label: s.tabLabel}
+
+	s.status = toolkit.NewStatusbar([]string{"", "", "", ""})
+
+	s.urlEntry = toolkit.NewEntry("")
+	s.urlEntry.Placeholder = "wss://"
+	s.connectBtn = toolkit.NewButton("Connect", func() {
+		s.LiveServerURL = ""
+		s.LiveServerPopupOpen = false
+		s.Flash = FlashInfo
+		s.dirty = true
+	})
+	s.dialog = toolkit.NewDialog("Connect to Live Server", s.urlEntry, s.connectBtn)
+
+	s.sidebarTheme = &toolkit.Theme{
+		Surface:    rgb(ColorSidebarBG),
+		OnSurface:  rgb(ColorSidebarTextDim),
+		Background: rgb(ColorStatusBarText), // selected-row ink (white)
+		Accent:     rgb(ColorSelectionBG),   // selected-row background
+		Border:     rgb(ColorSidebarBG),
 	}
+	s.editorTheme = &toolkit.Theme{
+		Surface:   rgb(ColorWindowBG),
+		OnSurface: rgb(ColorEditorText),
+		Border:    rgb(ColorWindowBG),
+		Accent:    rgb(ColorWindowBG),
+	}
+	s.popupTheme = &toolkit.Theme{
+		Background: rgb(ColorPopupBG),
+		Surface:    rgb(ColorWindowBG),
+		SurfaceAlt: rgb(ColorTabStripBG),
+		OnSurface:  rgb(ColorSidebarTextDim),
+		Border:     rgb(ColorPopupBorder),
+		Accent:     rgb(ColorPopupButton),
+	}
+
+	s.buildLayout()
 	s.refreshTree()
 	return s
 }
@@ -99,41 +175,104 @@ func NewDemoVFS() sharedvfs.VFS {
 	return v
 }
 
-// refreshTree re-lists "/" + caches the entries in FileTree. Called at
-// construction time + after a successful Write so the sidebar always
-// reflects what's on disk.
+// buildLayout assembles the widget tree + lays it out over the surface:
+//
+//	Dock(body) with the Statusbar docked South; body is an HBox of the
+//	fixed-width sidebar + a flex VBox stacking the tab strip over the editor.
+func (s *SceneState) buildLayout() {
+	rightCol := toolkit.NewVBox()
+	rightCol.AddFixed(s.tabs, TabStripHeight)
+	rightCol.AddFlex(s.Editor, 1)
+
+	s.body = toolkit.NewHBox()
+	s.body.AddFixed(s.sidebar, SidebarWidth)
+	s.body.AddFlex(rightCol, 1)
+
+	s.root = toolkit.NewDock(s.body)
+	s.root.Dock(s.status, toolkit.DockBottom, StatusBarHeight)
+	s.root.SetBounds(toolkit.Rect{X: 0, Y: 0, W: s.W, H: s.H})
+}
+
+// layoutDialog centres the Live Server popup within the surface + lays out
+// its content + buttons. Called before drawing or hit-testing the popup.
+func (s *SceneState) layoutDialog() {
+	s.dialog.SetBounds(toolkit.Rect{
+		X: (s.W - DialogW) / 2,
+		Y: (s.H - DialogH) / 2,
+		W: DialogW,
+		H: DialogH,
+	})
+}
+
+// tabLabel is the active tab's text: the open file's basename, or "untitled".
+func (s *SceneState) tabLabel() string {
+	if s.CurrentPath == "" {
+		return "untitled"
+	}
+	return basename(s.CurrentPath)
+}
+
+// refreshTree re-lists "/" + mirrors the entries into FileTree + the sidebar
+// ListBox (folders get a "> " prefix, files two spaces, matching the old
+// flat listing). Called at construction + after a successful Write.
 func (s *SceneState) refreshTree() {
 	entries, err := s.VFS.List("/")
 	if err != nil {
 		s.FileTree = nil
+		s.sidebar.Items = nil
 		return
 	}
 	s.FileTree = entries
+	items := make([]string, len(entries))
+	for i, e := range entries {
+		prefix := "  "
+		if e.IsDir {
+			prefix = "> "
+		}
+		items[i] = prefix + e.Name
+	}
+	s.sidebar.Items = items
 }
 
-// OpenFile loads the file at path into the editor pane. The buffer is
-// replaced, CurrentPath is updated, the cursor jumps to (0, 0), and any
-// open popup / flash is dismissed. Returns true when the load succeeded
-// (a missing file leaves the state unchanged).
+// activateSidebar is the ListBox OnActivate hook: it opens the clicked file,
+// or no-ops on a directory row (setting dirty so HandleMouse can report
+// whether the click changed visible state).
+func (s *SceneState) activateSidebar(idx int) {
+	if idx < 0 || idx >= len(s.FileTree) {
+		s.dirty = false
+		return
+	}
+	e := s.FileTree[idx]
+	if e.IsDir {
+		s.dirty = false
+		return
+	}
+	s.dirty = s.OpenFile("/" + e.Name)
+}
+
+// OpenFile loads the file at path into the editor. The TextView buffer is
+// replaced (cursor parks at 0,0), CurrentPath is updated, and any open popup /
+// flash is dismissed. Returns true when the load succeeded.
 func (s *SceneState) OpenFile(path string) bool {
 	data, err := s.VFS.Read(path)
 	if err != nil {
 		return false
 	}
-	s.Buffer = NewTextBuffer(string(data))
+	s.Editor.SetText(string(data))
+	s.Editor.Focused = true
 	s.CurrentPath = path
 	s.Flash = FlashNone
 	s.LiveServerPopupOpen = false
 	return true
 }
 
-// SaveCurrent writes the current buffer back to CurrentPath. A no-op (returns
-// false) when no file is open; on success it flashes the status bar green.
+// SaveCurrent writes the current editor content back to CurrentPath. A no-op
+// (returns false) when no file is open; on success it flashes green.
 func (s *SceneState) SaveCurrent() bool {
 	if s.CurrentPath == "" {
 		return false
 	}
-	if err := s.VFS.Write(s.CurrentPath, []byte(s.Buffer.String())); err != nil {
+	if err := s.VFS.Write(s.CurrentPath, []byte(s.Editor.Text())); err != nil {
 		return false
 	}
 	s.Flash = FlashSaveOK
@@ -141,107 +280,128 @@ func (s *SceneState) SaveCurrent() bool {
 	return true
 }
 
-// HandleKey routes one DOM-style keydown into the editor. The shape mirrors
-// the files client's HandleKey: returns true when the visible state changed
-// so the caller decides whether to re-render. The compositor reports
-// keydown events as {key: "ArrowDown"|"a"|"Enter"|...} with no explicit
-// modifier state, so Cmd+S / Ctrl+S come through as the bare two-letter
-// keys "s" with no way to disambiguate; the wasm entry point synthesises
-// a "Cmd+S" key when it sees the meta modifier (see main.go).
-func (s *SceneState) HandleKey(key string) bool {
-	switch key {
-	case "ArrowDown":
-		return s.Buffer.MoveCursor(1, 0)
-	case "ArrowUp":
-		return s.Buffer.MoveCursor(-1, 0)
-	case "ArrowRight":
-		return s.Buffer.MoveCursor(0, 1)
-	case "ArrowLeft":
-		return s.Buffer.MoveCursor(0, -1)
-	case "Backspace":
-		return s.Buffer.Delete()
-	case "Enter":
-		s.Buffer.Split()
-		return true
-	case "Tab":
-		s.Buffer.Insert("    ")
-		return true
-	case "Cmd+S", "Ctrl+S":
-		return s.SaveCurrent()
-	default:
-		// Printable single character. The compositor reports printable keys
-		// as their literal character ("a", "A", "1", " "). Anything longer
-		// than 1 byte is a modifier-named key we don't handle yet (Alt,
-		// PageDown, F1, ...).
-		if len(key) == 1 && key[0] >= 0x20 && key[0] < 0x7F {
-			s.Buffer.Insert(key)
-			return true
-		}
-		return false
-	}
+// editorSig captures the editor's buffer + cursor so HandleKey can report
+// whether a key actually changed anything (a non-moving arrow returns false,
+// preserving the old MoveCursor-driven re-render gate).
+func (s *SceneState) editorSig() string {
+	return s.Editor.Text() + "\x00" + strconv.Itoa(s.Editor.CursorLine) + "," + strconv.Itoa(s.Editor.CursorCol)
 }
 
-// HandleMouse routes one mousedown into the editor. (x, y) are surface-local
-// pixel coordinates. Hit-zones (top to bottom):
+// HandleKey routes one DOM-style keydown into the editor. Returns true when
+// the visible state changed so the caller decides whether to re-render. Cmd+S
+// / Ctrl+S are pre-folded by the wasm entry point (see main.go); Tab inserts
+// four spaces; navigation + Backspace + Enter + printable characters are
+// dispatched into the TextView via toolkit Events.
+func (s *SceneState) HandleKey(key string) bool {
+	switch key {
+	case "Cmd+S", "Ctrl+S":
+		return s.SaveCurrent()
+	}
+	before := s.editorSig()
+	switch key {
+	case "ArrowUp", "ArrowDown", "ArrowLeft", "ArrowRight", "Home", "End", "Backspace", "Enter":
+		s.Editor.OnEvent(toolkit.Event{Kind: toolkit.EventKeyDown, Code: key})
+	case "Tab":
+		s.Editor.OnEvent(toolkit.Event{Kind: toolkit.EventChar, Code: "    "})
+	default:
+		// Printable single character; anything longer is a modifier-named key
+		// we don't handle (Alt, PageDown, F1, ...).
+		if len(key) == 1 && key[0] >= 0x20 && key[0] < 0x7F {
+			s.Editor.OnEvent(toolkit.Event{Kind: toolkit.EventChar, Code: key})
+		} else {
+			return false
+		}
+	}
+	return s.editorSig() != before
+}
+
+// HandleMouse routes one mousedown into the widget tree. (x, y) are surface-
+// local pixel coordinates. Hit-zones (checked in priority order):
 //
-//   - Live Server popup (when open) -> click outside dismisses; click on
-//     Connect closes + flashes FlashInfo
-//   - Sidebar file row -> OpenFile on the row's entry
-//   - Status bar "Live Server: Not connected" region -> opens the popup
-//   - Editor pane -> SetCursor on the clicked (line, col)
+//   - Live Server popup (when open): Connect flashes + closes; a click
+//     outside the dialog dismisses; a click inside but not on Connect no-ops.
+//   - Status bar: the right-most Live Server region opens the popup.
+//   - Sidebar: routed into the ListBox, whose OnActivate opens the file row.
+//   - Editor pane: places the caret at the clicked (line, col).
 //
 // Returns true when the visible state changed so the caller re-renders.
 func (s *SceneState) HandleMouse(x, y int) bool {
 	if s.LiveServerPopupOpen {
-		// Connect button is at the right edge of the popup.
-		if inRect(x, y, PopupConnectX, PopupConnectY, PopupConnectW, PopupConnectH) {
-			s.LiveServerURL = ""
-			s.LiveServerPopupOpen = false
-			s.Flash = FlashInfo
-			return true
-		}
-		// Click outside the popup region dismisses without flashing.
-		if !inRect(x, y, PopupX, PopupY, PopupW, PopupH) {
-			s.LiveServerPopupOpen = false
-			return true
-		}
-		// Click inside the popup but not on Connect: no-op (input focus
-		// would land on the URL field; v0 has no soft keyboard plumb).
-		return false
+		return s.handlePopupMouse(x, y)
 	}
-	// Status bar: Live Server segment is the right-most clickable region.
-	if y >= s.H-StatusBarHeight && y < s.H {
+	// Status bar (bottom band). The Live Server segment is the right region.
+	if sb := s.status.Bounds(); y >= sb.Y && y < sb.Y+sb.H {
 		if x >= s.W-LiveServerWidth {
 			s.LiveServerPopupOpen = true
 			return true
 		}
 		return false
 	}
-	// Sidebar.
-	if x >= 0 && x < SidebarWidth && y >= TabStripHeight {
-		row := (y - TabStripHeight) / SidebarRowHeight
-		if row < 0 || row >= len(s.FileTree) {
-			return false
-		}
-		e := s.FileTree[row]
-		if e.IsDir {
-			return false
-		}
-		return s.OpenFile("/" + e.Name)
+	// Sidebar: route the click into the ListBox (its OnActivate sets dirty).
+	if sd := s.sidebar.Bounds(); sd.Contains(x, y) {
+		s.dirty = false
+		s.sidebar.OnEvent(toolkit.Event{Kind: toolkit.EventClick, X: x - sd.X, Y: y - sd.Y})
+		return s.dirty
 	}
-	// Editor pane.
-	if x >= SidebarWidth+GutterWidth && y >= TabStripHeight && y < s.H-StatusBarHeight {
-		// Translate pixel (x, y) into (row, col).
-		row := (y - TabStripHeight) / LineHeight
-		colPx := x - (SidebarWidth + GutterWidth)
-		col := colPx / (FontW * EditorFontScale)
-		s.Buffer.SetCursor(row, col)
+	// Editor: place the caret at the clicked position.
+	if ed := s.Editor.Bounds(); ed.Contains(x, y) {
+		s.placeCursorAt(x, y)
 		return true
 	}
 	return false
 }
 
-// inRect reports whether (x, y) lies inside the rectangle (rx, ry, rw, rh).
-func inRect(x, y, rx, ry, rw, rh int) bool {
-	return x >= rx && x < rx+rw && y >= ry && y < ry+rh
+// handlePopupMouse routes a click while the Live Server popup is open. A
+// click on the Connect button (via the Dialog's own hit-test) flashes +
+// closes; a click outside the dialog dismisses; a click inside but not on a
+// button is a no-op (the URL Entry would take focus).
+func (s *SceneState) handlePopupMouse(x, y int) bool {
+	s.layoutDialog()
+	db := s.dialog.Bounds()
+	if db.Contains(x, y) {
+		s.dirty = false
+		s.dialog.OnEvent(toolkit.Event{Kind: toolkit.EventClick, X: x - db.X, Y: y - db.Y})
+		return s.dirty
+	}
+	s.LiveServerPopupOpen = false
+	return true
+}
+
+// placeCursorAt maps a surface pixel (x, y) inside the editor to a (line,
+// col) and moves the caret there, mirroring the TextView's own paint metrics
+// (gutter width + 4 px text inset, glyphHeight+4 line pitch, one advance per
+// column). Row + col are clamped into the buffer's shape.
+func (s *SceneState) placeCursorAt(x, y int) {
+	r := s.Editor.Bounds()
+	lineH := toolkit.GlyphHeight() + 4
+	adv := toolkit.TextWidth(" ")
+	gutterW := 0
+	if s.Editor.ShowLineNumbers {
+		gutterW = toolkit.TextWidth(strconv.Itoa(len(s.Editor.Lines))) + 8
+	}
+	textX := r.X + 4 + gutterW
+
+	row := 0
+	if lineH > 0 {
+		row = (y - r.Y - 4) / lineH
+	}
+	if row < 0 {
+		row = 0
+	}
+	if row >= len(s.Editor.Lines) {
+		row = len(s.Editor.Lines) - 1
+	}
+	col := 0
+	if adv > 0 {
+		col = (x - textX) / adv
+	}
+	if col < 0 {
+		col = 0
+	}
+	if rl := len([]rune(s.Editor.Lines[row])); col > rl {
+		col = rl
+	}
+	s.Editor.CursorLine = row
+	s.Editor.CursorCol = col
+	s.Editor.Focused = true
 }
