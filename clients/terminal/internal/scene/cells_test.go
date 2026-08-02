@@ -267,10 +267,10 @@ func TestGridCellSizePinned(t *testing.T) {
 		t.Fatalf("resolved cell size = %dx%d, want %dx%d",
 			g.CellWidth(), g.CellHeight(), cellW, cellH)
 	}
-	// The pinned size must NOT track the (smaller) ×2 bitmap-font metrics --
-	// that divergence is the whole reason SetCellSize is used instead of the
-	// font's own advance/height.
-	font := toolkit.NewBitmapFont(terminalScale)
+	// The pinned size must NOT track the (narrower) anti-aliased mono-font
+	// metrics -- that divergence is the whole reason SetCellSize is used instead
+	// of the font's own advance/height.
+	font := termFace()
 	if g.CellWidth() == font.Advance() && g.CellHeight() == font.Height() {
 		t.Fatal("cell size collapsed to raw font metrics; SetCellSize override lost")
 	}
@@ -292,4 +292,64 @@ func scan(buf []byte, w, x0, y0, cw, ch int, c toolkit.RGBA) bool {
 		}
 	}
 	return false
+}
+
+// TestBuildMonoFace_FallbackOnBadBlob drives buildMonoFace's parse-failure
+// branch (never reached with the bundled blob) with garbage bytes: it must
+// still return a usable (bitmap) font, never nil, so the grid degrades to
+// legible bitmap glyphs rather than to blank cells.
+func TestBuildMonoFace_FallbackOnBadBlob(t *testing.T) {
+	if f := buildMonoFace([]byte("not a font"), termFontPx); f == nil {
+		t.Fatal("buildMonoFace returned nil on a bad blob; want bitmap fallback")
+	}
+	if f := termFace(); f == nil || f.Advance() <= 0 {
+		t.Fatalf("termFace() = %v, want a usable monospace face", f)
+	}
+}
+
+// isBlendRGBA reports whether px is a partial-coverage blend of endpoints a and
+// b (an anti-aliasing signature): on every channel where a and b differ, px
+// lies STRICTLY between them, and px equals neither pure endpoint.
+func isBlendRGBA(px, a, b toolkit.RGBA) bool {
+	if px == a || px == b {
+		return false
+	}
+	ch := func(p, x, y uint8) bool {
+		lo, hi := x, y
+		if lo > hi {
+			lo, hi = hi, lo
+		}
+		return lo == hi || (p > lo && p < hi)
+	}
+	return ch(px.R, a.R, b.R) && ch(px.G, a.G, b.G) && ch(px.B, a.B, b.B)
+}
+
+// TestGridAntiAliasedMonospace is the programmatic AA + monospace proof: the
+// active grid face reports a fixed advance (equal-length runs measure equal),
+// and drawing a green 'M' produces edge pixels that are a partial blend of the
+// green ink and the panel background -- impossible with the old 5x7 bitmap.
+func TestGridAntiAliasedMonospace(t *testing.T) {
+	f := termFace()
+	if f.Measure("iiii") != f.Measure("MMMM") {
+		t.Fatalf("non-monospace terminal face: Measure(iiii)=%d != Measure(MMMM)=%d",
+			f.Measure("iiii"), f.Measure("MMMM"))
+	}
+	g := NewGrid(4, 1)
+	g.Print('M') // green ink at cell (0,0); cursor moves to (1,0)
+	g.SetBounds(toolkit.Rect{X: 0, Y: 0, W: 4 * cellW, H: cellH})
+	cw, ch := g.CellWidth(), g.CellHeight()
+	buf := make([]byte, 4*(cw*4)*ch)
+	p := painter.NewPixelPainter(buf, cw*4, ch)
+	g.Draw(p, toolkit.DefaultLight())
+	blended := 0
+	for y := 0; y < ch; y++ {
+		for x := 0; x < cw; x++ { // cell (0,0) holds the 'M'
+			if isBlendRGBA(pix(buf, cw*4, x, y), panelBG, inkGreen) {
+				blended++
+			}
+		}
+	}
+	if blended < 1 {
+		t.Fatal("no anti-aliased blend pixels in the 'M' glyph; not AA?")
+	}
 }

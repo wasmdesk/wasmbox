@@ -4,6 +4,7 @@ go 1.26.4
 
 require (
 	github.com/go-embedded-ruby/ruby v0.0.0-20260802231913-a49a82611185
+	github.com/go-opentype/fonts v0.4.2
 	github.com/go-ruby-parser/parser v0.1.2
 	github.com/go-widgets/painter v0.1.3
 	github.com/go-widgets/toolkit v0.77.0
@@ -89,7 +90,6 @@ require (
 	github.com/go-logr/stdr v1.2.2 // indirect
 	github.com/go-ndarray/ndarray v0.0.0-20260620170009-555bfc31e7a3 // indirect
 	github.com/go-opentype/bidi v0.2.0 // indirect
-	github.com/go-opentype/fonts v0.4.1 // indirect
 	github.com/go-opentype/opentype v0.5.0 // indirect
 	github.com/go-opentype/shape v0.3.3 // indirect
 	github.com/go-pcore/pcore v0.0.0-20260708052910-1416bf219e47 // indirect

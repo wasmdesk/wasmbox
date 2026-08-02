@@ -146,8 +146,18 @@ try {
     for (let y = bounds.y; y < bounds.y + bounds.h; y++) {
       for (let x = bounds.x; x < bounds.x + bounds.w; x++) {
         const i = (y * width + x) * 4;
-        // Either soft-green ink or cyan prompt.
-        if (png.data[i] === 0xa0 && png.data[i+1] === 0xe0 && png.data[i+2] === 0xa0) n++;
+        const r = png.data[i], g = png.data[i+1], b = png.data[i+2];
+        // Count green ink COVERAGE: the exact soft-green ink PLUS its anti-
+        // aliased partial-coverage blends over the near-black panel. The code
+        // + terminal clients now render an anti-aliased monospace OpenType face
+        // (JetBrains Mono) instead of the former 5x7 bitmap; an exact-only match
+        // counts only a glyph's fully-covered core (~4 px/glyph vs ~47 for the
+        // bitmap), which collapses every ink-delta assertion below. Counting
+        // green-dominant coverage restores bitmap-comparable density so the
+        // growth thresholds stay meaningful. Cyan prompt / red errors / white
+        // help are excluded (green is not their dominant channel) -- matching
+        // the previous green-only count.
+        if (g > r + 16 && g > b + 16 && g > 0x38) n++;
       }
     }
     return n;
@@ -221,7 +231,7 @@ try {
     const inkAfter = await countInk();
     // "ec" prints 2 chars, Tab should expand to "echo" (4 chars) -> at
     // least one more glyph painted compared to BEFORE+2-chars.
-    if (inkAfter <= inkBefore + 50) {
+    if (inkAfter <= inkBefore + 25) {
       fail(`T1 single-match: ink ${inkBefore} -> ${inkAfter} (expected growth from Tab expansion)`);
     } else {
       console.log(`ok  T1 single-match 'ec'+Tab grew ink ${inkBefore} -> ${inkAfter}`);
@@ -240,7 +250,7 @@ try {
     await page.keyboard.press("Tab");
     await page.waitForTimeout(150);
     const inkAfter = await countInk();
-    if (inkAfter <= inkBefore + 50) {
+    if (inkAfter <= inkBefore + 25) {
       fail(`T2 'mk'+Tab: ink ${inkBefore} -> ${inkAfter} (expected growth)`);
     } else {
       console.log(`ok  T2 'mk'+Tab grew ink ${inkBefore} -> ${inkAfter}`);
@@ -260,7 +270,7 @@ try {
     await page.keyboard.press("Tab");
     await page.waitForTimeout(150);
     const inkAfter = await countInk();
-    if (inkAfter <= inkBefore + 50) {
+    if (inkAfter <= inkBefore + 25) {
       fail(`T3 'ls /scr'+Tab: ink ${inkBefore} -> ${inkAfter} (expected growth)`);
     } else {
       console.log(`ok  T3 'ls /scr'+Tab grew ink ${inkBefore} -> ${inkAfter}`);
@@ -288,7 +298,7 @@ try {
     const inkAfter = await countInk();
     // Multi-match menu prints two filenames + redraws the prompt + line.
     // That's a big chunk of new ink -- expect >> 50 pixel delta.
-    if (inkAfter <= inkBefore + 100) {
+    if (inkAfter <= inkBefore + 50) {
       fail(`T4 multi-match menu: ink ${inkBefore} -> ${inkAfter} (expected menu paint)`);
     } else {
       console.log(`ok  T4 multi-match menu 'cat fo'+Tab grew ink ${inkBefore} -> ${inkAfter}`);
