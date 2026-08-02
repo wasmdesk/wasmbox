@@ -4,6 +4,7 @@ go 1.26.4
 
 require (
 	github.com/go-embedded-ruby/ruby v0.0.0-20260802114511-bf858f337d2c
+	github.com/go-ruby-parser/parser v0.1.2
 	github.com/go-widgets/painter v0.1.3
 	github.com/go-widgets/toolkit v0.74.0
 	github.com/wasmdesk/coreutils v0.0.0-20260629060422-c37bd87ae249
@@ -207,7 +208,6 @@ require (
 	github.com/go-ruby-pagy/pagy v0.0.0-20260707193354-a84fe1d16a86 // indirect
 	github.com/go-ruby-paper-trail/paper-trail v0.0.0-20260707193452-4e10f2b4d0b3 // indirect
 	github.com/go-ruby-parquet/parquet v0.0.0-20260704170648-c7f0507946f7 // indirect
-	github.com/go-ruby-parser/parser v0.1.2 // indirect
 	github.com/go-ruby-pathname/pathname v0.0.0-20260629151955-d8d2c4e5f81b // indirect
 	github.com/go-ruby-pg/pg v0.0.0-20260702135906-e5650264cc5d // indirect
 	github.com/go-ruby-prawn/prawn v0.0.0-20260728194101-a5f2d786bf88 // indirect

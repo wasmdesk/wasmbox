@@ -70,6 +70,11 @@ class WindowManager
     # content pane of Switch / Scale rows. Exercises those toolkit controls
     # in a System-Settings-style layout.
     "settings"   => "clients/settings/worker.js",
+    # Tip Calculator authored ENTIRELY in Ruby: the client's wasm is a thin
+    # go-embedded-ruby host shell and the whole UI + logic run through
+    # `require "widgets"` (the go-ruby-widgets binding). Proves the Ruby-widgets
+    # path as a real app, alongside the Go-toolkit clients above.
+    "rubytk"     => "clients/rubytk/worker.js",
     # WhiteSur/Safari-styled web browser shell: a toolbar + address bar over a
     # Favourites start page. The wasmbox page is COEP:require-corp, so it can't
     # embed live cross-origin sites; tiles open local placeholder pages.

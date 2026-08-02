@@ -115,6 +115,7 @@ module RootMenu
     "notepad"    => "Notepad",
     "settings"   => "Settings",
     "browser"    => "Browser",
+    "rubytk"     => "Tip Calculator (Ruby)",
   }.freeze
 
   # IDs the root menu intentionally OMITS from the Applications submenu. The

@@ -200,6 +200,10 @@ jobs:
         working-directory: test
         run: node probe-files.mjs
 
+      - name: Run headless Ruby require "widgets" client probe (rubytk boots + renders + click changes state)
+        working-directory: test
+        run: node probe-rubytk.mjs
+
       - name: Run headless client loading-progress probe
         working-directory: test
         run: node probe-loading-progress.mjs

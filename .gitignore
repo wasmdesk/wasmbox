@@ -16,6 +16,7 @@
 /clients/settings/settings.wasm
 /clients/browser/browser.wasm
 /clients/notepad/notepad.wasm
+/clients/rubytk/rubytk.wasm
 /bin/
 # Stray binaries from `go build` in the cmd/serve dir (Taskfile uses
 # bin/wasmbox-serve; this catches accidental top-level builds).
