@@ -12,11 +12,18 @@
 // and the shell logic remain client-side.
 //
 // The fixed 16×16 cell geometry is pinned via TerminalView.SetCellSize (see
-// NewGrid); the ×2 bitmap font that rasterises the glyphs is attached with
-// SetFont. Earlier this needed a bespoke `cellFont` metrics shim to report a
-// padded 16×16 advance/height while delegating glyph drawing to the inner
-// font -- SetCellSize is the toolkit's own escape hatch for that exact need,
-// so the shim is gone and the geometry is now declared directly.
+// NewGrid); the anti-aliased monospace face that rasterises the glyphs is
+// attached with SetFont. Earlier this needed a bespoke `cellFont` metrics shim
+// to report a padded 16×16 advance/height while delegating glyph drawing to the
+// inner font -- SetCellSize is the toolkit's own escape hatch for that exact
+// need, so the shim is gone and the geometry is now declared directly.
+//
+// The glyph face is JetBrains Mono (bundled by github.com/go-opentype/fonts)
+// rendered anti-aliased at termFontPx, replacing the old ×2 5×7 bitmap. A
+// monospace face is mandatory: the fixed 16×16 cell is a grid, so a
+// proportional face would misalign columns. The face's own advance is
+// irrelevant here -- SetCellSize pins every column to 16px regardless -- but a
+// monospace face keeps each glyph's ink centred consistently within its cell.
 //
 // Colour model: the scene talks in palette indices (0 = green ink, 1 = cyan
 // prompt, 2 = red error, 3 = white help), which map here to explicit RGBA pen
@@ -27,13 +34,45 @@
 package scene
 
 import (
+	"sync"
+
+	"github.com/go-opentype/fonts/jetbrainsmono"
 	"github.com/go-widgets/toolkit"
 )
 
-// terminalScale upscales the toolkit's built-in 5×7 bitmap font so the glyphs
-// read well at modern DPIs -- the same intent the previous 8×8-upscaled-by-2
-// rasteriser had. Scale 2 yields 12×14 pixel glyphs.
-const terminalScale = 2
+// termFontPx is the pixel size the anti-aliased JetBrains Mono face is rendered
+// at. 12px yields a 16px line height -- exactly the fixed cell height -- so a
+// glyph (and its descenders) fits within one cell without bleeding into the row
+// below, while the cell WIDTH stays pinned at cellW by SetCellSize regardless of
+// the face's own (narrower) advance.
+const termFontPx = 12
+
+// termFace lazily builds + caches the anti-aliased JetBrains Mono face once per
+// process. NewTrueTypeFont's error is documented as never returned for a
+// well-formed bundled blob; on the impossible parse-failure path we fall back
+// to the still-legible ×2 bitmap so the grid degrades to bitmap glyphs, never
+// to blank cells.
+var (
+	termFaceOnce sync.Once
+	termFaceInst toolkit.Font
+)
+
+func termFace() toolkit.Font {
+	termFaceOnce.Do(func() { termFaceInst = buildMonoFace(jetbrainsmono.TTF, termFontPx) })
+	return termFaceInst
+}
+
+// buildMonoFace parses ttf into an anti-aliased face at px, falling back to the
+// ×2 bitmap when the blob cannot be parsed. Split from termFace so the
+// (never-reached-in-production) parse-failure branch is unit-testable with a
+// deliberately malformed blob.
+func buildMonoFace(ttf []byte, px int) toolkit.Font {
+	f, err := toolkit.NewTrueTypeFont(ttf, px)
+	if err != nil {
+		return toolkit.NewBitmapFont(2)
+	}
+	return f
+}
 
 // cellW / cellH are the fixed terminal cell size in pixels. They match the
 // previous renderer's 16×16 cells exactly so the grid keeps the SAME on-screen
@@ -90,9 +129,10 @@ type Grid struct {
 // not a recoverable state.
 func NewGrid(cols, rows int) *Grid {
 	tv := toolkit.NewTerminalView(cols, rows)
-	tv.SetFont(toolkit.NewBitmapFont(terminalScale))
+	tv.SetFont(termFace())
 	// Pin the fixed 16×16 cell box via the toolkit's own override rather than a
-	// metrics-only font shim; the ×2 bitmap glyph (12×14) still draws top-left.
+	// metrics-only font shim; the anti-aliased mono glyph still draws top-left
+	// within each pinned cell.
 	tv.SetCellSize(cellW, cellH)
 	tv.DefaultFG = inkGreen
 	tv.DefaultBG = panelBG

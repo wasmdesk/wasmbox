@@ -144,7 +144,13 @@ try {
     for (let y = bounds.y; y < bounds.y + bounds.h; y++) {
       for (let x = bounds.x; x < bounds.x + bounds.w; x++) {
         const i = (y * width + x) * 4;
-        if (png2.data[i] === 0xa0 && png2.data[i+1] === 0xe0 && png2.data[i+2] === 0xa0) ink++;
+        const r = png2.data[i], g = png2.data[i+1], b = png2.data[i+2];
+        // Green ink COVERAGE (exact ink + anti-aliased blends over the panel):
+        // the terminal now renders an anti-aliased monospace OpenType face whose
+        // glyph cores are tiny, so an exact-only match under-counts ~10x and
+        // sinks the session-output floor below. Green-dominant coverage restores
+        // bitmap-comparable density. Cyan/red/white excluded.
+        if (g > r + 16 && g > b + 16 && g > 0x38) ink++;
       }
     }
     console.log(`info terminal ink pixel count: ${ink}`);

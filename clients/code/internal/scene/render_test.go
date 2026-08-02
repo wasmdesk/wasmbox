@@ -222,3 +222,59 @@ func TestRender_ShortTabLabel(t *testing.T) {
 	buf := make([]byte, 4*w*h)
 	Render(s, buf) // must not panic; tab floor applies
 }
+
+// isBlend reports whether px is a partial-coverage blend of endpoints a and b
+// (an anti-aliasing signature): on every channel where a and b differ, px lies
+// STRICTLY between them, and px equals neither pure endpoint. A bitmap font
+// paints only the two pure colours, so a positive result proves AA glyphs.
+func isBlend(px, a, b [3]uint8) bool {
+	if px == a || px == b {
+		return false
+	}
+	for i := 0; i < 3; i++ {
+		lo, hi := a[i], b[i]
+		if lo > hi {
+			lo, hi = hi, lo
+		}
+		if lo != hi && (px[i] <= lo || px[i] >= hi) {
+			return false
+		}
+	}
+	return true
+}
+
+// TestRender_AntiAliasedMonospace is the programmatic AA + monospace proof the
+// task requires: (1) the active editor face reports a FIXED advance -- equal-
+// length runs measure equal regardless of glyph, and exactly len*advance -- so
+// columns/caret stay aligned; and (2) rendering the keyword "func" produces
+// edge pixels that are a partial blend of keyword-blue ink and the window BG,
+// which a 5x7 bitmap font (two pure colours only) could never emit.
+func TestRender_AntiAliasedMonospace(t *testing.T) {
+	f := editorFace()
+	adv := f.Advance()
+	if adv <= 0 {
+		t.Fatalf("advance = %d, want > 0", adv)
+	}
+	if got, want := f.Measure("iiii"), f.Measure("MMMM"); got != want {
+		t.Fatalf("non-monospace face: Measure(iiii)=%d != Measure(MMMM)=%d", got, want)
+	}
+	if got := f.Measure("MMMM"); got != 4*adv {
+		t.Fatalf("Measure(MMMM)=%d, want 4*advance=%d (fixed advance)", got, 4*adv)
+	}
+	w, h := 900, 460
+	s := newSeededState(t, w, h)
+	s.Editor.SetText("func")
+	buf := make([]byte, 4*w*h)
+	Render(s, buf)
+	blended := 0
+	for y := TabStripHeight; y < h-StatusBarHeight; y++ {
+		for x := SidebarWidth; x < w; x++ {
+			if isBlend(pixelAt(buf, w, x, y), ColorWindowBG, ColorKeyword) {
+				blended++
+			}
+		}
+	}
+	if blended < 1 {
+		t.Fatal("no anti-aliased blend pixels between keyword-blue and BG; glyphs not AA?")
+	}
+}

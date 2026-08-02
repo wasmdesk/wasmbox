@@ -128,7 +128,14 @@ try {
     for (let y = bounds.y; y < bounds.y + bounds.h; y++) {
       for (let x = bounds.x; x < bounds.x + bounds.w; x++) {
         const i = (y * width + x) * 4;
-        if (png.data[i] === 0xa0 && png.data[i+1] === 0xe0 && png.data[i+2] === 0xa0) n++;
+        const r = png.data[i], g = png.data[i+1], b = png.data[i+2];
+        // Green ink COVERAGE (exact ink + anti-aliased partial-coverage blends
+        // over the panel). The terminal now renders an anti-aliased monospace
+        // OpenType face whose glyph cores are tiny; an exact-only match counts
+        // ~4 px/glyph vs ~47 for the former bitmap, shrinking the recall/pop
+        // ink deltas below the thresholds. Green-dominant coverage restores
+        // bitmap-comparable density. Cyan prompt is excluded (as before).
+        if (g > r + 16 && g > b + 16 && g > 0x38) n++;
       }
     }
     return n;

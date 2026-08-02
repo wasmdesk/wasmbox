@@ -17,7 +17,9 @@ package scene
 
 import (
 	"strconv"
+	"sync"
 
+	"github.com/go-opentype/fonts/jetbrainsmono"
 	"github.com/go-widgets/toolkit"
 	"github.com/wasmdesk/wasmbox/clients/sharedvfs"
 )
@@ -41,11 +43,42 @@ const (
 // exported so a future timer-driven renderer can pin the duration.
 const TickPerFlash = 60
 
-// editorFontScale is the integer scale applied to the toolkit bitmap font in
-// this client -- scale 2 gives ~14 px tall glyphs (comfortable editor text)
-// and, together with the sidebar (SidebarWidth) + the TextView's auto gutter,
-// lands the first keyword past the probe's editor-scan origin.
-const editorFontScale = 2
+// editorFontPx is the pixel size of the anti-aliased monospace face the editor
+// renders. JetBrains Mono at 20px has a fixed 12px advance -- byte-identical to
+// the previous ×2 bitmap font's advance -- so every glyph column lands exactly
+// where it did before (the TextView caret + placeCursorAt hit-test + the
+// syntax-highlight probe are all advance-driven), while the glyphs are now
+// crisp anti-aliased vectors instead of the compiled-in 5×7 bitmap. A
+// monospace face is mandatory: the proportional AA default (Atkinson, via
+// toolkit.UseOpenTypeText) would break the editor's column/caret alignment.
+const editorFontPx = 20
+
+// editorFace lazily builds + caches the anti-aliased JetBrains Mono face once
+// per process. NewTrueTypeFont's error is documented as never returned for a
+// well-formed bundled blob; on the impossible parse-failure path we fall back
+// to the still-legible ×2 bitmap so the editor degrades to bitmap text, never
+// to no text at all.
+var (
+	editorFaceOnce sync.Once
+	editorFaceInst toolkit.Font
+)
+
+func editorFace() toolkit.Font {
+	editorFaceOnce.Do(func() { editorFaceInst = buildMonoFace(jetbrainsmono.TTF, editorFontPx) })
+	return editorFaceInst
+}
+
+// buildMonoFace parses ttf into an anti-aliased face at px, falling back to the
+// ×2 bitmap when the blob cannot be parsed. Split from editorFace so the
+// (never-reached-in-production) parse-failure branch is unit-testable with a
+// deliberately malformed blob.
+func buildMonoFace(ttf []byte, px int) toolkit.Font {
+	f, err := toolkit.NewTrueTypeFont(ttf, px)
+	if err != nil {
+		return toolkit.NewBitmapFont(2)
+	}
+	return f
+}
 
 // SceneState is the top-of-package handle the wasm entry point holds. The
 // renderer reads every field; mutation funnels through HandleKey /
@@ -110,13 +143,18 @@ func New(width, height int) *SceneState {
 // caller-supplied VFS so the wasm boot path can hand in an IDB-backed
 // instance for persistence.
 func NewWithVFS(width, height int, vfs sharedvfs.VFS) *SceneState {
-	// The whole toolkit lays out + paints against one active font; scale it so
-	// the editor + sidebar type is legible (replaces the old hand-rolled 8x8).
-	toolkit.SetFont(toolkit.NewBitmapFont(editorFontScale))
+	// The whole toolkit lays out + paints the chrome (tab label, gutter, status
+	// bar) against one active font, and placeCursorAt's click-to-caret math
+	// reads the SAME global metrics the TextView paints with -- so the mono face
+	// is installed BOTH process-globally (chrome + hit-test) and on the editor
+	// widget itself, pointing at one shared instance so both stay in lockstep.
+	mono := editorFace()
+	toolkit.SetFont(mono)
 
 	s := &SceneState{W: width, H: height, VFS: vfs}
 
 	s.Editor = toolkit.NewTextView("")
+	s.Editor.SetFont(mono)
 	s.Editor.ShowLineNumbers = true
 	s.Editor.GutterColor = rgb(ColorGutterText)
 	s.Editor.Highlighter = Highlight
