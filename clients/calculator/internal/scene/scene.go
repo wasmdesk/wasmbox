@@ -7,22 +7,48 @@
 // production layout, and that click handling flows through a chain of
 // (button → scene handler → display update).
 //
-// Layout is built from the toolkit's Sencha container model (VBox for the
+// Layout is built from the toolkit's box-layout container model (VBox for the
 // scene column + a toolkit.Grid for the keys) rather than hand-computed
 // toolkit.Rect placement: the display is a fixed-height row at the top and the
 // button grid fills the rest, each button an Attach'd cell of a fixed-track
 // Grid. A single root.SetBounds lays the whole tree out, root.Draw paints it,
 // and root.OnEvent routes clicks into child-local space — no per-widget rect
 // arithmetic and no manual hit-testing.
+//
+// Text is anti-aliased, shaped OpenType (toolkit.UseOpenTypeText, shipped in
+// toolkit v0.77.0): Calculator is the pilot client for the toolkit's bundled
+// Atkinson Hyperlegible face at DefaultOpenTypeSizePx (16px). The switch is a
+// single process-global opt-in, made once from New via aaOnce, so the running
+// wasm client and the native scene tests both render (and assert) against the
+// vector face. Every other wasmbox client stays on the compiled-in 5x7 bitmap
+// default, since they never call UseOpenTypeText. The fixed Grid/VBox tracks
+// (colW/rowH/displayH) are font-independent, so widget rects are unchanged; only
+// the glyph pixels differ — the taller 20px AA face is auto-centred in each
+// cell by Button/Entry (r.H-glyphHeight())/2 vertical placement.
 
 package scene
 
 import (
 	"strconv"
+	"sync"
 
 	"github.com/go-widgets/painter"
 	"github.com/go-widgets/toolkit"
 )
+
+// aaOnce flips the toolkit's active font to anti-aliased, shaped OpenType text
+// exactly once for this client process. It is deliberately package-scoped (not
+// per-State) because SetFont is a process-global: re-parsing the bundled face
+// on every New would be wasteful, and a single opt-in matches the toolkit's
+// "flip it once at start-up" contract.
+var aaOnce sync.Once
+
+// enableAAText installs the toolkit's bundled AA/shaped face. The bundled face
+// never fails to parse (the error is documented as never-returned), and on the
+// impossible error path the toolkit leaves the still-working bitmap default
+// active — so a swallowed error degrades to legible bitmap text, never to no
+// text. Split out so its single call site in New stays a one-liner.
+func enableAAText() { aaOnce.Do(func() { _ = toolkit.UseOpenTypeText() }) }
 
 // State bundles every widget + the calculator's arithmetic model.
 type State struct {
@@ -88,6 +114,7 @@ var keys = [5][4]string{
 // column (which reaches the surface edge, wider than the inset display) fully
 // hit-testable.
 func New(w, h int) *State {
+	enableAAText() // Calculator pilots the toolkit's AA/shaped OpenType face.
 	s := &State{W: w, H: h, theme: toolkit.WhiteSurLight()}
 
 	// Display row: the Entry at its historical width (w-2*sideMargin) plus a
