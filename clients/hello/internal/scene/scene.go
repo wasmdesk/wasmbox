@@ -6,25 +6,18 @@
 // client cycles on mousedown. With the default palette the surface fades from
 // dark blue (top-left) to magenta (bottom-right); subsequent palettes shift
 // the hue so the visual change after a click is unambiguous.
+//
+// Like clients/calculator, the scene is a small toolkit widget tree: a single
+// custom leaf widget (gradientWidget) that IS the tree — there's no
+// container, since the whole surface is one paintable. New builds it once,
+// Render walks it via a painter.PixelPainter, and HandleMouse routes clicks
+// into it through Widget.OnEvent, exactly like calculator's root.OnEvent.
 package scene
 
-// State is the mutable bit of the scene: just the current palette pick. A
-// caller constructs one with New(w, h) and pokes it via NextPalette.
-type State struct {
-	W, H    int
-	Palette int
-}
-
-// New makes a State for a surface of width × height pixels with the first
-// palette selected.
-func New(width, height int) *State {
-	return &State{W: width, H: height, Palette: 0}
-}
-
-// NextPalette advances to the next palette, wrapping at the end.
-func (s *State) NextPalette() {
-	s.Palette = (s.Palette + 1) % len(palettes)
-}
+import (
+	"github.com/go-widgets/painter"
+	"github.com/go-widgets/toolkit"
+)
 
 // palettes is a list of RGB tints applied to the underlying gradient. Each
 // tint is a per-channel multiplier in fixed-point (0..255 = 0.0..1.0). The
@@ -37,31 +30,60 @@ var palettes = [][3]uint8{
 	{0xFF, 0xFF, 0xFF}, // neutral white
 }
 
-// Render fills buf (a 4*W*H byte slice, RGBA32 row-major) with the scene at
-// the current palette. The function does not allocate; buf must be exactly
-// the right size or Render panics (size mismatch in the caller is a bug).
-func Render(s *State, buf []byte) {
-	need := 4 * s.W * s.H
-	if len(buf) != need {
-		panic("scene: buffer size mismatch")
-	}
-	tr, tg, tb := palettes[s.Palette][0], palettes[s.Palette][1], palettes[s.Palette][2]
-	for y := 0; y < s.H; y++ {
+// gradientWidget is the scene's single leaf: it embeds toolkit.Base (for the
+// stock Bounds/SetBounds/HitTest) and implements Draw + OnEvent itself. Draw
+// paints the palette-tinted diagonal gradient; OnEvent advances the palette
+// on any click, matching the original hand-drawn client's "any mousedown
+// cycles the palette" behaviour (no hit-testing beyond "was this a click").
+type gradientWidget struct {
+	toolkit.Base
+	palette int
+}
+
+// newGradientWidget builds a gradientWidget sized w×h, positioned at the
+// surface origin (it IS the whole surface — the scene's root).
+func newGradientWidget(w, h int) *gradientWidget {
+	g := &gradientWidget{}
+	g.SetBounds(toolkit.Rect{X: 0, Y: 0, W: w, H: h})
+	return g
+}
+
+// nextPalette advances to the next palette, wrapping at the end.
+func (g *gradientWidget) nextPalette() {
+	g.palette = (g.palette + 1) % len(palettes)
+}
+
+// Draw paints the diagonal RGB gradient tinted by the current palette,
+// pixel by pixel, through the Painter interface (PutPixel with A=0xFF
+// overwrites verbatim — byte-identical to the previous direct buffer
+// writes). theme is accepted to satisfy toolkit.Widget but unused: the
+// gradient owns 100% of its colour, there's nothing to theme.
+func (g *gradientWidget) Draw(p painter.Painter, theme *toolkit.Theme) {
+	_ = theme
+	r := g.Bounds()
+	tr, tg, tb := palettes[g.palette][0], palettes[g.palette][1], palettes[g.palette][2]
+	for y := 0; y < r.H; y++ {
 		// 0..255 across height.
-		gy := uint32(y*255) / uint32(max(s.H-1, 1))
-		for x := 0; x < s.W; x++ {
-			gx := uint32(x*255) / uint32(max(s.W-1, 1))
+		gy := uint32(y*255) / uint32(max(r.H-1, 1))
+		for x := 0; x < r.W; x++ {
+			gx := uint32(x*255) / uint32(max(r.W-1, 1))
 			// Base gradient: R rises with x, B rises with y, G is their average.
-			r := uint8((gx * uint32(tr)) / 255)
-			g := uint8((((gx + gy) / 2) * uint32(tg)) / 255)
-			b := uint8((gy * uint32(tb)) / 255)
-			off := (y*s.W + x) * 4
-			buf[off] = r
-			buf[off+1] = g
-			buf[off+2] = b
-			buf[off+3] = 0xFF
+			rr := uint8((gx * uint32(tr)) / 255)
+			gg := uint8((((gx + gy) / 2) * uint32(tg)) / 255)
+			bb := uint8((gy * uint32(tb)) / 255)
+			p.PutPixel(r.X+x, r.Y+y, toolkit.RGBA{R: rr, G: gg, B: bb, A: 0xFF})
 		}
 	}
+}
+
+// OnEvent advances the palette on any EventClick — the widget covers the
+// whole surface and (like the original hand-drawn client) doesn't care
+// where within it the click landed.
+func (g *gradientWidget) OnEvent(ev toolkit.Event) {
+	if ev.Kind != toolkit.EventClick {
+		return
+	}
+	g.nextPalette()
 }
 
 // max returns the larger of a, b. (Go 1.21+ has builtin max — kept here for
@@ -71,6 +93,68 @@ func max(a, b int) int {
 		return a
 	}
 	return b
+}
+
+// State is the scene's outer handle: surface size + the widget tree (here
+// just the one gradientWidget, playing the "root" role clients/calculator's
+// VBox plays).
+type State struct {
+	W, H int
+
+	theme *toolkit.Theme
+	root  *gradientWidget
+}
+
+// New makes a State for a surface of width × height pixels with the first
+// palette selected.
+func New(width, height int) *State {
+	return &State{
+		W:     width,
+		H:     height,
+		theme: toolkit.WhiteSurLight(),
+		root:  newGradientWidget(width, height),
+	}
+}
+
+// NextPalette advances to the next palette, wrapping at the end. Exposed on
+// State (delegating to the root widget) so callers/tests can force a
+// palette change without going through a synthetic click.
+func (s *State) NextPalette() {
+	s.root.nextPalette()
+}
+
+// Palette reports the root widget's current palette index.
+func (s *State) Palette() int {
+	return s.root.palette
+}
+
+// PaletteCount returns how many palettes the hello client cycles through.
+// Exported for tests so they can assert that NextPalette wraps correctly.
+func PaletteCount() int { return len(palettes) }
+
+// Render fills buf (a 4*W*H byte slice, RGBA32 row-major) with the scene at
+// the current palette: a painter.PixelPainter over buf, then root.Draw. The
+// function does not allocate beyond the painter's own zero-alloc primitives;
+// buf must be exactly the right size or Render panics (size mismatch in the
+// caller is a bug).
+func Render(s *State, buf []byte) {
+	need := 4 * s.W * s.H
+	if len(buf) != need {
+		panic("scene: buffer size mismatch")
+	}
+	p := painter.NewPixelPainter(buf, s.W, s.H)
+	s.root.Draw(p, s.theme)
+}
+
+// HandleMouse routes a click at surface coordinates (x, y) through the root
+// widget (translated into root-local space, exactly like calculator's
+// HandleMouse). Returns true when the click advanced the palette, so the
+// caller knows to re-render.
+func (s *State) HandleMouse(x, y int) bool {
+	before := s.root.palette
+	rb := s.root.Bounds()
+	s.root.OnEvent(toolkit.Event{Kind: toolkit.EventClick, X: x - rb.X, Y: y - rb.Y})
+	return s.root.palette != before
 }
 
 // AveragePixel computes the mean (R, G, B) of buf, used by tests to assert
@@ -90,7 +174,3 @@ func AveragePixel(buf []byte) (r, g, b uint8) {
 	}
 	return uint8(sr / n), uint8(sg / n), uint8(sb / n)
 }
-
-// PaletteCount returns how many palettes the hello client cycles through.
-// Exported for tests so they can assert that NextPalette wraps correctly.
-func PaletteCount() int { return len(palettes) }

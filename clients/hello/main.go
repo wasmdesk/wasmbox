@@ -63,10 +63,10 @@ func main() {
 			return nil
 		}
 		ev := args[0]
-		kind := ev.Get("kind").String()
-		if kind == "mousedown" {
-			state.NextPalette()
-			render()
+		if ev.Get("kind").String() == "mousedown" {
+			if state.HandleMouse(ev.Get("x").Int(), ev.Get("y").Int()) {
+				render()
+			}
 		}
 		return nil
 	})
