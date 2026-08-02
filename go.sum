@@ -616,8 +616,8 @@ github.com/go-widgets/mvvm v0.3.0 h1:rVU/phb6nKF+deCDHSuKGFp75+PcXZHtrIFT4ghjf/A
 github.com/go-widgets/mvvm v0.3.0/go.mod h1:H2J6jSNOVj3f9JHlxwAPOE6pFniT5CeOEc8vEUqGU54=
 github.com/go-widgets/painter v0.1.3 h1:50oeDH76vMUlxQ8117wMFf5MGuAJlq5n2JeVS+QlpnM=
 github.com/go-widgets/painter v0.1.3/go.mod h1:ccmlkH2UmcXQh6rt9Fu2eDt2RI0B5V0POaGmUKeW0EQ=
-github.com/go-widgets/toolkit v0.74.0 h1:QhDhIlM23SQ4LXwgb7g2UaHl97PfV9xVFhnY4E4Twco=
-github.com/go-widgets/toolkit v0.74.0/go.mod h1:AZJWQh4rQrFqwEuPjluV9eGnLqA+XnfrxCcvTs5C+LU=
+github.com/go-widgets/toolkit v0.77.0 h1:qCsr7NvPcOjmFHdeYSFiPrrbbgAcngchpec4XaalXqU=
+github.com/go-widgets/toolkit v0.77.0/go.mod h1:AZJWQh4rQrFqwEuPjluV9eGnLqA+XnfrxCcvTs5C+LU=
 github.com/go-widgets/tui v0.55.0 h1:R0m2F7Q0rtXKSBEjto5g6LhUuxHwRaZcmkJqXQGwtOg=
 github.com/go-widgets/tui v0.55.0/go.mod h1:MYOZ9tm5hFNhdXLSydplZis5wArEmuXnYh3e9nKIHKw=
 github.com/go-zookeeper/zk v1.0.4 h1:DPzxraQx7OrPyXq2phlGlNSIyWEsAox0RJmjTseMV6I=

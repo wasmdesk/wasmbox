@@ -185,11 +185,16 @@ func TestFillOutOfBuffer(t *testing.T) {
 	fill(buf, 4, toolkit.Rect{X: 0, Y: 0, W: 100, H: 100}, toolkit.RGB(0xFF, 0, 0))
 }
 
-// TestGoldenLayoutRects is the behaviour-preserving proof: the Sencha
+// TestGoldenLayoutRects is the behaviour-preserving proof: the box-layout
 // container tree lays every widget out to the EXACT same toolkit.Rect the old
 // hand-placed code produced. The expected rects are recomputed here with the
 // original arithmetic (display inset by sideMargin/buttonPadTop; each button at
 // sideMargin+c*(colW+buttonGap), baseY+r*(rowH+buttonGap), colW×rowH).
+//
+// These rects are font-independent: the Grid/VBox tracks are fixed pixel sizes,
+// so switching Calculator to the AA/shaped OpenType face (see enableAAText in
+// New) leaves every widget rect byte-identical — only the glyph pixels inside a
+// cell change. TestAATextIsAntiAliased pins that pixel-level AA behaviour.
 func TestGoldenLayoutRects(t *testing.T) {
 	s := New(surfaceW, surfaceH)
 
@@ -365,6 +370,83 @@ func TestHandleCharForwards(t *testing.T) {
 	if s.HandleChar("") {
 		t.Fatal("HandleChar empty should return false")
 	}
+}
+
+// TestAATextIsAntiAliased is the pilot's pixel-level proof that Calculator now
+// renders with the toolkit's AA/shaped OpenType face rather than the 5x7 bitmap.
+// It renders the scene and scans the display Entry's rect for the anti-aliasing
+// signature: neutral-grey pixels (R==G==B) whose value lies STRICTLY between the
+// glyph ink (OnSurface, 54) and the Entry ground (Surface, 255). The bitmap font
+// produces only fully-lit ink or untouched ground — never a partial-coverage
+// blend — so the presence of intermediate greys is exactly what distinguishes
+// the AA face from the bitmap default. It also asserts a solid ink core is
+// present (the "0" glyph was actually painted, not just a stray edge).
+func TestAATextIsAntiAliased(t *testing.T) {
+	s := New(surfaceW, surfaceH)
+	buf := newSurface()
+	Render(s, buf)
+
+	d := s.display.Bounds()
+	on := s.theme.OnSurface // ink (54,54,54)
+	var aaBlend, inkCore int
+	for y := d.Y; y < d.Y+d.H; y++ {
+		for x := d.X; x < d.X+d.W; x++ {
+			off := (y*surfaceW + x) * 4
+			r, g, b := buf[off], buf[off+1], buf[off+2]
+			if r != g || g != b {
+				continue // AA of neutral ink over neutral ground stays neutral
+			}
+			switch {
+			case r > on.R && r < 255:
+				aaBlend++ // partial-coverage edge pixel — the AA signature
+			case r <= on.R+2:
+				inkCore++ // fully-covered glyph body
+			}
+		}
+	}
+	if aaBlend == 0 {
+		t.Fatalf("no anti-aliased blend pixels in display rect %+v — AA face not active", d)
+	}
+	if inkCore == 0 {
+		t.Fatalf("no solid ink pixels in display rect %+v — no glyph painted", d)
+	}
+	t.Logf("display %+v: aaBlend=%d inkCore=%d", d, aaBlend, inkCore)
+}
+
+// TestAAButtonLabelsFitCells guards the pilot's central question — does the
+// taller (20px) AA face overflow the fixed 60×40 key cells? — as a real
+// assertion: every button label's shaped width must fit inside colW and the face
+// height inside rowH, with the toolkit auto-centring it via (r.H-glyphHeight())/2.
+// If a future face or size change overflowed a cell, this fails loudly instead of
+// silently clipping glyphs.
+func TestAAButtonLabelsFitCells(t *testing.T) {
+	s := New(surfaceW, surfaceH) // switches the global font to the AA face
+	h := 20                      // Atkinson Hyperlegible @16px line height (asserted stable here)
+	if got := heightProbe(); got != h {
+		t.Fatalf("AA face height = %d, want %d (retune rowH/displayH if this changes)", got, h)
+	}
+	for _, b := range s.buttons {
+		w := toolkit.TextWidth(b.Label)
+		if w > colW {
+			t.Fatalf("label %q width %d overflows colW %d", b.Label, w, colW)
+		}
+		if h > rowH {
+			t.Fatalf("AA height %d overflows rowH %d", h, rowH)
+		}
+	}
+	if h > displayH {
+		t.Fatalf("AA height %d overflows displayH %d", h, displayH)
+	}
+}
+
+// heightProbe returns the active font's line height by measuring the bundled AA
+// face directly (New has already switched the global font to it).
+func heightProbe() int {
+	f, err := toolkit.DefaultOpenTypeFont(toolkit.DefaultOpenTypeSizePx)
+	if err != nil {
+		return -1
+	}
+	return f.Height()
 }
 
 func TestPressDotAfterFreshOp(t *testing.T) {
