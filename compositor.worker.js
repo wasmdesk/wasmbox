@@ -604,6 +604,35 @@ globalThis.wasmboxBlitRGBA = function (ctx, b64, w, h, dx, dy, key) {
   ctx.putImageData(slot, dx, dy);
 };
 
+// Blit a TRANSLUCENT RGBA buffer (same layout as wasmboxBlitRGBA) at (dx, dy),
+// alpha-composited (source-over) onto whatever is already on the canvas —
+// unlike wasmboxBlitRGBA, which putImageData-OVERWRITES (correct only for an
+// opaque panel like the menu). The widgets HUD (compositor/09_hud_widgets.rb)
+// renders bitmap-font glyphs (opaque A=0xFF) on a transparent (A=0) ground, so
+// it must blend over the desktop rather than punch a rectangle through it.
+//
+// putImageData ignores the destination and cannot blend, so we stage the buffer
+// in a per-key OffscreenCanvas and drawImage() it (which honours source-over).
+// The staged canvas is cached per `key`: an empty `b64` re-draws the cached
+// canvas, so a HUD whose text is unchanged costs one drawImage, not a decode +
+// ImageData + base64 round-trip every rAF frame (the Firefox-GC hazard the SAB
+// blit path documents). Same cache contract as wasmboxBlitRGBA.
+globalThis.wasmboxBlitRGBAOver = function (ctx, b64, w, h, dx, dy, key) {
+  const cache = (globalThis.__wasmboxRGBAOverCache ||= {});
+  let slot = cache[key];
+  if (b64 && b64.length) {
+    const bin = atob(b64);
+    const n = bin.length;
+    const buf = new Uint8ClampedArray(n);
+    for (let i = 0; i < n; i++) buf[i] = bin.charCodeAt(i);
+    const oc = new OffscreenCanvas(w, h);
+    oc.getContext("2d").putImageData(new ImageData(buf, w, h), 0, 0);
+    slot = cache[key] = oc;
+  }
+  if (!slot) return;
+  ctx.drawImage(slot, dx, dy);
+};
+
 globalThis.wasmboxMakeObject = function () {
   const o = {};
   for (let i = 0; i < arguments.length; i += 2) o[arguments[i]] = arguments[i + 1];
