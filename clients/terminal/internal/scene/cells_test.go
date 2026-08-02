@@ -223,9 +223,9 @@ func TestGridDrawGlyphAndCursor(t *testing.T) {
 	g := NewGrid(3, 1)
 	g.FG = 2 // red
 	g.Print('R')
-	// Cursor is now at (1,0). SetBounds derives the cell size from the scaled
-	// font so Draw has a positive cell box to blit into.
-	g.SetBounds(toolkit.Rect{X: 0, Y: 0, W: 3 * baseAdvance(), H: baseHeight()})
+	// Cursor is now at (1,0). SetBounds derives the cell size from the fixed
+	// cell font so Draw has a positive cell box to blit into.
+	g.SetBounds(toolkit.Rect{X: 0, Y: 0, W: 3 * cellW, H: cellH})
 	cw, ch := g.CellWidth(), g.CellHeight()
 	if cw <= 0 || ch <= 0 {
 		t.Fatalf("cell size not derived: %dx%d", cw, ch)
@@ -250,10 +250,22 @@ func TestGridDrawGlyphAndCursor(t *testing.T) {
 	}
 }
 
-// --- pixel helpers (mirror the toolkit's own test helpers) ----------------
+// cellFont reports the fixed 16×16 cell metrics (pinning the grid geometry)
+// and measures one cell per rune -- the monospace contract the grid relies on.
+func TestCellFontMetrics(t *testing.T) {
+	f := newCellFont()
+	if f.Advance() != cellW || f.Height() != cellH {
+		t.Fatalf("cell metrics = %dx%d, want %dx%d", f.Advance(), f.Height(), cellW, cellH)
+	}
+	if got := f.Measure("abc"); got != 3*cellW {
+		t.Fatalf("Measure(\"abc\") = %d, want %d", got, 3*cellW)
+	}
+	if got := f.Measure(""); got != 0 {
+		t.Fatalf("Measure(\"\") = %d, want 0", got)
+	}
+}
 
-func baseAdvance() int { return toolkit.NewBitmapFont(terminalScale).Advance() }
-func baseHeight() int  { return toolkit.NewBitmapFont(terminalScale).Height() }
+// --- pixel helpers (mirror the toolkit's own test helpers) ----------------
 
 func pix(buf []byte, w, x, y int) toolkit.RGBA {
 	o := (y*w + x) * 4

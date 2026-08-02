@@ -19,12 +19,49 @@
 
 package scene
 
-import "github.com/go-widgets/toolkit"
+import (
+	"github.com/go-widgets/painter"
+	"github.com/go-widgets/toolkit"
+)
 
-// terminalScale upscales the toolkit's built-in 5×7 bitmap font so the
-// terminal reads well at modern DPIs -- the same intent the previous
-// 8×8-upscaled-by-2 rasteriser had. Scale 2 yields 12×14 pixel cells.
+// terminalScale upscales the toolkit's built-in 5×7 bitmap font so the glyphs
+// read well at modern DPIs -- the same intent the previous 8×8-upscaled-by-2
+// rasteriser had. Scale 2 yields 12×14 pixel glyphs.
 const terminalScale = 2
+
+// cellW / cellH are the fixed terminal cell size in pixels. They match the
+// previous renderer's 16×16 cells exactly so the grid keeps the SAME on-screen
+// geometry (columns, rows, line pitch) the client always had -- the scaled
+// glyph (12×14) is drawn top-left within the cell, leaving the historical
+// inter-cell gap. Holding the geometry constant across the rasteriser swap
+// keeps the pixel-calibrated e2e probes valid unchanged.
+const (
+	cellW = 16
+	cellH = 16
+)
+
+// cellFont adapts the toolkit's scaled bitmap font to a fixed cellW×cellH cell:
+// it reports the padded cell metrics (so TerminalView lays out a 16×16 grid)
+// while delegating glyph drawing to the inner toolkit font. It is a metrics
+// shim, NOT a rasteriser -- every pixel is still drawn by the toolkit font.
+type cellFont struct{ inner toolkit.Font }
+
+// newCellFont wraps the ×terminalScale bitmap font in the fixed-cell metrics.
+func newCellFont() *cellFont { return &cellFont{inner: toolkit.NewBitmapFont(terminalScale)} }
+
+// Advance / Height report the fixed cell size, pinning the grid geometry.
+func (f *cellFont) Advance() int { return cellW }
+func (f *cellFont) Height() int  { return cellH }
+
+// Measure is the monospace width: one cell per rune. The terminal is ASCII, so
+// byte length equals rune count; this keeps any toolkit layout that consults
+// Measure aligned with the fixed grid.
+func (f *cellFont) Measure(text string) int { return len([]rune(text)) * cellW }
+
+// Draw paints the glyphs through the inner toolkit font at the cell origin.
+func (f *cellFont) Draw(p painter.Painter, x, y int, text string, ink toolkit.RGBA) {
+	f.inner.Draw(p, x, y, text, ink)
+}
 
 // Palette colours. The values match the previous PaletteFG / PaletteBG tables
 // byte-for-byte so the terminal keeps its exact look (soft-green ink, cyan
@@ -69,7 +106,7 @@ type Grid struct {
 // not a recoverable state.
 func NewGrid(cols, rows int) *Grid {
 	tv := toolkit.NewTerminalView(cols, rows)
-	tv.SetFont(toolkit.NewBitmapFont(terminalScale))
+	tv.SetFont(newCellFont())
 	tv.DefaultFG = inkGreen
 	tv.DefaultBG = panelBG
 	tv.CursorVisible = true

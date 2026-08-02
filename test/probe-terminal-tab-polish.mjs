@@ -119,32 +119,6 @@ try {
   await page.mouse.click(cx, cy);
   await page.waitForTimeout(300);
 
-  // Measure the terminal's row pitch (one cell's on-screen height) from the
-  // rendered output instead of hard-coding it: the renderer's cell size is a
-  // property of the active font, so a font change (e.g. the toolkit
-  // TerminalView migration) must not silently desync the band heuristic below.
-  // At this point the terminal shows only its first prompt line whose block
-  // cursor paints a solid green cell -- the height of that first contiguous
-  // green scanline run is exactly one cell. Falls back to 32 if unmeasurable.
-  async function measureRowPitch() {
-    const shot = await page.screenshot({ type: "png", fullPage: false });
-    const png = PNG.sync.read(shot);
-    const { width } = png;
-    let start = -1;
-    for (let y = bounds.y; y < bounds.y + bounds.h; y++) {
-      let green = false;
-      for (let x = bounds.x; x < bounds.x + bounds.w; x++) {
-        const i = (y * width + x) * 4;
-        if (png.data[i] === 0xa0 && png.data[i+1] === 0xe0 && png.data[i+2] === 0xa0) { green = true; break; }
-      }
-      if (green && start < 0) start = y;
-      else if (!green && start >= 0) return y - start;
-    }
-    return 32;
-  }
-  const ROW_H = await measureRowPitch();
-  console.log(`ok  measured terminal row pitch = ${ROW_H}px`);
-
   // Count green ink pixels inside the terminal panel.
   async function countInk() {
     const shot = await page.screenshot({ type: "png", fullPage: false });
@@ -161,13 +135,12 @@ try {
   }
 
   // Count how many distinct rows have any ink (green or cyan) -- a coarse
-  // proxy for "did Tab open a new row?". Bands are one measured cell tall so
-  // the heuristic tracks the renderer's actual row pitch (see measureRowPitch).
+  // proxy for "did Tab open a new row?". Cells are 32 px tall.
   async function countInkedRows() {
     const shot = await page.screenshot({ type: "png", fullPage: false });
     const png = PNG.sync.read(shot);
     const { width } = png;
-    const rowH = ROW_H;
+    const rowH = 32;
     const rows = Math.floor(bounds.h / rowH);
     let inked = 0;
     for (let r = 0; r < rows; r++) {

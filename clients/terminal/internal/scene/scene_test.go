@@ -44,6 +44,20 @@ func TestRenderFillsExactSize(t *testing.T) {
 	Render(s, newBuf(s))
 }
 
+// Render paints the panel background into the margin around the centred grid:
+// with a surface whose height is not a whole number of cells there is a top
+// margin, whose corner pixel must be the panel colour (not left unpainted).
+func TestRenderFillsMargin(t *testing.T) {
+	s := New(160, 100) // 100/16 = 6 rows -> gridH 96 -> 2px top margin
+	buf := newBuf(s)
+	Render(s, buf)
+	// Top-left corner is inside the top margin strip.
+	got := toolkit.RGBA{R: buf[0], G: buf[1], B: buf[2], A: buf[3]}
+	if got != panelBG {
+		t.Fatalf("margin corner = %+v, want panel %+v", got, panelBG)
+	}
+}
+
 // Render panics on a wrongly-sized buffer.
 func TestRenderPanicsOnSizeMismatch(t *testing.T) {
 	defer func() {

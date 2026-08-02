@@ -83,13 +83,10 @@ func New(width, height int) *State {
 // by the wasm boot path to share an IDB-backed VFS with the files browser
 // (and by tests that want a deterministic empty tree).
 func NewWithVFS(width, height int, v sharedvfs.VFS) *State {
-	// Build the TerminalView first at a placeholder size so SetBounds can
-	// derive the per-cell pixel size from the active (scaled) font; the real
-	// Cols×Rows then falls out of the surface size divided by that cell size.
-	g := NewGrid(1, 1)
-	g.SetBounds(toolkit.Rect{X: 0, Y: 0, W: width, H: height})
-	cellW := g.CellWidth()
-	cellH := g.CellHeight()
+	// The cell size is fixed (cellW×cellH), so the grid dimensions fall straight
+	// out of the surface size -- the SAME arithmetic the previous renderer used
+	// (width/16 × height/16), which keeps the column/row/pitch geometry the
+	// pixel-calibrated probes expect.
 	cols := width / cellW
 	rows := height / cellH
 	if cols < 1 {
@@ -98,11 +95,11 @@ func NewWithVFS(width, height int, v sharedvfs.VFS) *State {
 	if rows < 1 {
 		rows = 1
 	}
-	g.Resize(cols, rows)
+	g := NewGrid(cols, rows)
 
-	// Centre the grid in the surface (the margin outside the view's bounds is
-	// painted with the panel background in Render, so the whole surface reads
-	// as one terminal panel).
+	// Centre the grid in the surface. The margin outside the view's bounds is
+	// painted with the panel background in Render, so the whole surface reads as
+	// one terminal panel -- matching the previous centred, full-panel look.
 	gridW := cols * cellW
 	gridH := rows * cellH
 	g.SetBounds(toolkit.Rect{X: (width - gridW) / 2, Y: (height - gridH) / 2, W: gridW, H: gridH})
@@ -124,15 +121,20 @@ func NewWithVFS(width, height int, v sharedvfs.VFS) *State {
 
 // Render fills buf (a 4*W*H byte slice, RGBA32 row-major) with the current
 // grid. Panics on size mismatch -- a misshaped buffer is a caller bug. The
-// whole surface is first painted with the panel background so the margin
-// around the centred grid reads as terminal panel, then the TerminalView
-// blits every cell + the block cursor through its own Draw.
+// panel background is painted into the four margin strips around the centred
+// grid (the TerminalView's own Draw fills its bounds), so the whole surface
+// reads as one terminal panel without redundantly filling the grid area twice.
 func Render(s *State, buf []byte) {
 	if len(buf) != 4*s.W*s.H {
 		panic("scene: Render buffer size mismatch")
 	}
 	p := painter.NewPixelPainter(buf, s.W, s.H)
-	p.FillRect(toolkit.Rect{X: 0, Y: 0, W: s.W, H: s.H}, panelBG)
+	b := s.Grid.Bounds()
+	// Top, bottom, left, right margins (any of which may be empty).
+	p.FillRect(toolkit.Rect{X: 0, Y: 0, W: s.W, H: b.Y}, panelBG)
+	p.FillRect(toolkit.Rect{X: 0, Y: b.Y + b.H, W: s.W, H: s.H - (b.Y + b.H)}, panelBG)
+	p.FillRect(toolkit.Rect{X: 0, Y: b.Y, W: b.X, H: b.H}, panelBG)
+	p.FillRect(toolkit.Rect{X: b.X + b.W, Y: b.Y, W: s.W - (b.X + b.W), H: b.H}, panelBG)
 	s.Grid.Draw(p, s.theme)
 }
 
