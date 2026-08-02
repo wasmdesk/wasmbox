@@ -5,6 +5,8 @@ package scene
 import (
 	"testing"
 
+	"github.com/go-widgets/painter"
+	"github.com/go-widgets/toolkit"
 	"github.com/wasmdesk/wasmbox/clients/dock/internal/theme"
 )
 
@@ -16,6 +18,13 @@ const (
 )
 
 func newBuf(s *State) []byte { return make([]byte, 4*s.W*s.H) }
+
+// newPainter returns a zeroed RGBA buffer of w*h plus a PixelPainter over it,
+// for tests that drive the low-level Fluxbox chrome helpers directly.
+func newPainter(w, h int) ([]byte, *painter.PixelPainter) {
+	buf := make([]byte, 4*w*h)
+	return buf, painter.NewPixelPainter(buf, w, h)
+}
 
 func TestNewHasDefaults(t *testing.T) {
 	s := New(tW, tH)
@@ -277,8 +286,8 @@ func TestRenderTopBorderSkippedWhenWidthZero(t *testing.T) {
 	s.Theme.Border.Width = 0
 	buf := newBuf(s)
 	Render(s, buf)
-	// The top row should now be the workspace gradient at x in [0..WorkspaceW),
-	// not the border colour.
+	// The top row should now be the workspace bevel highlight at x=0, not the
+	// border colour.
 	off := 0
 	bc := s.Theme.Border.Color
 	if buf[off] == bc[0] && buf[off+1] == bc[1] && buf[off+2] == bc[2] {
@@ -303,18 +312,19 @@ func TestSetters(t *testing.T) {
 	}
 }
 
+// ---- Fluxbox chrome helpers (painter-level) ------------------------------
+
 // Each glyph + the default branch (unknown glyph) must paint at least one
 // pixel of ink inside its tile.
 func TestEachGlyphPaints(t *testing.T) {
 	glyphs := []Glyph{GlyphTerminal, GlyphEditor, GlyphFiles, GlyphHello, GlyphCode, GlyphLoom, Glyph(99)}
 	for _, g := range glyphs {
-		s := New(tW, tH)
-		buf := newBuf(s)
+		buf, p := newPainter(tW, tH)
 		// Fill buf with a known opaque non-ink colour so we can detect ink.
 		for i := 0; i+3 < len(buf); i += 4 {
 			buf[i], buf[i+1], buf[i+2], buf[i+3] = 0xC8, 0xC8, 0xC8, 0xFF
 		}
-		drawGlyph(s, buf, g, 10, 10, IconGlyphPx, IconGlyphPx)
+		drawGlyph(p, g, toolkit.Rect{X: 10, Y: 10, W: IconGlyphPx, H: IconGlyphPx})
 		painted := 0
 		for y := 10; y < 10+IconGlyphPx; y++ {
 			for x := 10; x < 10+IconGlyphPx; x++ {
@@ -332,10 +342,8 @@ func TestEachGlyphPaints(t *testing.T) {
 
 // drawGlyphHello with a wider-than-tall box exercises the h/2 < r clamp.
 func TestDrawGlyphHelloWideBox(t *testing.T) {
-	s := New(tW, tH)
-	buf := newBuf(s)
-	drawGlyph(s, buf, GlyphHello, 0, 0, 20, 8)
-	// Just confirm something got painted.
+	buf, p := newPainter(tW, tH)
+	drawGlyph(p, GlyphHello, toolkit.Rect{X: 0, Y: 0, W: 20, H: 8})
 	painted := 0
 	for i := range buf {
 		if buf[i] != 0 {
@@ -347,12 +355,41 @@ func TestDrawGlyphHelloWideBox(t *testing.T) {
 	}
 }
 
+// drawGlyphLoom in a tiny box exercises the w<6/h<6 fallback grid branch.
+func TestDrawGlyphLoomTinyBox(t *testing.T) {
+	buf, p := newPainter(tW, tH)
+	drawGlyph(p, GlyphLoom, toolkit.Rect{X: 0, Y: 0, W: 4, H: 4})
+	painted := 0
+	for i := range buf {
+		if buf[i] != 0 {
+			painted++
+		}
+	}
+	if painted == 0 {
+		t.Fatalf("loom glyph fallback painted nothing")
+	}
+}
+
+// drawGlyphCode in a short box exercises the armH<2 clamp.
+func TestDrawGlyphCodeTinyBox(t *testing.T) {
+	buf, p := newPainter(tW, tH)
+	drawGlyph(p, GlyphCode, toolkit.Rect{X: 0, Y: 0, W: 8, H: 8})
+	painted := 0
+	for i := range buf {
+		if buf[i] != 0 {
+			painted++
+		}
+	}
+	if painted == 0 {
+		t.Fatalf("code glyph in short box painted nothing")
+	}
+}
+
 // drawGlyph with a non-positive size is a no-op.
 func TestDrawGlyphDegenerate(t *testing.T) {
-	s := New(40, BarHeight)
-	buf := newBuf(s)
-	drawGlyph(s, buf, GlyphTerminal, 0, 0, 0, 10)
-	drawGlyph(s, buf, GlyphTerminal, 0, 0, 10, 0)
+	buf, p := newPainter(40, BarHeight)
+	drawGlyph(p, GlyphTerminal, toolkit.Rect{X: 0, Y: 0, W: 0, H: 10})
+	drawGlyph(p, GlyphTerminal, toolkit.Rect{X: 0, Y: 0, W: 10, H: 0})
 	for _, b := range buf {
 		if b != 0 {
 			t.Fatalf("degenerate drawGlyph painted something: %d", b)
@@ -360,98 +397,185 @@ func TestDrawGlyphDegenerate(t *testing.T) {
 	}
 }
 
-// drawBevel with a non-positive size is a no-op.
-func TestDrawBevelDegenerate(t *testing.T) {
-	s := New(40, BarHeight)
-	buf := newBuf(s)
-	drawBevel(s, buf, 0, 0, 0, 10)
-	drawBevel(s, buf, 0, 0, 10, 0)
+// drawBevel with a non-positive size is a no-op; a normal call paints the
+// bright top-left highlight and dark bottom-right.
+func TestDrawBevel(t *testing.T) {
+	buf, p := newPainter(40, BarHeight)
+	drawBevel(p, toolkit.Rect{X: 0, Y: 0, W: 0, H: 10})
+	drawBevel(p, toolkit.Rect{X: 0, Y: 0, W: 10, H: 0})
 	for _, b := range buf {
 		if b != 0 {
 			t.Fatalf("degenerate drawBevel painted something: %d", b)
 		}
 	}
+	drawBevel(p, toolkit.Rect{X: 2, Y: 2, W: 8, H: 8})
+	// Top-left corner is the bright highlight.
+	off := (2*40 + 2) * 4
+	if !(buf[off] == 0xFF && buf[off+1] == 0xFF && buf[off+2] == 0xFF) {
+		t.Fatalf("bevel top-left not bright: %v", buf[off:off+3])
+	}
+	// Bottom-right corner is the dark lowlight.
+	off = ((2+8-1)*40 + (2 + 8 - 1)) * 4
+	if !(buf[off] == 0x40 && buf[off+1] == 0x40 && buf[off+2] == 0x40) {
+		t.Fatalf("bevel bottom-right not dark: %v", buf[off:off+3])
+	}
 }
 
-// drawTextClipped with a non-positive maxWidth is a no-op; an unknown char
-// is silently skipped.
-func TestDrawTextClippedEdgeCases(t *testing.T) {
-	s := New(40, BarHeight)
-	buf := newBuf(s)
-	drawTextClipped(s, buf, "abc", 0, 0, theme.Color{0xFF, 0, 0}, 0)
+// drawSunkenBevel is the inverse of drawBevel (dark top-left, bright
+// bottom-right) and a no-op on a degenerate rect.
+func TestDrawSunkenBevel(t *testing.T) {
+	buf, p := newPainter(40, BarHeight)
+	drawSunkenBevel(p, toolkit.Rect{X: 0, Y: 0, W: 0, H: 10})
+	drawSunkenBevel(p, toolkit.Rect{X: 0, Y: 0, W: 10, H: 0})
+	for _, b := range buf {
+		if b != 0 {
+			t.Fatalf("degenerate drawSunkenBevel painted something: %d", b)
+		}
+	}
+	drawSunkenBevel(p, toolkit.Rect{X: 2, Y: 2, W: 8, H: 8})
+	off := (2*40 + 2) * 4
+	if !(buf[off] == 0x40 && buf[off+1] == 0x40 && buf[off+2] == 0x40) {
+		t.Fatalf("sunken bevel top-left not dark: %v", buf[off:off+3])
+	}
+	off = ((2+8-1)*40 + (2 + 8 - 1)) * 4
+	if !(buf[off] == 0xFF && buf[off+1] == 0xFF && buf[off+2] == 0xFF) {
+		t.Fatalf("sunken bevel bottom-right not bright: %v", buf[off:off+3])
+	}
+}
+
+// drawClippedText with a non-positive maxWidth is a no-op; a maxWidth smaller
+// than one glyph paints nothing; an unknown char is silently skipped.
+func TestDrawClippedTextEdgeCases(t *testing.T) {
+	red := toolkit.RGB(0xFF, 0, 0)
+	// maxWidth <= 0: nothing.
+	buf, p := newPainter(60, BarHeight)
+	drawClippedText(p, "abc", 0, 0, red, 0)
 	for _, b := range buf {
 		if b != 0 {
 			t.Fatalf("clipped paint at maxWidth=0 painted something")
 		}
 	}
-	// Unknown character "@" + known "1" — only the "1" should paint.
-	drawText(s, buf, "@1", 0, 0, theme.Color{0xFF, 0, 0})
-	red := 0
-	for i := 0; i+3 < len(buf); i += 4 {
-		if buf[i] == 0xFF && buf[i+1] == 0 && buf[i+2] == 0 {
-			red++
+	// maxWidth in (0, charWidth): n rounds to 0 -> nothing.
+	buf, p = newPainter(60, BarHeight)
+	drawClippedText(p, "abc", 0, 0, red, charWidth-1)
+	for _, b := range buf {
+		if b != 0 {
+			t.Fatalf("sub-glyph maxWidth painted something")
 		}
 	}
-	if red == 0 {
+	// Unknown character "@" + known "1" — only the "1" should paint (n>len path
+	// via a generous maxWidth).
+	buf, p = newPainter(60, BarHeight)
+	drawClippedText(p, "@1", 0, 0, red, 1<<20)
+	painted := 0
+	for i := 0; i+3 < len(buf); i += 4 {
+		if buf[i] == 0xFF && buf[i+1] == 0 && buf[i+2] == 0 {
+			painted++
+		}
+	}
+	if painted == 0 {
 		t.Fatalf("known char never painted alongside unknown")
 	}
 }
 
-// drawTextClipped stops once the next glyph would push past maxWidth.
-func TestDrawTextClippedTruncates(t *testing.T) {
-	s := New(40, BarHeight)
-	buf := newBuf(s)
-	// Three glyphs would need 3*6 = 18 px; cap to 12 -> 2 glyphs.
-	drawText(s, buf, "111", 0, 0, theme.Color{0xFF, 0, 0})
-	red := 0
+// drawClippedText stops once the next glyph would push past maxWidth.
+func TestDrawClippedTextTruncates(t *testing.T) {
+	red := toolkit.RGB(0xFF, 0, 0)
+	buf, p := newPainter(60, BarHeight)
+	drawClippedText(p, "111", 0, 0, red, 1<<20) // full
+	full := 0
 	for i := 0; i+3 < len(buf); i += 4 {
 		if buf[i] == 0xFF {
-			red++
+			full++
 		}
 	}
-	full := red
-	for i := range buf {
-		buf[i] = 0
-	}
-	drawTextClipped(s, buf, "111", 0, 0, theme.Color{0xFF, 0, 0}, 12)
-	red = 0
+	buf, p = newPainter(60, BarHeight)
+	drawClippedText(p, "111", 0, 0, red, 12) // 12/6 = 2 glyphs
+	clipped := 0
 	for i := 0; i+3 < len(buf); i += 4 {
 		if buf[i] == 0xFF {
-			red++
+			clipped++
 		}
 	}
-	if red == 0 || red >= full {
-		t.Fatalf("clip did not truncate: full=%d clipped=%d", full, red)
+	if clipped == 0 || clipped >= full {
+		t.Fatalf("clip did not truncate: full=%d clipped=%d", full, clipped)
 	}
 }
 
-// setPixel must ignore out-of-bounds coordinates.
-func TestSetPixelOutOfBounds(t *testing.T) {
-	s := New(4, BarHeight)
-	buf := newBuf(s)
-	setPixel(s, buf, -1, 0, [3]uint8{1, 1, 1})
-	setPixel(s, buf, 0, -1, [3]uint8{1, 1, 1})
-	setPixel(s, buf, 4, 0, [3]uint8{1, 1, 1})
-	setPixel(s, buf, 0, BarHeight, [3]uint8{1, 1, 1})
+// gradientAt covers every interpolation axis plus the flat/default fall-through.
+func TestGradientAt(t *testing.T) {
+	c1 := theme.Color{0, 0, 0}
+	c2 := theme.Color{100, 100, 100}
+	// Vertical: bottom row (j=rh-1) reaches c2.
+	if got := gradientAt(theme.GradientVertical, 0, 9, 10, 10, c1, c2); got != c2 {
+		t.Fatalf("vertical bottom = %v, want %v", got, c2)
+	}
+	// Horizontal: right column reaches c2.
+	if got := gradientAt(theme.GradientHorizontal, 9, 0, 10, 10, c1, c2); got != c2 {
+		t.Fatalf("horizontal right = %v, want %v", got, c2)
+	}
+	// Diagonal: bottom-right corner reaches c2.
+	if got := gradientAt(theme.GradientDiagonal, 9, 9, 10, 10, c1, c2); got != c2 {
+		t.Fatalf("diagonal corner = %v, want %v", got, c2)
+	}
+	// CrossDiagonal: bottom-left corner reaches c2.
+	if got := gradientAt(theme.GradientCrossDiagonal, 0, 9, 10, 10, c1, c2); got != c2 {
+		t.Fatalf("cross-diagonal corner = %v, want %v", got, c2)
+	}
+	// Default (a bevel/recorded-only variant): solid c1.
+	if got := gradientAt(theme.GradientRaisedBevel, 5, 5, 10, 10, c1, c2); got != c1 {
+		t.Fatalf("default gradient = %v, want %v (c1)", got, c1)
+	}
+}
+
+// lerpColor covers the denom<=0 collapse, the step clamps, and the midpoint.
+func TestLerpColor(t *testing.T) {
+	c1 := theme.Color{0, 0, 0}
+	c2 := theme.Color{200, 200, 200}
+	if got := lerpColor(c1, c2, 3, 0); got != c1 {
+		t.Fatalf("denom<=0 = %v, want c1", got)
+	}
+	if got := lerpColor(c1, c2, -5, 10); got != c1 {
+		t.Fatalf("step<0 clamp = %v, want c1", got)
+	}
+	if got := lerpColor(c1, c2, 99, 10); got != c2 {
+		t.Fatalf("step>denom clamp = %v, want c2", got)
+	}
+	if got := lerpColor(c1, c2, 5, 10); got != (theme.Color{100, 100, 100}) {
+		t.Fatalf("midpoint = %v, want {100,100,100}", got)
+	}
+}
+
+// paintBg draws a flat fill via FillRect and a per-pixel gradient; both are
+// opaque and a degenerate rect paints nothing.
+func TestPaintBg(t *testing.T) {
+	// Degenerate: nothing painted.
+	buf, p := newPainter(20, 20)
+	paintBg(p, toolkit.Rect{X: 0, Y: 0, W: 0, H: 10}, theme.Bg{Gradient: theme.GradientFlat, Color: theme.Color{9, 9, 9}})
 	for _, b := range buf {
 		if b != 0 {
-			t.Fatalf("OOB write leaked")
+			t.Fatalf("degenerate paintBg painted something")
 		}
+	}
+	// Flat fill: every pixel is the solid colour, opaque.
+	buf, p = newPainter(20, 20)
+	paintBg(p, toolkit.Rect{X: 0, Y: 0, W: 20, H: 20}, theme.Bg{Gradient: theme.GradientFlat, Color: theme.Color{0x11, 0x22, 0x33}})
+	for i := 0; i+3 < len(buf); i += 4 {
+		if buf[i] != 0x11 || buf[i+1] != 0x22 || buf[i+2] != 0x33 || buf[i+3] != 0xFF {
+			t.Fatalf("flat fill wrong at byte %d: %v", i, buf[i:i+4])
+		}
+	}
+	// Vertical gradient: top row != bottom row.
+	buf, p = newPainter(4, 10)
+	paintBg(p, toolkit.Rect{X: 0, Y: 0, W: 4, H: 10}, theme.Bg{Gradient: theme.GradientVertical, Color: theme.Color{0, 0, 0}, ColorTo: theme.Color{240, 240, 240}})
+	top := buf[0]
+	bottom := buf[(9*4+0)*4]
+	if top == bottom {
+		t.Fatalf("vertical gradient did not vary: top=%d bottom=%d", top, bottom)
 	}
 }
 
-// abs covers the negative-input branch.
-func TestAbs(t *testing.T) {
-	if abs(-3) != 3 {
-		t.Fatal("abs(-3) wrong")
-	}
-	if abs(7) != 7 {
-		t.Fatal("abs(7) wrong")
-	}
-	if abs(0) != 0 {
-		t.Fatal("abs(0) wrong")
-	}
-}
+// ---- narrow-surface + overflow render paths -------------------------------
 
 // drawIconbarButton clips its right edge when its w would exceed the
 // section. Exercised by rendering on a narrow surface.
@@ -466,9 +590,8 @@ func TestRenderNarrowIconbarClipsButtons(t *testing.T) {
 	}
 }
 
-// drawIconbarButton stops painting once the button's anchor falls past the
-// iconbar's right edge. Reproduced by stuffing in extra apps so some land
-// past the end of the iconbar.
+// The iconbar stops painting once a launcher button's anchor falls past the
+// iconbar's right edge. Reproduced by stuffing in extra apps.
 func TestRenderStopsExtraIconbarButtons(t *testing.T) {
 	s := New(400, BarHeight)
 	// iconbar width = 400 - 100 - 80 = 220 -> at most 1 full button + part of
@@ -596,8 +719,8 @@ func TestHitTestWindow(t *testing.T) {
 // anchor is past the iconbar" early return.
 func TestHitTestWindowOverflow(t *testing.T) {
 	// 400-px surface: iconbar width = 400 - 100 - 80 = 220 -> fits 1 button +
-	// part of a second. Add 4 launchers (default) + a window -> the window's
-	// anchor is past the iconbar's right edge.
+	// part of a second. Default 6 launchers + a window -> the window's anchor
+	// is past the iconbar's right edge.
 	s := New(400, BarHeight)
 	s.SetWindows([]Window{{Id: 99, Title: "off-screen"}})
 	bx, _, _, _ := s.WindowButtonRect(0)
@@ -641,36 +764,35 @@ func TestRenderWindowInked(t *testing.T) {
 // Render does not panic when a window's anchor falls past the iconbar's right
 // edge (matches the launcher break-on-overflow path).
 func TestRenderWindowOverflow(t *testing.T) {
-	s := New(400, BarHeight) // narrow iconbar; default 4 apps + windows won't all fit
+	s := New(400, BarHeight) // narrow iconbar; default apps + windows won't all fit
 	s.SetWindows([]Window{{Id: 1, Title: "off"}, {Id: 2, Title: "off2"}})
 	buf := newBuf(s)
 	Render(s, buf) // must not panic, must break out of the window loop
 }
 
-// Render clips the right edge of a window button whose right side extends
-// past the iconbar's right edge (the `bx+cw > ix+iw` branch). Reproduced by
-// dropping the launcher row so a window button anchored at the iconbar's
-// left can extend to the right while the iconbar is too narrow to fit it.
-func TestRenderWindowClipsRightEdge(t *testing.T) {
+// On a narrow iconbar the window-button width shrinks so the buttons always
+// fit inside the iconbar's right edge (no right-edge clip is ever needed).
+func TestRenderWindowShrinksToFit(t *testing.T) {
 	// Narrow iconbar (iconbar width = 230 - 100 - 80 = 50) + no launchers so a
-	// single window button anchors INSIDE the iconbar (bx < ix+iw) but its
-	// right edge sticks out (bx + IconbarButtonW=120 > ix+iw=50).
+	// single window button anchors at the iconbar's left; the shrink keeps its
+	// right edge exactly at (or inside) the iconbar's right edge.
 	s := New(230, BarHeight)
 	s.Apps = nil
-	s.SetWindows([]Window{{Id: 1, Title: "clipme"}})
-	bx, _, _, _ := s.WindowButtonRect(0)
+	s.SetWindows([]Window{{Id: 1, Title: "fitme"}, {Id: 2, Title: "fit2"}})
 	ix, _, iw, _ := s.IconbarRect()
-	if !(bx < ix+iw && bx+IconbarButtonW > ix+iw) {
-		t.Fatalf("test setup wrong: need bx<ix+iw<bx+W (bx=%d, ix+iw=%d, W=%d)", bx, ix+iw, IconbarButtonW)
+	for i := range s.Windows {
+		bx, _, bw, _ := s.WindowButtonRect(i)
+		if bx+bw > ix+iw {
+			t.Fatalf("window[%d] right edge %d exceeds iconbar right %d (shrink failed)", i, bx+bw, ix+iw)
+		}
 	}
 	buf := newBuf(s)
-	Render(s, buf) // must not panic, must clip the button
+	Render(s, buf) // must not panic
 }
 
-// A focused window button must paint with a sunken bevel: the top-left
-// corner pixel of the button rect carries the SUNKEN highlight (dark) while
-// an unfocused button carries the RAISED highlight (bright). Probing pixel
-// (bx+1, by+1) sidesteps the corner exactly and lands on the bevel stroke.
+// A focused window button must paint with a sunken bevel: the top stroke is
+// the SUNKEN highlight (dark) while an unfocused button carries the RAISED
+// highlight (bright).
 func TestRenderFocusedSunkenBevel(t *testing.T) {
 	s := New(tW, tH)
 	// Two windows: idx 0 focused, idx 1 unfocused.
@@ -680,9 +802,6 @@ func TestRenderFocusedSunkenBevel(t *testing.T) {
 	})
 	buf := newBuf(s)
 	Render(s, buf)
-	// The very top row of a button carries the bevel stroke (white when raised,
-	// dark when sunken). Sample x=bx+bw/2 (mid-button, where the stroke is not
-	// at a corner) y=by.
 	bx0, by0, bw0, _ := s.WindowButtonRect(0) // focused
 	bx1, by1, bw1, _ := s.WindowButtonRect(1) // unfocused
 	off0 := (by0*tW + bx0 + bw0/2) * 4
@@ -697,14 +816,14 @@ func TestRenderFocusedSunkenBevel(t *testing.T) {
 	}
 }
 
-// A minimized window button must paint with the "[*] " accent prefix on its
-// label and use the dim inactive-label ink.
+// A minimized window button must paint the "[*] " accent prefix + a raised
+// bevel (it is not focused).
 func TestRenderMinimizedStylesDim(t *testing.T) {
 	s := New(tW, tH)
 	s.SetWindows([]Window{{Id: 1, Title: "alpha", Minimized: true}})
 	buf := newBuf(s)
 	Render(s, buf)
-	// Just confirm the button paints SOME ink (the "[*] alpha" label).
+	// Confirm the button paints SOME ink (the "[*] alpha" label).
 	bx, by, bw, bh := s.WindowButtonRect(0)
 	found := false
 	for y := by; y < by+bh && !found; y++ {
@@ -726,21 +845,7 @@ func TestRenderMinimizedStylesDim(t *testing.T) {
 	}
 }
 
-// drawSunkenBevel with a non-positive size is a no-op.
-func TestDrawSunkenBevelDegenerate(t *testing.T) {
-	s := New(40, BarHeight)
-	buf := newBuf(s)
-	drawSunkenBevel(s, buf, 0, 0, 0, 10)
-	drawSunkenBevel(s, buf, 0, 0, 10, 0)
-	for _, b := range buf {
-		if b != 0 {
-			t.Fatalf("degenerate drawSunkenBevel painted something: %d", b)
-		}
-	}
-}
-
-// The separator line is painted in the SeparatorW gap when launchers exist
-// (and skipped when they do not).
+// The separator line is painted in the SeparatorW gap when launchers exist.
 func TestRenderSeparatorPainted(t *testing.T) {
 	s := New(tW, tH)
 	buf := newBuf(s)
@@ -814,6 +919,13 @@ func TestSetWorkspaceCountRecomputesLabel(t *testing.T) {
 	if s.WorkspaceCount != 0 {
 		t.Fatalf("WorkspaceCount after -1 = %d, want 0", s.WorkspaceCount)
 	}
+	// ActiveWorkspace below 1 is bumped to 1 by SetWorkspaceCount.
+	s2 := New(tW, tH)
+	s2.ActiveWorkspace = 0
+	s2.SetWorkspaceCount(4)
+	if s2.ActiveWorkspace != 1 {
+		t.Fatalf("SetWorkspaceCount bump: ActiveWorkspace = %d, want 1", s2.ActiveWorkspace)
+	}
 }
 
 // NextWorkspace + PrevWorkspace wrap at the boundaries.
@@ -867,7 +979,7 @@ func TestHitTestWorkspace(t *testing.T) {
 }
 
 // Render must paint the workspace label distinctly when ActiveWorkspace
-// changes — the rendered ink count for "3 of 4" differs from "1 of 4".
+// changes — the rendered ink for "3 of 4" differs from "1 of 4".
 func TestRenderWorkspaceLabelChanges(t *testing.T) {
 	s := New(tW, tH)
 	buf1 := newBuf(s)
@@ -894,6 +1006,19 @@ func TestItoa(t *testing.T) {
 	}
 }
 
+// abs covers the negative-input branch.
+func TestAbs(t *testing.T) {
+	if abs(-3) != 3 {
+		t.Fatal("abs(-3) wrong")
+	}
+	if abs(7) != 7 {
+		t.Fatal("abs(7) wrong")
+	}
+	if abs(0) != 0 {
+		t.Fatal("abs(0) wrong")
+	}
+}
+
 // Window.Workspace round-trips through SetWindows (the compositor sends it
 // in the windows_changed payload; the dock keeps it in the model).
 func TestWindowCarriesWorkspaceField(t *testing.T) {
@@ -904,8 +1029,8 @@ func TestWindowCarriesWorkspaceField(t *testing.T) {
 	}
 }
 
-// TestSetThemeReplacesTheme: SetTheme swaps the active theme + the next
-// Render call uses the new colours.
+// TestSetTheme: SetTheme swaps the active theme + the next Render call uses
+// the new colours.
 func TestSetTheme(t *testing.T) {
 	s := New(tW, tH)
 	orig := s.Theme.Border.Color
@@ -917,6 +1042,14 @@ func TestSetTheme(t *testing.T) {
 	}
 	if s.Theme.Border.Color != (theme.Color{0xAB, 0xCD, 0xEF}) {
 		t.Fatalf("SetTheme stored = %v", s.Theme.Border.Color)
+	}
+}
+
+// rgba maps a theme.Color to an opaque toolkit.RGBA.
+func TestRGBA(t *testing.T) {
+	got := rgba(theme.Color{0x12, 0x34, 0x56})
+	if got.R != 0x12 || got.G != 0x34 || got.B != 0x56 || got.A != 0xFF {
+		t.Fatalf("rgba = %+v, want {0x12,0x34,0x56,0xFF}", got)
 	}
 }
 
