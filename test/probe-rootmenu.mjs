@@ -94,6 +94,34 @@ function pix(png, x, y) {
   return [png.data[i], png.data[i+1], png.data[i+2]];
 }
 
+// aaRampBucketsRegion is the anti-aliased-text SIGNATURE over a sub-rectangle of
+// a screenshot (no hard-coded fg/bg colours, so it works for any menu palette).
+// It bins the near-neutral pixels into 16-wide brightness buckets and counts how
+// many INTERMEDIATE buckets (between MENU_BG and the ink) hold a meaningful
+// number of pixels. A shaped OpenType label scan-converted to a coverage mask
+// spreads a CONTINUUM of partial-coverage tones across many buckets; a 5x7
+// bitmap label paints only two tones and fills only a few. Measured ~4 buckets
+// on the bitmap font, ~18 once Widgets.use_opentype_text takes effect.
+function aaRampBucketsRegion(png, x0, y0, w, h) {
+  const yEnd = Math.min(y0 + h, png.height), xEnd = Math.min(x0 + w, png.width);
+  const xStart = Math.max(0, x0), yStart = Math.max(0, y0);
+  const hist = {};
+  for (let y = yStart; y < yEnd; y++) {
+    for (let x = xStart; x < xEnd; x++) {
+      const i = (y * png.width + x) * 4;
+      const r = png.data[i], g = png.data[i + 1], b = png.data[i + 2];
+      if (Math.max(r, g, b) - Math.min(r, g, b) > 28) continue; // near-neutral only
+      const s = r + g + b;
+      if (s < 96 || s > 720) continue; // drop the dark and bright extremes
+      const k = s >> 4;
+      hist[k] = (hist[k] || 0) + 1;
+    }
+  }
+  let n = 0;
+  for (const k in hist) if (hist[k] >= 4) n++;
+  return n;
+}
+
 // Theme + Menu constants mirrored from compositor.rb.
 const MENU_BG     = [29, 31, 41];     // #1d1f29
 const MENU_HILITE = [155, 28, 46];    // #9b1c2e
@@ -245,6 +273,18 @@ try {
     fail(`root-menu: only ${menuBgHits} MENU_BG pixels in menu region — menu did not pop`);
   } else {
     ok(`root-menu: ${menuBgHits} MENU_BG pixels found inside the menu rectangle`);
+  }
+
+  // AA signature: the menu LABELS are now anti-aliased, shaped OpenType (the
+  // compositor calls Widgets.use_opentype_text before the first render). The
+  // label band (below the hovered first row, so MENU_HILITE does not skew the
+  // range) must carry the neutral partial-coverage grey ramp a 5x7 bitmap
+  // never produces.
+  const menuBuckets = aaRampBucketsRegion(png1, ROOT_X + 4, ROOT_Y + ITEM_H + 2, MENU_W - 8, ITEM_H * 4);
+  if (menuBuckets < 9) {
+    fail(`root-menu AA tone-buckets=${menuBuckets} (<9) — menu labels are not anti-aliased (bitmap font still active?)`);
+  } else {
+    ok(`menu labels are anti-aliased: ${menuBuckets} distinct partial-coverage tone buckets along the glyph edges`);
   }
 
   // ----- Step 3: open the Applications submenu -------------------------

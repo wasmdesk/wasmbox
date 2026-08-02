@@ -102,6 +102,31 @@ function bands(png) {
   return { dark, mid, bright };
 }
 
+// aaRampBuckets is the anti-aliased-text SIGNATURE. It bins the near-neutral
+// pixels of a region into 16-wide brightness buckets and counts how many
+// INTERMEDIATE buckets (between the dark background and the bright ink) hold a
+// meaningful number of pixels. A shaped OpenType glyph scan-converted to a
+// coverage mask spreads a CONTINUUM of partial-coverage tones across many
+// buckets; the 5x7 bitmap paints only two tones — plus, for the translucent HUD
+// panel over the desktop, a single mid tone — so it fills only a few. Counting
+// DISTINCT tone buckets (not mid-grey pixels) is what makes this robust to the
+// translucent-panel compositing. Measured ~4 buckets on the bitmap font, ~14
+// once Widgets.use_opentype_text takes effect.
+function aaRampBuckets(png) {
+  const h = {};
+  for (let i = 0; i < png.data.length; i += 4) {
+    const r = png.data[i], g = png.data[i + 1], b = png.data[i + 2];
+    if (Math.max(r, g, b) - Math.min(r, g, b) > 28) continue; // near-neutral only
+    const s = r + g + b;
+    if (s < 96 || s > 720) continue; // drop the dark-bg and bright-ink extremes
+    const k = s >> 4;
+    h[k] = (h[k] || 0) + 1;
+  }
+  let n = 0;
+  for (const k in h) if (h[k] >= 4) n++;
+  return n;
+}
+
 const { server, base } = await startServer();
 console.log(`probe-desktop: serving on ${base}`);
 
@@ -155,6 +180,18 @@ try {
     fail(`HUD over desktop: only ${hudBright} bright pixels — chrome not composited on top of desktop`);
   } else {
     ok(`z-order: ${hudBright} bright HUD pixels on top of the desktop — composite order intact`);
+  }
+
+  // AA signature: the HUD text composited over the desktop is anti-aliased,
+  // shaped OpenType (the compositor opts the chrome in before the first render),
+  // so its near-neutral tones spread across many brightness buckets — the
+  // partial-coverage ramp a bitmap (with its lone translucent-panel mid tone)
+  // never yields. Measured ~4 buckets on the bitmap font, ~14 with AA.
+  const hudBuckets = hud ? aaRampBuckets(hud) : 0;
+  if (hudBuckets < 9) {
+    fail(`HUD-over-desktop AA tone-buckets=${hudBuckets} (<9) — chrome text is not anti-aliased`);
+  } else {
+    ok(`chrome over desktop is anti-aliased: ${hudBuckets} distinct partial-coverage tone buckets`);
   }
 
   // Client-asset load races (a spawned client's .wasm not yet served) are

@@ -14,6 +14,7 @@ class Compositor
     @last_t = 0.0
     @fps = 0.0
     @last_layout_sig = nil
+    @opentype_text = false # flips true after the one-shot AA-text opt-in
   end
 
   # --- persistence ---------------------------------------------------------
@@ -919,7 +920,27 @@ class Compositor
     end
   end
 
+  # Opt the whole widgets-painted chrome into anti-aliased, shaped OpenType
+  # text — window titles, the menu, the HUD and the desktop backdrop labels all
+  # repaint against the toolkit's bundled Atkinson Hyperlegible vector face
+  # instead of the compiled-in 5x7 bitmap. Window titles are the most visible
+  # bitmap->AA win.
+  #
+  # The toolkit's active font is a process-global, so this flips it exactly
+  # once, on the first frame — before any widgets paint path runs (draw_desktop
+  # is the first) — and only when at least one widgets surface is enabled, so
+  # the opt-in is gated consistently with the per-surface *_WIDGETS flags. If
+  # every widgets path is off, the bitmap default is left untouched.
+  def enable_opentype_text_once
+    return if @opentype_text
+    @opentype_text = true
+    return unless MENU_WIDGETS || HUD_WIDGETS || DESKTOP_WIDGETS || FRAME_WIDGETS
+    require "widgets"
+    Widgets.use_opentype_text
+  end
+
   def render
+    enable_opentype_text_once
     draw_desktop
     # Re-anchor every panel to the bottom-center of the current canvas, so the
     # dock tracks viewport resizes and never cascades.

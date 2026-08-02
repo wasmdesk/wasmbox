@@ -35,6 +35,7 @@ import { readFile } from "node:fs/promises";
 import { extname, join, normalize } from "node:path";
 import { fileURLToPath } from "node:url";
 import { chromium } from "playwright";
+import { PNG } from "pngjs";
 
 const ROOT = fileURLToPath(new URL("..", import.meta.url));
 const BOOT_TIMEOUT_MS = 20000;
@@ -96,6 +97,40 @@ async function read(worker, x, y, w, h) {
   );
 }
 
+// grab returns the region's actual pixels (as a decoded PNG) via the
+// __wasmboxGrabRegion test hook, so we can inspect the title glyphs directly.
+async function grab(worker, x, y, w, h) {
+  const dataURL = await worker.evaluate(
+    ({ x, y, w, h }) => globalThis.__wasmboxGrabRegion(x, y, w, h),
+    { x, y, w, h },
+  );
+  if (!dataURL) return null;
+  return PNG.sync.read(Buffer.from(dataURL.slice(dataURL.indexOf(",") + 1), "base64"));
+}
+
+// aaRampBuckets is the anti-aliased-text SIGNATURE (no hard-coded fg/bg colours,
+// so it works for any Frame palette). It bins the near-neutral pixels of a
+// region into 16-wide brightness buckets and counts how many INTERMEDIATE
+// buckets (between the band and the ink) hold a meaningful number of pixels. A
+// shaped OpenType title scan-converted to a coverage mask spreads a CONTINUUM of
+// partial-coverage tones across many buckets; a 5x7 bitmap title paints only two
+// tones (band + ink) and fills essentially none. Measured 1 bucket on the
+// bitmap font, ~16 once Widgets.use_opentype_text takes effect.
+function aaRampBuckets(png) {
+  const h = {};
+  for (let i = 0; i < png.data.length; i += 4) {
+    const r = png.data[i], g = png.data[i + 1], b = png.data[i + 2];
+    if (Math.max(r, g, b) - Math.min(r, g, b) > 28) continue; // near-neutral only
+    const s = r + g + b;
+    if (s < 96 || s > 720) continue; // drop the dark and bright extremes
+    const k = s >> 4;
+    h[k] = (h[k] || 0) + 1;
+  }
+  let n = 0;
+  for (const k in h) if (h[k] >= 4) n++;
+  return n;
+}
+
 const { server, base } = await startServer();
 console.log(`probe-frame-widgets: serving on ${base}`);
 
@@ -155,6 +190,19 @@ try {
         fail(`window body only ${body.nonblackPct}% non-black — body did not show through the decoration hole`);
       } else {
         ok(`window body composited under the frame: ${body.nonblackPct}% non-black (z-order intact)`);
+      }
+
+      // 5. AA signature: the window TITLE is now anti-aliased, shaped OpenType
+      //    (the compositor calls Widgets.use_opentype_text before the first
+      //    render). Window titles were flagged as the most visible bitmap->AA
+      //    win, so assert the title band carries the partial-coverage grey ramp
+      //    a 5x7 bitmap could never produce.
+      const title = await grab(cw, 140, 96, 130, 18);
+      const titleBuckets = title ? aaRampBuckets(title) : 0;
+      if (titleBuckets < 9) {
+        fail(`title AA tone-buckets=${titleBuckets} (<9) — window title is not anti-aliased (bitmap font still active?)`);
+      } else {
+        ok(`window title is anti-aliased: ${titleBuckets} distinct partial-coverage tone buckets along the glyph edges`);
       }
     }
   }
