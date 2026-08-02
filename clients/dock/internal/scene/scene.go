@@ -39,8 +39,9 @@
 // that owns one `launcherButton` leaf per app and one `windowButton` leaf per
 // open window (the three focus / minimized styles are Draw branches). Every
 // leaf embeds toolkit.Base and paints through the painter.Painter primitive
-// set; text is drawn with the toolkit's built-in bitmap font
-// (toolkit.DrawText) instead of a private 5×7 table. The Fluxbox bevel /
+// set; text is drawn with the toolkit's active font (toolkit.DrawText) —
+// anti-aliased, shaped OpenType after New calls toolkit.UseOpenTypeText (v0.77.0)
+// — instead of a private 5×7 table. The Fluxbox bevel /
 // gradient section chrome has no stock equivalent, so it is kept as custom
 // Draw over the painter (paintBg / drawBevel), and the app glyphs that are
 // bespoke Fluxbox marks (terminal / hello / code / loom) stay custom Draw
@@ -61,10 +62,26 @@
 package scene
 
 import (
+	"sync"
+
 	"github.com/go-widgets/painter"
 	"github.com/go-widgets/toolkit"
 	"github.com/wasmdesk/wasmbox/clients/dock/internal/theme"
 )
+
+// aaOnce flips the toolkit's active font to anti-aliased, shaped OpenType text
+// exactly once for this client process. It is package-scoped because SetFont is
+// a process-global; a single opt-in matches the toolkit's "flip it once at
+// start-up" contract.
+var aaOnce sync.Once
+
+// enableAAText installs the toolkit's bundled AA/shaped OpenType face (Atkinson
+// Hyperlegible @16px, toolkit v0.77.0), so the workspace label, launcher/window
+// button labels and clock render as the shaped vector face. The bundled face
+// never fails to parse (the error is documented as never-returned); on the
+// impossible error path the toolkit leaves the still-working bitmap default
+// active, so a swallowed error degrades to legible bitmap text, never to none.
+func enableAAText() { aaOnce.Do(func() { _ = toolkit.UseOpenTypeText() }) }
 
 // App identifies one launchable application the iconbar offers. Id is the
 // string sent to the compositor in a {type:"launch", app:Id} message; Glyph
@@ -156,11 +173,6 @@ const (
 	SeparatorW = 8
 )
 
-// charWidth is the horizontal advance of the toolkit bitmap font (5 columns
-// + 1 pixel inter-glyph gap). Kept as a named constant so the label-clip math
-// reads clearly; it equals toolkit.GlyphAdvance() for the default font.
-const charWidth = 6
-
 // State is the toolbar's mutable model: surface size, the static launcher
 // row, the active open-window row (one button per non-panel window the
 // compositor has open, including folded ones — flagged via Window.Minimized),
@@ -204,6 +216,7 @@ func DefaultApps() []App {
 // empty clock string (the worker posts a tick on boot to fill it in) + the
 // default Fluxbox-light theme. The cursor is parked outside the surface.
 func New(width, height int) *State {
+	enableAAText() // labels/clock render with the AA/shaped OpenType face.
 	s := &State{
 		W:               width,
 		H:               height,
@@ -814,22 +827,34 @@ func drawSunkenBevel(p painter.Painter, r toolkit.Rect) {
 	}
 }
 
-// drawClippedText paints txt at (x, y) in ink but stops once the next glyph
-// would extend past maxWidth pixels (relative to x). Replaces the old
-// per-glyph bitmap clip: it truncates to the widest whole-glyph prefix that
-// fits and defers to the toolkit's bitmap font for the actual raster.
+// drawClippedText paints txt at (x, y) in ink but stops once the next rune
+// would extend past maxWidth pixels (relative to x). It measures each whole-rune
+// prefix with toolkit.TextWidth and draws the widest one that still fits, so the
+// clip is exact for the active font — proportional AA/shaped OpenType as well as
+// the fixed-advance bitmap default. (The old maxWidth/charWidth character count
+// assumed a fixed 6px advance and would overflow the button with the wider
+// proportional face.)
 func drawClippedText(p painter.Painter, txt string, x, y int, ink toolkit.RGBA, maxWidth int) {
-	if maxWidth <= 0 {
+	if maxWidth <= 0 || txt == "" {
 		return
 	}
-	n := maxWidth / charWidth
-	if n > len(txt) {
-		n = len(txt)
-	}
-	if n <= 0 {
+	if toolkit.TextWidth(txt) <= maxWidth {
+		toolkit.DrawText(p, x, y, txt, ink)
 		return
 	}
-	toolkit.DrawText(p, x, y, txt[:n], ink)
+	// Grow the prefix rune by rune until the next rune would overflow.
+	runes := []rune(txt)
+	fit := 0
+	for i := 1; i <= len(runes); i++ {
+		if toolkit.TextWidth(string(runes[:i])) > maxWidth {
+			break
+		}
+		fit = i
+	}
+	if fit == 0 {
+		return
+	}
+	toolkit.DrawText(p, x, y, string(runes[:fit]), ink)
 }
 
 // ---- glyph drawing -------------------------------------------------------

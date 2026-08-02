@@ -19,6 +19,79 @@ const (
 
 func newBuf(s *State) []byte { return make([]byte, 4*s.W*s.H) }
 
+// distinctLuma counts how many distinct R+G+B sums appear inside region r of an
+// RGBA buffer. The 5x7 bitmap font paints each text pixel either full ink or
+// untouched ground, so a bitmap render of a text region holds only the ground's
+// handful of levels plus one ink level; the AA/shaped face scan-converts glyph
+// outlines to partial-coverage masks, adding a whole ramp of intermediate levels
+// the bitmap can never produce. A strictly higher distinct-luma count over the
+// SAME region is therefore a ground-independent proof the AA face is active.
+func distinctLuma(buf []byte, W int, r toolkit.Rect) int {
+	seen := map[int]struct{}{}
+	for y := r.Y; y < r.Y+r.H; y++ {
+		for x := r.X; x < r.X+r.W; x++ {
+			o := (y*W + x) * 4
+			seen[int(buf[o])+int(buf[o+1])+int(buf[o+2])] = struct{}{}
+		}
+	}
+	return len(seen)
+}
+
+// TestAATextIsAntiAliased proves the dock now renders labels with the toolkit's
+// AA/shaped OpenType face rather than the 5x7 bitmap. It renders the workspace
+// section ("1 of 4") with the AA face (New enabled it) and again with the bitmap
+// default, and asserts the AA render carries strictly more distinct luma levels
+// in that region — the partial-coverage ramp only anti-aliasing produces. The
+// region spans a bevelled gradient ground, so the assertion is deliberately
+// ground-independent (see distinctLuma).
+func TestAATextIsAntiAliased(t *testing.T) {
+	const W, H = 400, BarHeight
+	region := toolkit.Rect{X: 0, Y: 0, W: WorkspaceW, H: H}
+
+	aa := make([]byte, 4*W*H)
+	Render(New(W, H), aa) // AA face (enableAAText ran in New)
+
+	toolkit.SetFont(nil) // bitmap default
+	defer func() { _ = toolkit.UseOpenTypeText() }()
+	bm := make([]byte, 4*W*H)
+	Render(New(W, H), bm)
+
+	aaN := distinctLuma(aa, W, region)
+	bmN := distinctLuma(bm, W, region)
+	if aaN <= bmN {
+		t.Fatalf("workspace label: distinct luma aa=%d not > bitmap=%d — AA face not active", aaN, bmN)
+	}
+	t.Logf("workspace distinct luma: aa=%d bm=%d", aaN, bmN)
+}
+
+// TestAAFaceFitsBar asserts the taller AA line box still fits the dock's fixed
+// bands: the 20px face sits inside the iconbar button height and the fixed-width
+// workspace/clock sections hold their shaped labels. If a future face/size
+// overflowed a band this fails loudly instead of silently clipping.
+func TestAAFaceFitsBar(t *testing.T) {
+	s := New(tW, tH) // switches the global font to the AA face
+	f, err := toolkit.DefaultOpenTypeFont(toolkit.DefaultOpenTypeSizePx)
+	if err != nil {
+		t.Fatalf("DefaultOpenTypeFont: %v", err)
+	}
+	h := f.Height()
+	if h != 20 {
+		t.Fatalf("AA face height = %d, want 20 (retune bands if this changes)", h)
+	}
+	// The iconbar button inner height (surface minus vertical padding) holds the
+	// 20px line box.
+	if btnH := s.H - 2*IconbarVPad; h > btnH {
+		t.Fatalf("AA height %d overflows iconbar button height %d", h, btnH)
+	}
+	// The fixed-width workspace + clock sections hold their shaped labels.
+	if w := toolkit.TextWidth(s.Workspace); w > WorkspaceW {
+		t.Fatalf("workspace label %q width %d overflows WorkspaceW %d", s.Workspace, w, WorkspaceW)
+	}
+	if w := toolkit.TextWidth("00:00"); w > ClockW {
+		t.Fatalf("clock label width %d overflows ClockW %d", w, ClockW)
+	}
+}
+
 // newPainter returns a zeroed RGBA buffer of w*h plus a PixelPainter over it,
 // for tests that drive the low-level Fluxbox chrome helpers directly.
 func newPainter(w, h int) ([]byte, *painter.PixelPainter) {
@@ -443,62 +516,71 @@ func TestDrawSunkenBevel(t *testing.T) {
 	}
 }
 
-// drawClippedText with a non-positive maxWidth is a no-op; a maxWidth smaller
-// than one glyph paints nothing; an unknown char is silently skipped.
+// countRedInk counts red-ink pixels (R>0, G==B==0) in a black-ground buffer —
+// the whole ink coverage of drawClippedText's red text, anti-aliased edges
+// included (red over black stays a pure red hue at every coverage).
+func countRedInk(buf []byte) int {
+	n := 0
+	for i := 0; i+3 < len(buf); i += 4 {
+		if buf[i] > 0 && buf[i+1] == 0 && buf[i+2] == 0 {
+			n++
+		}
+	}
+	return n
+}
+
+// drawClippedText with a non-positive maxWidth, empty text, or a maxWidth
+// narrower than the first glyph all paint nothing; a generous maxWidth paints
+// the text. The clip is measured with the active (AA/shaped) face, so these
+// assert the font-independent TextWidth path, not the old fixed-6px count.
 func TestDrawClippedTextEdgeCases(t *testing.T) {
+	enableAAText() // exercise against the active AA face (idempotent)
 	red := toolkit.RGB(0xFF, 0, 0)
+
 	// maxWidth <= 0: nothing.
 	buf, p := newPainter(60, BarHeight)
 	drawClippedText(p, "abc", 0, 0, red, 0)
-	for _, b := range buf {
-		if b != 0 {
-			t.Fatalf("clipped paint at maxWidth=0 painted something")
-		}
+	if countRedInk(buf) != 0 {
+		t.Fatalf("clipped paint at maxWidth=0 painted something")
 	}
-	// maxWidth in (0, charWidth): n rounds to 0 -> nothing.
+	// Empty text: nothing.
 	buf, p = newPainter(60, BarHeight)
-	drawClippedText(p, "abc", 0, 0, red, charWidth-1)
-	for _, b := range buf {
-		if b != 0 {
-			t.Fatalf("sub-glyph maxWidth painted something")
-		}
+	drawClippedText(p, "", 0, 0, red, 1<<20)
+	if countRedInk(buf) != 0 {
+		t.Fatalf("empty text painted something")
 	}
-	// Unknown character "@" + known "1" — only the "1" should paint (n>len path
-	// via a generous maxWidth).
+	// maxWidth of 1px is narrower than any glyph: nothing fits.
 	buf, p = newPainter(60, BarHeight)
-	drawClippedText(p, "@1", 0, 0, red, 1<<20)
-	painted := 0
-	for i := 0; i+3 < len(buf); i += 4 {
-		if buf[i] == 0xFF && buf[i+1] == 0 && buf[i+2] == 0 {
-			painted++
-		}
+	drawClippedText(p, "abc", 0, 0, red, 1)
+	if countRedInk(buf) != 0 {
+		t.Fatalf("sub-glyph maxWidth painted something")
 	}
-	if painted == 0 {
-		t.Fatalf("known char never painted alongside unknown")
+	// Generous width: the whole string paints.
+	buf, p = newPainter(60, BarHeight)
+	drawClippedText(p, "A1", 0, 0, red, 1<<20)
+	if countRedInk(buf) == 0 {
+		t.Fatalf("text never painted at a generous width")
 	}
 }
 
-// drawClippedText stops once the next glyph would push past maxWidth.
+// drawClippedText stops once the next glyph would push past maxWidth, measured
+// exactly with the active proportional face via toolkit.TextWidth.
 func TestDrawClippedTextTruncates(t *testing.T) {
+	enableAAText()
 	red := toolkit.RGB(0xFF, 0, 0)
-	buf, p := newPainter(60, BarHeight)
+
+	buf, p := newPainter(80, BarHeight)
 	drawClippedText(p, "111", 0, 0, red, 1<<20) // full
-	full := 0
-	for i := 0; i+3 < len(buf); i += 4 {
-		if buf[i] == 0xFF {
-			full++
-		}
-	}
-	buf, p = newPainter(60, BarHeight)
-	drawClippedText(p, "111", 0, 0, red, 12) // 12/6 = 2 glyphs
-	clipped := 0
-	for i := 0; i+3 < len(buf); i += 4 {
-		if buf[i] == 0xFF {
-			clipped++
-		}
-	}
+	full := countRedInk(buf)
+
+	// A width that fits exactly the first two glyphs — the third overflows.
+	w2 := toolkit.TextWidth("11")
+	buf, p = newPainter(80, BarHeight)
+	drawClippedText(p, "111", 0, 0, red, w2)
+	clipped := countRedInk(buf)
+
 	if clipped == 0 || clipped >= full {
-		t.Fatalf("clip did not truncate: full=%d clipped=%d", full, clipped)
+		t.Fatalf("clip did not truncate: full=%d clipped=%d (w2=%d)", full, clipped, w2)
 	}
 }
 

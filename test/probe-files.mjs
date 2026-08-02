@@ -14,6 +14,11 @@
 //   - Click on a folder row -- the row should be painted with the accent fill
 //     before navigation happens; we sample inside the row to confirm.
 //   - Per-region pixel samples for sidebar / window BG / header bar / accent.
+//   - The anti-aliased/shaped OpenType text signature (toolkit.UseOpenTypeText,
+//     v0.77.0; enabled in scene.New): text-ink assertions count clearly-inked
+//     dark pixels (a superset of the exact ink, robust to the AA face spreading a
+//     glyph across partial-coverage edge pixels) and a dedicated check counts the
+//     neutral partial-coverage greys the 5x7 bitmap can never produce.
 //
 // Saves a screenshot to /tmp/files-nautilus.png.
 
@@ -307,6 +312,36 @@ try {
       }
       return n;
     };
+    // countDarkIn counts clearly-inked dark pixels (every channel <= 120) in a
+    // region. It is the AA-robust replacement for an exact-ink match: the
+    // anti-aliased face spreads a glyph across partial-coverage edge pixels, so a
+    // strict COLOR_TEXT_PRIMARY match undercounts, but the fully+heavily-covered
+    // core stays far darker than the >=235 grounds. A superset of the exact ink,
+    // so it never fails where the bitmap match passed.
+    const countDarkIn = (png, x, y, rw, rh) => {
+      let n = 0;
+      for (let yy = y; yy < y + rh; yy++) {
+        for (let xx = x; xx < x + rw; xx++) {
+          const p = pixelAt(png, xx, yy);
+          if (p[0] <= 120 && p[1] <= 120 && p[2] <= 120) n++;
+        }
+      }
+      return n;
+    };
+    // countAAGreyIn counts neutral partial-coverage greys (R==G==B, strictly
+    // between glyph ink and the white/grey grounds) in a region — the AA
+    // signature the 5x7 bitmap can never produce (it paints only full ink or
+    // untouched ground). The #0860F2 accent is non-neutral and excluded.
+    const countAAGreyIn = (png, x, y, rw, rh) => {
+      let n = 0;
+      for (let yy = y; yy < y + rh; yy++) {
+        for (let xx = x; xx < x + rw; xx++) {
+          const p = pixelAt(png, xx, yy);
+          if (p[0] === p[1] && p[1] === p[2] && p[0] > 40 && p[0] < 234) n++;
+        }
+      }
+      return n;
+    };
 
     // (a) Folder RowIcon on a non-selected list row (row 1 in png1 = Pictures).
     //     drawFolderIconRect fills the ICON_SIZE box with ColorFolderFill; we
@@ -326,22 +361,29 @@ try {
     //     (TABLE_CELL_PAD + ICON_SIZE) plus the cell's own left pad.
     const nameTextX = surface.x + NAME_COL_X + ICON_SIZE + TABLE_CELL_PAD;
     const nameTextY = listY0 + ROW_HEIGHT;
-    const namePixels = countIn(png1, nameTextX, nameTextY, 200, ROW_HEIGHT, COLOR_TEXT_PRIMARY);
+    const namePixels = countDarkIn(png1, nameTextX, nameTextY, 200, ROW_HEIGHT);
     if (namePixels < 20) {
-      fail(`list row 1 name-text pixels = ${namePixels} (need >= 20 of ${COLOR_TEXT_PRIMARY}); drawText is failing`);
+      fail(`list row 1 name-text dark pixels = ${namePixels} (need >= 20); drawText is failing`);
     } else {
-      console.log(`ok  list-row name text: ${namePixels} ColorTextPrimary pixels`);
+      console.log(`ok  list-row name text: ${namePixels} inked pixels`);
+    }
+    // AA proof: the name label must also carry neutral partial-coverage greys.
+    const nameAAGrey = countAAGreyIn(png1, nameTextX, nameTextY, 200, ROW_HEIGHT);
+    if (nameAAGrey < 8) {
+      fail(`list row 1 name-text AA greys = ${nameAAGrey} (need >= 8); AA face not active`);
+    } else {
+      console.log(`ok  list-row name text AA signature: ${nameAAGrey} neutral greys`);
     }
 
     // (c) Sidebar Documents entry text -- the unselected sidebar entry's
     //     label paints ColorTextPrimary at x ~32 inside the sidebar.
     const sbFirstRowY = surface.y + HEADER_BAR_HEIGHT + SIDEBAR_TOP_PADDING + SIDEBAR_SECTION_HEADER_H;
     const sbDocsY = sbFirstRowY + SIDEBAR_ROW_H; // row 1 = Documents
-    const sbTextPixels = countIn(png1, surface.x + 30, sbDocsY, SIDEBAR_WIDTH - 32, SIDEBAR_ROW_H, COLOR_TEXT_PRIMARY);
+    const sbTextPixels = countDarkIn(png1, surface.x + 30, sbDocsY, SIDEBAR_WIDTH - 32, SIDEBAR_ROW_H);
     if (sbTextPixels < 6) {
-      fail(`sidebar Documents text pixels = ${sbTextPixels} (need >= 6 of ${COLOR_TEXT_PRIMARY}); sidebar labels invisible`);
+      fail(`sidebar Documents text dark pixels = ${sbTextPixels} (need >= 6); sidebar labels invisible`);
     } else {
-      console.log(`ok  sidebar Documents text: ${sbTextPixels} ColorTextPrimary pixels`);
+      console.log(`ok  sidebar Documents text: ${sbTextPixels} inked pixels`);
     }
 
     // (d) Sidebar Home entry icon -- the selected row paints white ink

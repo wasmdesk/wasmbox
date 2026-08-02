@@ -15,9 +15,25 @@
 package scene
 
 import (
+	"sync"
+
 	"github.com/go-widgets/painter"
 	"github.com/go-widgets/toolkit"
 )
+
+// aaOnce flips the toolkit's active font to anti-aliased, shaped OpenType text
+// exactly once for this client process. It is package-scoped because SetFont is
+// a process-global; a single opt-in matches the toolkit's "flip it once at
+// start-up" contract.
+var aaOnce sync.Once
+
+// enableAAText installs the toolkit's bundled AA/shaped OpenType face (Atkinson
+// Hyperlegible @16px, toolkit v0.77.0). The bundled face never fails to parse
+// (the error is documented as never-returned); on the impossible error path the
+// toolkit leaves the still-working bitmap default active. Hello draws no text —
+// its surface is a pure gradient — so the switch is a fleet-consistency no-op
+// here, kept so every proportional-font client opts in the same way.
+func enableAAText() { aaOnce.Do(func() { _ = toolkit.UseOpenTypeText() }) }
 
 // palettes is a list of RGB tints applied to the underlying gradient. Each
 // tint is a per-channel multiplier in fixed-point (0..255 = 0.0..1.0). The
@@ -108,6 +124,7 @@ type State struct {
 // New makes a State for a surface of width × height pixels with the first
 // palette selected.
 func New(width, height int) *State {
+	enableAAText() // fleet-consistent opt-in; Hello itself paints no text.
 	return &State{
 		W:     width,
 		H:     height,
