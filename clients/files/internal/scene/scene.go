@@ -13,22 +13,30 @@
 //	└─ (body / Centre)  body HBox
 //	   ├─ (fixed SidebarWidth)  sidebar VBox
 //	   │     [ pad · section · rows … · section · rows … ]     (sectioned)
-//	   └─ (flex)  content VBox
-//	         ├─ (fixed ColumnHeaderHeight) columnHeader     — Name / Size
-//	         └─ (flex) fileList                              — one fileRow / entry
+//	   └─ (flex)  fileTable                                    — a real toolkit.Table
+//	         header row: Name / Size            (Size right-aligned)
+//	         body rows : one per entry, with a per-row RowIcon glyph
+//
+// The file list is a real toolkit.Table (Name + Size columns) with a per-row
+// leading icon supplied through Table.RowIcon (v0.74's file-list-enabling
+// addition): each row's glyph — the two-tone folder or the folded-page file
+// icon — is painted in the reserved gutter of the Name column, so the browser
+// no longer hand-composes custom fileRow/fileList leaves just to get an icon
+// column (the workaround noted in files PR #61). The sectioned sidebar stays a
+// custom VBox of sidebarRows because its section-header bands are not a table
+// shape.
 //
 // A single root.SetBounds lays the whole tree out, root.Draw paints it, and
 // root.OnEvent routes left-clicks into child-local space. The two things the
 // toolkit's click-only Event model cannot express — a secondary (right) button
 // and a double-click count — are dispatched at the scene level against the
-// list's own widget bounds (rowAt), so no hand-computed hit rectangles remain.
+// table's own widget bounds (fileTable.rowAt), so no hand-computed hit
+// rectangles remain.
 //
-// Layout constants + the WhiteSur palette are preserved byte-for-byte from the
-// pre-migration hand-drawn renderer so the headless Playwright probes
-// (test/probe-files*.mjs), which pin exact pixel colours + coordinates, keep
-// passing. The custom leaf widgets (fileRow / sidebarRow / the file-type icon
-// glyphs) draw those pixels; text is the toolkit's bitmap font via DrawText,
-// replacing the old bespoke 8x8 font.
+// The WhiteSur palette is applied to the Table through a dedicated theme
+// (tableTheme) the fileTable substitutes at Draw time, so the file view keeps
+// its white pane / #0860F2 accent / dimmed-secondary header look without
+// disturbing the chrome theme the buttons, breadcrumbs, menu and dialog use.
 
 package scene
 
@@ -41,13 +49,9 @@ import (
 // invariants. The defaults reproduce GTK4 / libadwaita proportions on a
 // 720x440 surface.
 const (
-	// RowHeight is the vertical pitch of one entry row (Nautilus default ~32).
-	RowHeight = 32
 	// HeaderBarHeight is the height of the top header bar (hamburger + nav
 	// buttons + breadcrumb path-bar).
 	HeaderBarHeight = 44
-	// ColumnHeaderHeight is the band that holds the Name / Size labels.
-	ColumnHeaderHeight = 28
 	// SidebarWidth is the width of the left navigation pane.
 	SidebarWidth = 160
 	// SidebarSectionHeaderHeight is the height of a section label band.
@@ -57,13 +61,12 @@ const (
 	// SidebarTopPadding is the vertical gap between the header bar and the
 	// first section label.
 	SidebarTopPadding = 8
-	// IconSize is the side length used to position list-row icons.
-	IconSize = 18
 
-	// NameColX is the left edge of the icon+name cell (surface coordinates).
-	NameColX = SidebarWidth + 12
-	// SizeColRight is the right edge of the right-aligned Size column.
-	SizeColRight = 700
+	// SizeColWidth is the fixed pixel width of the right-aligned Size column;
+	// the Name column takes the remaining (flex) budget. The Size column's text
+	// is right-aligned via toolkit.AlignRight so byte counts line up on the
+	// right edge, exactly as the pre-Table renderer's Size column did.
+	SizeColWidth = 120
 
 	// Header-bar control geometry (top inset + button height/width + gaps).
 	headerBtnY = 10
@@ -141,9 +144,7 @@ type State struct {
 	fwdBtn      *toolkit.IconButton
 	sidebar     *toolkit.VBox
 	sidebarRows []*sidebarRow
-	content     *toolkit.VBox
-	colHeader   *columnHeader
-	list        *fileList
+	table       *fileTable
 
 	// Overlays.
 	ctxMenu       *toolkit.ContextMenu
@@ -224,19 +225,14 @@ func (s *State) buildTree() {
 		s.sidebar.AddFixed(r, SidebarRowHeight)
 	}
 
-	// --- content (column header + list) ----------------------------------
-	s.colHeader = &columnHeader{}
-	s.list = &fileList{s: s}
-	s.content = toolkit.NewVBox()
-	s.content.Spacing = 0
-	s.content.AddFixed(s.colHeader, ColumnHeaderHeight)
-	s.content.AddFlex(s.list, 1)
+	// --- content (Name / Size Table with a per-row icon gutter) ----------
+	s.table = newFileTable(s)
 
 	// --- body + shell -----------------------------------------------------
 	body := toolkit.NewHBox()
 	body.Spacing = 0
 	body.AddFixed(s.sidebar, SidebarWidth)
-	body.AddFlex(s.content, 1)
+	body.AddFlex(s.table, 1)
 
 	s.root = toolkit.NewDock(body)
 	s.root.Dock(band, toolkit.DockTop, HeaderBarHeight)
@@ -257,7 +253,7 @@ func spacer() toolkit.Widget { return toolkit.NewContainer(nil) }
 // path. The bounds are stable across navigation (same surface) so no full
 // re-layout is required beyond the list's own row placement.
 func (s *State) refreshView() {
-	s.list.setRows()
+	s.table.setRows()
 	s.crumbs.Segments = PathCrumbs(s.Browser.CurrentPath)
 }
 
@@ -271,6 +267,12 @@ func Render(s *State, buf []byte) {
 	}
 	p := painter.NewPixelPainter(buf, s.W, s.H)
 	th := s.theme
+
+	// Keep the Table's accent highlight on the row the navigation cursor points
+	// at. HandleKey's ArrowUp/ArrowDown move Browser.Cursor without re-listing
+	// (so refreshView isn't called); syncing here means every frame paints the
+	// current selection whichever path mutated the cursor.
+	s.table.Selected = s.Browser.Cursor
 
 	// Grounds: window (right pane) white, sidebar grey, header grey, hairlines.
 	p.FillRect(toolkit.Rect{X: 0, Y: 0, W: s.W, H: s.H}, ColorWindowBG)
@@ -382,7 +384,7 @@ func (s *State) HandleMouseButton(x, y, button, clickCount int) bool {
 // previewAt opens the preview overlay when (x, y) lands on a previewable text
 // file row. Returns true when a preview opened.
 func (s *State) previewAt(x, y int) bool {
-	row := s.list.rowAt(x, y)
+	row := s.table.rowAt(x, y)
 	if row < 0 {
 		return false
 	}
@@ -399,10 +401,10 @@ func (s *State) previewAt(x, y int) bool {
 // file list: an Open/Rename/Delete menu on a row, or a New Folder/New File menu
 // on the empty area below the rows. Returns false (no menu) elsewhere.
 func (s *State) openContextMenuAt(x, y int) bool {
-	if !s.list.Bounds().Contains(x, y) {
+	if !s.table.bodyContains(x, y) {
 		return false
 	}
-	if row := s.list.rowAt(x, y); row >= 0 {
+	if row := s.table.rowAt(x, y); row >= 0 {
 		s.Browser.Cursor = row
 		e := s.Browser.Entries[row]
 		s.ctxTarget = Join(s.Browser.CurrentPath, e.Name)
@@ -522,7 +524,7 @@ func (s *State) layoutPreview() {
 	if px < SidebarWidth+8 {
 		px = SidebarWidth + 8
 	}
-	py := HeaderBarHeight + ColumnHeaderHeight + 16
+	py := HeaderBarHeight + toolkit.TableHeaderHeight + 16
 	s.previewDialog.SetBounds(toolkit.Rect{X: px, Y: py, W: PreviewWidth, H: PreviewHeight})
 }
 
@@ -584,121 +586,138 @@ func (s *State) clickSidebar(i int) {
 
 // --- custom leaf widgets -------------------------------------------------
 
-// fileRow is one entry row: a file-type icon + name (left) + right-aligned
-// size. The selected row (Browser.Cursor) fills the accent across the whole
-// right pane with white ink.
-type fileRow struct {
-	toolkit.Base
-	s *State
-	i int
-	e Entry
+// fileTable is the file list: a real toolkit.Table (Name + Size columns) with
+// a per-row leading icon supplied through Table.RowIcon. It embeds the Table so
+// the toolkit owns the header, row backgrounds, accent selection, text layout
+// and the icon gutter; fileTable adds only the wasmbox glue the toolkit's
+// click-only Event model can't express on its own:
+//
+//   - Draw substitutes the Files-specific tableTheme so the view keeps its
+//     white pane / #0860F2 accent / dimmed-secondary header palette without
+//     touching the chrome theme the buttons + menu + dialog draw with;
+//   - OnEvent turns a left click into a select-or-descend (clickRow), rather
+//     than the Table's own passive/multi-select behaviour;
+//   - rowAt / bodyContains map a surface point to a body row for the scene's
+//     right-click + double-click dispatch (which the Event model omits).
+type fileTable struct {
+	*toolkit.Table
+	s     *State
+	theme *toolkit.Theme
 }
 
-func (r *fileRow) Draw(p painter.Painter, _ *toolkit.Theme) {
-	b := r.Bounds()
-	selected := r.i == r.s.Browser.Cursor
-	fg := ColorTextPrimary
-	fgSecondary := ColorTextSecondary
-	if selected {
-		p.FillRect(b, ColorAccent)
-		fg = ColorOnAccent
-		fgSecondary = ColorOnAccent
-	}
-	iconX := NameColX
-	iconY := b.Y + (RowHeight-IconSize)/2
-	if r.e.IsDir {
-		drawFolderIcon(p, iconX, iconY, selected)
-	} else {
-		drawFileIcon(p, iconX, iconY, selected)
-	}
-	nameX := iconX + IconSize + 10
-	nameY := b.Y + (RowHeight-toolkit.GlyphHeight())/2
-	toolkit.DrawText(p, nameX, nameY, r.e.Name, fg)
-	size := "--"
-	if !r.e.IsDir {
-		size = formatSize(r.e.Size)
-	}
-	sizeX := SizeColRight - 16 - toolkit.TextWidth(size)
-	toolkit.DrawText(p, sizeX, nameY, size, fgSecondary)
-}
-
-func (r *fileRow) OnEvent(ev toolkit.Event) {
-	if ev.Kind == toolkit.EventClick {
-		r.s.clickRow(r.i)
-	}
-}
-
-// fileList is a custom container of fileRows. It rebuilds its rows from the
-// current listing (setRows), lays them out at RowHeight pitch, routes clicks to
-// the row they land on, and exposes rowAt for the scene's right/double-click
-// dispatch. (The toolkit Table has no per-row icon column, so the list is
-// composed of custom rows instead -- see the follow-up note in the PR.)
-type fileList struct {
-	toolkit.Base
-	s    *State
-	rows []*fileRow
-}
-
-// setRows rebuilds the row widgets from the browser's current entries + lays
-// them out within the list's bounds.
-func (l *fileList) setRows() {
-	l.rows = l.rows[:0]
-	for i := range l.s.Browser.Entries {
-		l.rows = append(l.rows, &fileRow{s: l.s, i: i, e: l.s.Browser.Entries[i]})
-	}
-	l.layoutRows()
-}
-
-// layoutRows positions each row top-to-bottom at RowHeight pitch.
-func (l *fileList) layoutRows() {
-	b := l.Bounds()
-	for i, r := range l.rows {
-		r.SetBounds(toolkit.Rect{X: b.X, Y: b.Y + i*RowHeight, W: b.W, H: RowHeight})
-	}
-}
-
-func (l *fileList) SetBounds(r toolkit.Rect) {
-	l.Base.SetBounds(r)
-	l.layoutRows()
-}
-
-func (l *fileList) Draw(p painter.Painter, th *toolkit.Theme) {
-	b := l.Bounds()
-	for _, r := range l.rows {
-		if r.Bounds().Y >= b.Y+b.H {
-			break // clip rows past the surface, matching the old renderer
+// newFileTable builds the Name/Size Table, wires the per-row icon, and pins the
+// Files WhiteSur palette into a dedicated theme the Table draws with.
+func newFileTable(s *State) *fileTable {
+	tbl := toolkit.NewTable([]toolkit.TableColumn{
+		{Title: "Name", Align: toolkit.AlignLeft},
+		{Title: "Size", Width: SizeColWidth, Align: toolkit.AlignRight},
+	}, nil)
+	t := &fileTable{Table: tbl, s: s, theme: newTableTheme()}
+	// RowIcon paints the two-tone folder / folded-page file glyph in the Name
+	// column's reserved gutter. The closure decides the selected variant from
+	// Browser.Cursor (rather than the ink Draw hands it) so the folder keeps its
+	// blue fill on unselected rows and inverts to white on the accent row.
+	tbl.RowIcon = func(row int) (toolkit.TableIconFunc, bool) {
+		if row < 0 || row >= len(s.Browser.Entries) {
+			return nil, false
 		}
-		r.Draw(p, th)
+		e := s.Browser.Entries[row]
+		selected := row == s.Browser.Cursor
+		return func(p painter.Painter, r toolkit.Rect, _ toolkit.RGBA) {
+			if e.IsDir {
+				drawFolderIconRect(p, r, selected)
+			} else {
+				drawFileIconRect(p, r, selected)
+			}
+		}, true
+	}
+	return t
+}
+
+// newTableTheme is the WhiteSur palette mapped onto the roles Table.Draw reads:
+// a white pane (Surface) with no zebra stripe (Background == Surface), a white
+// header band (SurfaceAlt) carrying dimmed-secondary titles (OnBackground),
+// primary-ink body cells (OnSurface), the #0860F2 accent selection with white
+// ink on it (Extra["OnAccent"]), and #d3d3d3 hairlines (Border) for the header
+// underline + the Name/Size separator.
+func newTableTheme() *toolkit.Theme {
+	return &toolkit.Theme{
+		Background:   ColorWindowBG,
+		Surface:      ColorWindowBG,
+		SurfaceAlt:   ColorWindowBG,
+		OnBackground: ColorTextSecondary,
+		OnSurface:    ColorTextPrimary,
+		Accent:       ColorAccent,
+		Border:       ColorDivider,
+		Extra:        map[string]toolkit.RGBA{"OnAccent": ColorOnAccent},
 	}
 }
 
-func (l *fileList) OnEvent(ev toolkit.Event) {
+// setRows rebuilds the Table's rows from the browser's current entries: one
+// [Name, Size] row per entry, with folders rendering "--" for the size exactly
+// as the pre-Table renderer did.
+func (t *fileTable) setRows() {
+	rows := make([][]string, 0, len(t.s.Browser.Entries))
+	for _, e := range t.s.Browser.Entries {
+		size := "--"
+		if !e.IsDir {
+			size = formatSize(e.Size)
+		}
+		rows = append(rows, []string{e.Name, size})
+	}
+	t.Rows = rows
+}
+
+// Draw paints the Table with the Files-specific palette rather than the chrome
+// theme the container hands down.
+func (t *fileTable) Draw(p painter.Painter, _ *toolkit.Theme) {
+	t.Table.Draw(p, t.theme)
+}
+
+// OnEvent turns a left click into a select-or-descend on the body row it lands
+// on. Coordinates arrive table-local (the container routes into child space);
+// a click on the header row or below the last entry resolves to -1 and is a
+// no-op, matching the pre-Table column-header / empty-area behaviour.
+func (t *fileTable) OnEvent(ev toolkit.Event) {
 	if ev.Kind != toolkit.EventClick {
 		return
 	}
-	b := l.Bounds()
-	sx, sy := ev.X+b.X, ev.Y+b.Y
-	for _, r := range l.rows {
-		rb := r.Bounds()
-		if rb.Contains(sx, sy) {
-			r.OnEvent(toolkit.Event{Kind: ev.Kind, X: sx - rb.X, Y: sy - rb.Y})
-			return
-		}
+	if row := t.rowAtLocal(ev.X, ev.Y); row >= 0 {
+		t.s.clickRow(row)
 	}
 }
 
-// rowAt maps a surface point to a row index, or -1 if it lands outside the list
-// or below the last row.
-func (l *fileList) rowAt(sx, sy int) int {
-	b := l.Bounds()
-	if !b.Contains(sx, sy) {
+// rowAtLocal maps a table-local point to a body row index, or -1 for the header
+// band, a horizontal miss, or a point below the last row.
+func (t *fileTable) rowAtLocal(lx, ly int) int {
+	b := t.Bounds()
+	if lx < 0 || lx >= b.W || ly < toolkit.TableHeaderHeight {
 		return -1
 	}
-	idx := (sy - b.Y) / RowHeight
-	if idx < 0 || idx >= len(l.rows) {
+	idx := (ly - toolkit.TableHeaderHeight) / toolkit.TableRowHeight
+	if idx < 0 || idx >= len(t.Rows) {
 		return -1
 	}
 	return idx
+}
+
+// rowAt maps a surface point to a body row index (or -1), the surface-space
+// entry point the scene's right/double-click dispatch uses.
+func (t *fileTable) rowAt(sx, sy int) int {
+	b := t.Bounds()
+	if !b.Contains(sx, sy) {
+		return -1
+	}
+	return t.rowAtLocal(sx-b.X, sy-b.Y)
+}
+
+// bodyContains reports whether a surface point lands in the Table's body region
+// (inside the widget but below the header row) -- the area a right-click may pop
+// an entry or "create new" context menu over. A point in the header band or
+// outside the widget is excluded, so a header right-click stays a no-op.
+func (t *fileTable) bodyContains(sx, sy int) bool {
+	b := t.Bounds()
+	return b.Contains(sx, sy) && sy >= b.Y+toolkit.TableHeaderHeight
 }
 
 // sidebarRow is one navigation row: a kind glyph + a label. The selected row
@@ -747,23 +766,6 @@ func (l *sectionLabel) Draw(p painter.Painter, _ *toolkit.Theme) {
 // not interactive).
 func (l *sectionLabel) HitTest(_, _ int) bool { return false }
 
-// columnHeader is the non-interactive Name / Size band above the file list.
-type columnHeader struct {
-	toolkit.Base
-}
-
-func (c *columnHeader) Draw(p painter.Painter, _ *toolkit.Theme) {
-	b := c.Bounds()
-	y := b.Y + (ColumnHeaderHeight-toolkit.GlyphHeight())/2
-	toolkit.DrawText(p, b.X+12, y, "Name", ColorTextSecondary)
-	size := "Size"
-	toolkit.DrawText(p, SizeColRight-toolkit.TextWidth(size), y, size, ColorTextSecondary)
-	// Bottom divider.
-	p.FillRect(toolkit.Rect{X: b.X, Y: b.Y + b.H - 1, W: b.W, H: 1}, ColorDivider)
-}
-
-func (c *columnHeader) HitTest(_, _ int) bool { return false }
-
 // previewText draws the preview overlay's body lines (the Dialog's content).
 type previewText struct {
 	toolkit.Base
@@ -785,40 +787,50 @@ func (t *previewText) Draw(p painter.Painter, _ *toolkit.Theme) {
 
 // --- file-type icon glyphs (painter primitives) --------------------------
 
-// drawFolderIcon paints a Nautilus-style 24x18 folder at (x, y). Selected rows
-// flip the fill to white so the icon reads on the accent strip.
-func drawFolderIcon(p painter.Painter, x, y int, selected bool) {
+// drawFolderIconRect paints a Nautilus-style two-tone folder inside the square
+// icon rect r (the toolkit.TableIconSize gutter box). Selected rows flip the
+// fill to white so the icon reads on the accent strip. It ignores the ink Draw
+// passes -- the folder is deliberately two-tone blue, not a single-ink glyph --
+// taking the selected variant from the caller instead.
+func drawFolderIconRect(p painter.Painter, r toolkit.Rect, selected bool) {
 	face, tab, stroke := ColorFolderFill, ColorFolderTab, ColorFolderStroke
 	if selected {
 		face, tab, stroke = ColorOnAccent, ColorOnAccent, colorSelectedStroke
 	}
-	fill(p, x, y, 8, 3, tab)          // tab
-	fill(p, x, y+3, 24, 14, face)     // body
-	fill(p, x, y+3, 24, 1, stroke)    // strokes
-	fill(p, x, y+16, 24, 1, stroke)
-	fill(p, x, y+3, 1, 14, stroke)
-	fill(p, x+23, y+3, 1, 14, stroke)
-	fill(p, x, y, 8, 1, stroke)
-	fill(p, x, y, 1, 3, stroke)
-	fill(p, x+7, y, 1, 3, stroke)
+	x, w := r.X, r.W
+	bodyY, bodyH := r.Y+3, r.H-3            // body sits below the tab
+	fill(p, x, r.Y, 6, 2, tab)              // tab
+	fill(p, x, bodyY, w, bodyH, face)       // body
+	fill(p, x, bodyY, w, 1, stroke)         // top edge
+	fill(p, x, bodyY+bodyH-1, w, 1, stroke) // bottom edge
+	fill(p, x, bodyY, 1, bodyH, stroke)     // left edge
+	fill(p, x+w-1, bodyY, 1, bodyH, stroke) // right edge
+	fill(p, x, r.Y, 6, 1, stroke)           // tab top
+	fill(p, x, r.Y, 1, 3, stroke)           // tab left
+	fill(p, x+5, r.Y, 1, 3, stroke)         // tab right
 }
 
-// drawFileIcon paints an 18x22 page with a folded top-right corner at (x, y).
-func drawFileIcon(p painter.Painter, x, y int, selected bool) {
+// drawFileIconRect paints a page with a folded top-right corner, centred inside
+// the square icon rect r. Selected rows flip the paper to white so it reads on
+// the accent strip.
+func drawFileIconRect(p painter.Painter, r toolkit.Rect, selected bool) {
 	paper, stroke := ColorFilePaper, ColorFileBorder
 	if selected {
 		paper, stroke = ColorOnAccent, colorSelectedStroke
 	}
-	fill(p, x, y, 18, 22, paper)
-	fill(p, x, y, 18, 1, stroke)
-	fill(p, x, y+21, 18, 1, stroke)
-	fill(p, x, y, 1, 22, stroke)
-	fill(p, x+17, y, 1, 22, stroke)
-	for i := 0; i < 6; i++ { // folded corner
-		fill(p, x+12+i, y, 6-i, 1, stroke)
+	w, h := 12, r.H
+	x := r.X + (r.W-w)/2
+	y := r.Y
+	fill(p, x, y, w, h, paper)
+	fill(p, x, y, w, 1, stroke)     // top
+	fill(p, x, y+h-1, w, 1, stroke) // bottom
+	fill(p, x, y, 1, h, stroke)     // left
+	fill(p, x+w-1, y, 1, h, stroke) // right
+	for i := 0; i < 5; i++ {        // folded corner
+		fill(p, x+w-5+i, y, 5-i, 1, stroke)
 	}
-	for i := 0; i < 6; i++ { // fold diagonal
-		fill(p, x+12+i, y+5-i, 1, 1, stroke)
+	for i := 0; i < 5; i++ { // fold diagonal
+		fill(p, x+w-5+i, y+4-i, 1, 1, stroke)
 	}
 }
 

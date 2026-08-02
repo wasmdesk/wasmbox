@@ -81,36 +81,20 @@ func main() {
 	// Initial paint so the compositor has something to blit immediately.
 	render()
 
-	// Render coalescing: keystrokes can arrive faster than a full-grid repaint
-	// completes, and repainting synchronously inside every keydown lets a burst
-	// (e.g. a fast paste or an autotyped test) queue N blocking renders behind
-	// the input events -- the canvas then trails the shell state by the whole
-	// backlog. Instead, a keydown only mutates the shell and flags the frame
-	// dirty; a single setTimeout(0) task drains the flag with one render of the
-	// LATEST state. A burst therefore collapses to ~one repaint per event-loop
-	// turn, keeping the canvas in step with the shell no matter the CPU speed.
-	// (Web Workers have no requestAnimationFrame, so setTimeout is the schedule
-	// primitive here.)
-	renderScheduled := false
-	var flushCb js.Func
-	flushCb = js.FuncOf(func(_ js.Value, _ []js.Value) any {
-		renderScheduled = false
-		render()
-		return nil
-	})
-	scheduleRender := func() {
-		if renderScheduled {
-			return
-		}
-		renderScheduled = true
-		js.Global().Call("setTimeout", flushCb, 0)
-	}
-
 	// Input handler: routes keydown events into the shell. The compositor
 	// sends one event per keystroke with kind=="keydown" + key=="<char>" for
 	// printable keys, "Enter" / "Backspace" for the control keys we care
-	// about. It schedules a coalesced repaint only when HandleKey reports a
-	// change.
+	// about. It repaints directly whenever HandleKey reports a change.
+	//
+	// Earlier this path coalesced repaints through a setTimeout(0) task: the
+	// toolkit's TerminalView.Draw span-filled the whole grid background twice
+	// per frame, so a keystroke burst could queue N blocking renders behind the
+	// input events and the canvas trailed the shell by the whole backlog. The
+	// v0.74 Draw does a single background pass (cells that match the clear
+	// colour are skipped), so a per-keystroke render is cheap enough to run
+	// synchronously and the coalescing shim is no longer needed -- direct
+	// rendering keeps the canvas exactly in step with the shell with no
+	// stale-capture backlog.
 	cb := js.FuncOf(func(_ js.Value, args []js.Value) any {
 		if len(args) == 0 {
 			return nil
@@ -122,7 +106,7 @@ func main() {
 		}
 		key := ev.Get("key").String()
 		if state.HandleKey(key) {
-			scheduleRender()
+			render()
 		}
 		return nil
 	})

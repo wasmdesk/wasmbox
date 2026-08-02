@@ -250,18 +250,29 @@ func TestGridDrawGlyphAndCursor(t *testing.T) {
 	}
 }
 
-// cellFont reports the fixed 16×16 cell metrics (pinning the grid geometry)
-// and measures one cell per rune -- the monospace contract the grid relies on.
-func TestCellFontMetrics(t *testing.T) {
-	f := newCellFont()
-	if f.Advance() != cellW || f.Height() != cellH {
-		t.Fatalf("cell metrics = %dx%d, want %dx%d", f.Advance(), f.Height(), cellW, cellH)
+// NewGrid pins the fixed 16×16 cell geometry via TerminalView.SetCellSize
+// (replacing the old cellFont metrics shim): once bounds are established the
+// resolved cell size is exactly cellW×cellH regardless of the ×2 bitmap font's
+// own 12×14 glyph metrics. This is the invariant the pixel-calibrated e2e
+// probes rely on.
+func TestGridCellSizePinned(t *testing.T) {
+	g := NewGrid(3, 1)
+	// Before SetBounds the resolved size is still 0 (the toolkit defers it to
+	// the first placement), but the override fields are already in force.
+	if g.CellW != cellW || g.CellH != cellH {
+		t.Fatalf("cell override = %dx%d, want %dx%d", g.CellW, g.CellH, cellW, cellH)
 	}
-	if got := f.Measure("abc"); got != 3*cellW {
-		t.Fatalf("Measure(\"abc\") = %d, want %d", got, 3*cellW)
+	g.SetBounds(toolkit.Rect{X: 0, Y: 0, W: 3 * cellW, H: cellH})
+	if g.CellWidth() != cellW || g.CellHeight() != cellH {
+		t.Fatalf("resolved cell size = %dx%d, want %dx%d",
+			g.CellWidth(), g.CellHeight(), cellW, cellH)
 	}
-	if got := f.Measure(""); got != 0 {
-		t.Fatalf("Measure(\"\") = %d, want 0", got)
+	// The pinned size must NOT track the (smaller) ×2 bitmap-font metrics --
+	// that divergence is the whole reason SetCellSize is used instead of the
+	// font's own advance/height.
+	font := toolkit.NewBitmapFont(terminalScale)
+	if g.CellWidth() == font.Advance() && g.CellHeight() == font.Height() {
+		t.Fatal("cell size collapsed to raw font metrics; SetCellSize override lost")
 	}
 }
 

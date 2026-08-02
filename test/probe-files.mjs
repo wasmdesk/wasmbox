@@ -38,16 +38,21 @@ const COLOR_TEXT_PRIMARY   = [36, 36, 36];
 const COLOR_FOLDER_FILL    = [74, 134, 246];
 const COLOR_ON_ACCENT      = [255, 255, 255];
 
-// Layout constants must match render.go.
+// Layout constants must match clients/files/internal/scene. The file list is a
+// toolkit.Table now, so the "column header" is the Table's own header row
+// (toolkit.TableHeaderHeight = 24), rows advance at toolkit.TableRowHeight = 22,
+// and the per-row RowIcon paints a toolkit.TableIconSize = 16 box in the Name
+// column's leading gutter (toolkit.TableCellPadX = 4 inset).
 const HEADER_BAR_HEIGHT          = 44;
-const COLUMN_HEADER_HEIGHT       = 28;
-const ROW_HEIGHT                 = 32;
+const COLUMN_HEADER_HEIGHT       = 24; // toolkit.TableHeaderHeight
+const ROW_HEIGHT                 = 22; // toolkit.TableRowHeight
 const SIDEBAR_WIDTH              = 160;
 const SIDEBAR_TOP_PADDING        = 8;
 const SIDEBAR_SECTION_HEADER_H   = 22;
 const SIDEBAR_ROW_H              = 28;
-const ICON_SIZE                  = 18;
-const NAME_COL_X                 = SIDEBAR_WIDTH + 12;
+const ICON_SIZE                  = 16; // toolkit.TableIconSize
+const TABLE_CELL_PAD             = 4;  // toolkit.TableCellPadX
+const NAME_COL_X                 = SIDEBAR_WIDTH + TABLE_CELL_PAD; // RowIcon gutter left edge
 const SURFACE_W                  = 720;
 const SURFACE_H                  = 440;
 
@@ -131,7 +136,10 @@ function fileSurface(png) {
 // inside the file browser surface. Scans a column inside the right pane,
 // past the sidebar.
 function findHighlightedRow(png, surface) {
-  const x = surface.x + SIDEBAR_WIDTH + 4;
+  // Sample the 2-px pure-accent inset before the RowIcon gutter (the Table
+  // fills the whole row background with the accent, then paints the icon at
+  // TABLE_CELL_PAD, so x+2 is accent while x+4 would hit the glyph).
+  const x = surface.x + SIDEBAR_WIDTH + 2;
   const y0 = surface.y + HEADER_BAR_HEIGHT + COLUMN_HEADER_HEIGHT;
   const y1 = y0 + 8 * ROW_HEIGHT;
   for (let y = y0; y < y1; y++) {
@@ -270,7 +278,7 @@ try {
 
     // Sample the accent fill inside row 1 (past the icon) for the explicit
     // "clicked row background = accent blue" claim the spec asks for.
-    const accentSampleX = surface.x + SIDEBAR_WIDTH + 4;
+    const accentSampleX = surface.x + SIDEBAR_WIDTH + 2;
     const accentSampleY = row1Y + ROW_HEIGHT / 2;
     const accentPx = pixelAt(png2, accentSampleX, accentSampleY);
     if (!eqColor(accentPx, COLOR_ACCENT)) {
@@ -300,25 +308,25 @@ try {
       return n;
     };
 
-    // (a) Folder icon on a non-selected list row (row 1 in png1 = Pictures).
-    //     paintFolderIcon fills 24x14 with ColorFolderFill (95,161,224). We
-    //     scan the icon's bounding box -- if drawing fails, this is 0.
+    // (a) Folder RowIcon on a non-selected list row (row 1 in png1 = Pictures).
+    //     drawFolderIconRect fills the ICON_SIZE box with ColorFolderFill; we
+    //     scan the icon's gutter box -- if drawing fails, this is 0.
     const listY0 = surface.y + HEADER_BAR_HEIGHT + COLUMN_HEADER_HEIGHT;
     const iconRowY = listY0 + ROW_HEIGHT + (ROW_HEIGHT - ICON_SIZE) / 2;
     const iconRowX = surface.x + NAME_COL_X;
-    const folderPixels = countIn(png1, iconRowX, iconRowY, 24, ICON_SIZE, COLOR_FOLDER_FILL);
+    const folderPixels = countIn(png1, iconRowX, iconRowY, ICON_SIZE, ICON_SIZE, COLOR_FOLDER_FILL);
     if (folderPixels < 30) {
       fail(`folder-icon pixels on list row 1 = ${folderPixels} (need >= 30 of ${COLOR_FOLDER_FILL}); icons not painting`);
     } else {
-      console.log(`ok  list-row folder icon: ${folderPixels} ColorFolderFill pixels in 24x${ICON_SIZE} band`);
+      console.log(`ok  list-row folder icon: ${folderPixels} ColorFolderFill pixels in ${ICON_SIZE}x${ICON_SIZE} box`);
     }
 
     // (b) List row 1 NAME label in primary ink (file/folder name on the
-    //     unselected row). drawText paints (46,52,54) glyphs; if drawGlyph
-    //     fails this is 0.
-    const nameTextX = surface.x + NAME_COL_X + ICON_SIZE + 10;
+    //     unselected row). The Table lays the name after the icon gutter
+    //     (TABLE_CELL_PAD + ICON_SIZE) plus the cell's own left pad.
+    const nameTextX = surface.x + NAME_COL_X + ICON_SIZE + TABLE_CELL_PAD;
     const nameTextY = listY0 + ROW_HEIGHT;
-    const namePixels = countIn(png1, nameTextX, nameTextY, 160, ROW_HEIGHT, COLOR_TEXT_PRIMARY);
+    const namePixels = countIn(png1, nameTextX, nameTextY, 200, ROW_HEIGHT, COLOR_TEXT_PRIMARY);
     if (namePixels < 20) {
       fail(`list row 1 name-text pixels = ${namePixels} (need >= 20 of ${COLOR_TEXT_PRIMARY}); drawText is failing`);
     } else {
