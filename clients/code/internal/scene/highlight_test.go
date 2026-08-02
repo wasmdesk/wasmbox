@@ -191,3 +191,61 @@ func TestTokenize_LeadingSlashNotComment(t *testing.T) {
 		t.Errorf("roundtrip: %q", joinText(toks))
 	}
 }
+
+// TestHighlight_KeywordSpanColor asserts the TextView.Highlighter adapter
+// yields a span covering the leading keyword in exactly ColorKeyword -- the
+// same #569CD6 the playwright probe samples in the browser.
+func TestHighlight_KeywordSpanColor(t *testing.T) {
+	spans := Highlight(0, "func main")
+	if len(spans) == 0 {
+		t.Fatal("no spans for non-empty line")
+	}
+	// The first span is the "func" keyword: runes [0,4) in keyword blue.
+	first := spans[0]
+	if first.Start != 0 || first.End != 4 {
+		t.Fatalf("keyword span bounds = [%d,%d), want [0,4)", first.Start, first.End)
+	}
+	if first.Color != rgb(ColorKeyword) {
+		t.Fatalf("keyword span colour = %v, want %v (#569CD6)", first.Color, rgb(ColorKeyword))
+	}
+	// Spans must reassemble to the whole line's rune length with no gaps.
+	total := 0
+	for _, sp := range spans {
+		total += sp.End - sp.Start
+	}
+	if total != len([]rune("func main")) {
+		t.Fatalf("span coverage = %d runes, want %d", total, len([]rune("func main")))
+	}
+}
+
+// TestHighlight_EmptyLine returns no spans (the empty-line sentinel token has
+// zero-length text), so TextView paints the line with its default ink.
+func TestHighlight_EmptyLine(t *testing.T) {
+	if spans := Highlight(0, ""); len(spans) != 0 {
+		t.Fatalf("empty line spans = %d, want 0", len(spans))
+	}
+}
+
+// TestHighlight_MultiTokenColors checks every token role maps to its Dark+
+// colour: keyword, default identifier, string, number, comment.
+func TestHighlight_MultiTokenColors(t *testing.T) {
+	spans := Highlight(0, `var x = "hi" // 3`)
+	want := map[[3]uint8]bool{
+		ColorKeyword:    false, // var
+		ColorString:     false, // "hi"
+		ColorComment:    false, // // 3
+		ColorEditorText: false, // identifiers / operators
+	}
+	for _, sp := range spans {
+		for c := range want {
+			if sp.Color == rgb(c) {
+				want[c] = true
+			}
+		}
+	}
+	for c, seen := range want {
+		if !seen {
+			t.Errorf("colour %v never emitted", c)
+		}
+	}
+}

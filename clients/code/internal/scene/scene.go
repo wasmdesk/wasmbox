@@ -7,15 +7,23 @@
 // plus a Render entry point + HandleKey / HandleMouse dispatchers; every
 // other symbol is an implementation detail of these three.
 //
+// The editor is built from the go-widgets/toolkit widget + layout model
+// rather than hand-drawn: a Dock shell with a Statusbar docked South over an
+// HBox of a ListBox sidebar + a VBox of a tab strip over a TextView editor,
+// with the "Connect to Live Server" popup as a Dialog. The TextView owns the
+// editing model (lines + cursor + insert/split/backspace + undo/redo +
+// selection), its ShowLineNumbers gutter replaces the old hand-drawn one, and
+// its Highlighter hook is fed by the package's own Tokenize lexer.
+//
 // Files in the package:
 //
 //   - scene.go     : this file, package documentation only.
-//   - state.go     : SceneState + dispatchers (HandleKey / HandleMouse) +
-//                    OpenFile / SaveCurrent / Flash / Live Server popup.
-//   - buffer.go    : TextBuffer with Insert / Delete / Split / MoveCursor.
-//   - highlight.go : Tokenize(line) -> []Token (Dark+ syntactic palette).
-//   - render.go    : Render(state, buf) + per-stage paint helpers + palette.
-//   - font.go      : 8x8 ASCII bitmap font + Glyph(c) accessor.
+//   - state.go     : SceneState + widget tree + dispatchers (HandleKey /
+//     HandleMouse) + OpenFile / SaveCurrent / Live Server popup.
+//   - highlight.go : Tokenize(line) -> []Token (Dark+ palette) + Highlight,
+//     the TextView.Highlighter adapter (Token -> TextSpan).
+//   - render.go    : Render(state, buf) + the widget tree paint + tabStrip +
+//     per-region themes + the Dark+ palette.
 //
 // Pure Go (no syscall/js, no cgo) -- the wasm entry point lives in
 // clients/code/main.go and imports this package via the //go:build js &&
