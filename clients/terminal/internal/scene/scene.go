@@ -22,6 +22,8 @@ package scene
 import (
 	"strings"
 
+	"github.com/go-widgets/painter"
+	"github.com/go-widgets/toolkit"
 	"github.com/wasmdesk/coreutils/multicall"
 	"github.com/wasmdesk/wasmbox/clients/sharedvfs"
 	"github.com/wasmdesk/wasmbox/clients/terminal/internal/complete"
@@ -59,6 +61,12 @@ type State struct {
 	W, H  int
 	Grid  *Grid
 	Shell *Shell
+
+	// theme is passed to the TerminalView's Draw. The view only consults it as
+	// a colour fallback for cells whose own / default colours are unset; since
+	// the Grid always sets an explicit pen + panel background it never actually
+	// reads the theme, but Draw requires a non-nil value.
+	theme *toolkit.Theme
 }
 
 // New constructs a State for a width x height pixel surface backed by a
@@ -75,31 +83,57 @@ func New(width, height int) *State {
 // by the wasm boot path to share an IDB-backed VFS with the files browser
 // (and by tests that want a deterministic empty tree).
 func NewWithVFS(width, height int, v sharedvfs.VFS) *State {
-	cols := width / (FontW * 2)
-	rows := height / (FontH * 2)
+	// Build the TerminalView first at a placeholder size so SetBounds can
+	// derive the per-cell pixel size from the active (scaled) font; the real
+	// Cols×Rows then falls out of the surface size divided by that cell size.
+	g := NewGrid(1, 1)
+	g.SetBounds(toolkit.Rect{X: 0, Y: 0, W: width, H: height})
+	cellW := g.CellWidth()
+	cellH := g.CellHeight()
+	cols := width / cellW
+	rows := height / cellH
 	if cols < 1 {
 		cols = 1
 	}
 	if rows < 1 {
 		rows = 1
 	}
+	g.Resize(cols, rows)
+
+	// Centre the grid in the surface (the margin outside the view's bounds is
+	// painted with the panel background in Render, so the whole surface reads
+	// as one terminal panel).
+	gridW := cols * cellW
+	gridH := rows * cellH
+	g.SetBounds(toolkit.Rect{X: (width - gridW) / 2, Y: (height - gridH) / 2, W: gridW, H: gridH})
+
 	s := &State{
 		W:     width,
 		H:     height,
-		Grid:  NewGrid(cols, rows),
+		Grid:  g,
 		Shell: NewShellWithVFS(v),
+		theme: toolkit.DefaultLight(),
 	}
+	// Wire the widget event path: root.OnEvent forwards to OnKey, which drives
+	// the shell through the same HandleKey the wasm host calls directly. This
+	// keeps the shell logic the single source of truth for input handling.
+	g.OnKey = func(ev toolkit.Event) { s.HandleKey(ev.Code) }
 	s.writePrompt()
 	return s
 }
 
 // Render fills buf (a 4*W*H byte slice, RGBA32 row-major) with the current
-// grid. Panics on size mismatch -- a misshaped buffer is a caller bug.
+// grid. Panics on size mismatch -- a misshaped buffer is a caller bug. The
+// whole surface is first painted with the panel background so the margin
+// around the centred grid reads as terminal panel, then the TerminalView
+// blits every cell + the block cursor through its own Draw.
 func Render(s *State, buf []byte) {
 	if len(buf) != 4*s.W*s.H {
 		panic("scene: Render buffer size mismatch")
 	}
-	PaintGrid(buf, s.W, s.H, s.Grid)
+	p := painter.NewPixelPainter(buf, s.W, s.H)
+	p.FillRect(toolkit.Rect{X: 0, Y: 0, W: s.W, H: s.H}, panelBG)
+	s.Grid.Draw(p, s.theme)
 }
 
 // HandleKey routes one DOM-style keydown into the shell. Recognised keys:
