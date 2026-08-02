@@ -128,7 +128,13 @@ try {
     for (let y = bounds.y; y < bounds.y + bounds.h; y++) {
       for (let x = bounds.x; x < bounds.x + bounds.w; x++) {
         const i = (y * width + x) * 4;
-        if (png.data[i] === 0xa0 && png.data[i+1] === 0xe0 && png.data[i+2] === 0xa0) n++;
+        const r = png.data[i], g = png.data[i+1], b = png.data[i+2];
+        // Green ink COVERAGE (exact ink + its anti-aliased partial-coverage
+        // blends over the panel). The terminal now renders an anti-aliased
+        // monospace OpenType face, whose glyphs have a tiny fully-covered core;
+        // counting green-dominant coverage restores bitmap-comparable density
+        // so the ink-delta thresholds stay meaningful. Cyan/red/white excluded.
+        if (g > r + 16 && g > b + 16 && g > 0x38) n++;
       }
     }
     return n;
@@ -149,8 +155,13 @@ try {
         const y = bounds.y + r * rowH + dy;
         for (let x = bounds.x; x < bounds.x + bounds.w; x++) {
           const i = (y * width + x) * 4;
-          const lit = (png.data[i] === 0xa0 && png.data[i+1] === 0xe0 && png.data[i+2] === 0xa0) ||
-                      (png.data[i] === 0x6c && png.data[i+1] === 0xc6 && png.data[i+2] === 0xed);
+          const r = png.data[i], g = png.data[i+1], b = png.data[i+2];
+          // Green-ink OR cyan-prompt coverage (AA-aware): a row counts as
+          // inked if it carries green-dominant ink coverage or cyan-dominant
+          // prompt coverage, capturing anti-aliased edges the old exact match
+          // missed.
+          const lit = (g > r + 16 && g > b + 16 && g > 0x38) ||
+                      (b > r + 16 && g > r + 16 && b > 0x60);
           if (lit) { any = true; break; }
         }
       }
