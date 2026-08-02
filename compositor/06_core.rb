@@ -957,6 +957,16 @@ class Compositor
   end
 
   def draw_desktop
+    # When Compositor::DESKTOP_WIDGETS is on (see 10_desktop_widgets.rb), paint
+    # the desktop background (fill + grid) through the go-widgets binding
+    # (Widgets.backdrop -> render -> RGBA -> putImageData), rendered ONCE and
+    # cached (re-rendered only on a resize / palette change), instead of the
+    # raw-ctx fill + per-frame grid-stroke loop below. The flag keeps this
+    # hand-drawn path as the shippable fallback during the live co-edit.
+    if DESKTOP_WIDGETS
+      draw_desktop_widgets
+      return
+    end
     fill_rect([0, 0, @width, @height], Theme::DESKTOP)
     # A faint grid so window motion reads clearly.
     @ctx.set("strokeStyle", Theme::DESKTOP_GRID)
