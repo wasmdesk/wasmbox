@@ -101,6 +101,32 @@ function brightCount(png, floor) {
   return n;
 }
 
+// aaRampBuckets is the anti-aliased-text SIGNATURE. It bins the near-neutral
+// pixels of a region into 16-wide brightness buckets and counts how many
+// INTERMEDIATE buckets (between the dark background and the bright ink) hold a
+// meaningful number of pixels. A shaped OpenType glyph scan-converted to a
+// coverage mask spreads a CONTINUUM of partial-coverage tones across many
+// buckets; the 5x7 bitmap paints only two tones — plus, for the translucent HUD
+// panel, a single mid tone — so it fills only a few. Counting DISTINCT tone
+// buckets (rather than mid-grey pixels) is what makes this robust to the HUD's
+// translucent-panel compositing, which on its own produces a spike of mid-grey
+// pixels a plain count would mistake for anti-aliasing. Measured: ~4 buckets on
+// the bitmap font, ~14 once Widgets.use_opentype_text takes effect.
+function aaRampBuckets(png) {
+  const h = {};
+  for (let i = 0; i < png.data.length; i += 4) {
+    const r = png.data[i], g = png.data[i + 1], b = png.data[i + 2];
+    if (Math.max(r, g, b) - Math.min(r, g, b) > 28) continue; // near-neutral only
+    const s = r + g + b;
+    if (s < 96 || s > 720) continue; // drop the dark-bg and bright-ink extremes
+    const k = s >> 4;
+    h[k] = (h[k] || 0) + 1;
+  }
+  let n = 0;
+  for (const k in h) if (h[k] >= 4) n++;
+  return n;
+}
+
 const { server, base } = await startServer();
 console.log(`probe-hud: serving on ${base}`);
 
@@ -151,6 +177,18 @@ try {
     fail(`HUD (${hudBright}) not brighter than bare desktop control (${ctrlBright})`);
   } else {
     ok(`HUD region is brighter than the control (${hudBright} > ${ctrlBright})`);
+  }
+
+  // AA signature: the HUD text is now anti-aliased, shaped OpenType (the
+  // compositor calls Widgets.use_opentype_text before the first render). The
+  // text rect must spread its near-neutral tones across many brightness buckets
+  // — the partial-coverage ramp a 5x7 bitmap (with its lone translucent-panel
+  // mid tone) can never produce. Measured ~4 buckets on the bitmap, ~14 with AA.
+  const hudBuckets = hud ? aaRampBuckets(hud) : 0;
+  if (hudBuckets < 9) {
+    fail(`HUD AA tone-buckets=${hudBuckets} (<9) — text is not anti-aliased (bitmap font still active?)`);
+  } else {
+    ok(`HUD text is anti-aliased: ${hudBuckets} distinct partial-coverage tone buckets`);
   }
 
   if (pageErrors.length) {

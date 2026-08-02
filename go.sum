@@ -182,8 +182,8 @@ github.com/go-composites/time v0.0.0-20260727203506-b0e9511265ce h1:s6sem+/vqY6c
 github.com/go-composites/time v0.0.0-20260727203506-b0e9511265ce/go.mod h1:1VK0+gCw8h5qSeMcDt0pKujvEBR99f3j+xtfJ8KQSG4=
 github.com/go-datetime/dates v0.1.0 h1:Uj8TaTZ09DXdq75EGQ/teFdrXpfVAC3ZDHAPQvPTnaA=
 github.com/go-datetime/dates v0.1.0/go.mod h1:KeZ1wUeMScJD6HOvj3hINwbsB+GCSFjJLWcJhrBlwIo=
-github.com/go-embedded-ruby/ruby v0.0.0-20260802114511-bf858f337d2c h1:ZPCTk++cGyk0JEiJ7HCW+x36uUbnBtq9cZrgWWaKz4M=
-github.com/go-embedded-ruby/ruby v0.0.0-20260802114511-bf858f337d2c/go.mod h1:RHW4WKFfEe60jWYe4mpPP44+LC4yAZ5kpsXjy1uytt0=
+github.com/go-embedded-ruby/ruby v0.0.0-20260802231913-a49a82611185 h1:mE7E9ixC+IMndHWREsv4su4N/jOp9llZ5tA4A38/HuQ=
+github.com/go-embedded-ruby/ruby v0.0.0-20260802231913-a49a82611185/go.mod h1:2l/NtRF5RVnntVSV7RiFvXlWxWoXBwV4uLHjiAuHbPw=
 github.com/go-facter/facter v0.0.0-20260708052836-752b1a3edee0 h1:1PUT8X4gKZsXEVdoMS//ceD4X2jiK9fEJinyU2iuIpI=
 github.com/go-facter/facter v0.0.0-20260708052836-752b1a3edee0/go.mod h1:ghuoOHWXdq5dE3GLPDiz3Uy0ORrvK+1hB7QC997ez2U=
 github.com/go-fft/fft v0.0.0-20260620110530-0e3ca1747acb h1:kDAxBx5Tvd3PfDIqCgV3J4cpXejsJOOsiKGYQiDTJB4=
@@ -579,8 +579,8 @@ github.com/go-ruby-widgets/mvvm v0.1.0 h1:CJPnZ6MskD0CD4IB3jA6JiQV6gm45jE2kP905h
 github.com/go-ruby-widgets/mvvm v0.1.0/go.mod h1:ay/fCVUstt2cgby2jzbxq4WNTHnalRsNOsjSF1yWHgo=
 github.com/go-ruby-widgets/tui v0.1.0 h1:P1gWq3bXLXJVC2lNxO1Nj5yHferukTN8Fw0+4vFUX0o=
 github.com/go-ruby-widgets/tui v0.1.0/go.mod h1:O+e8BZvq01AqaIaAMb0kYHtmlwxrd5VqJ1Pg4hqvy9I=
-github.com/go-ruby-widgets/widgets v0.3.0 h1:rbELbASlEv8GjW8cC6EDbBKh9VP7iPuTc10rqmb2tAs=
-github.com/go-ruby-widgets/widgets v0.3.0/go.mod h1:CBGuqFaYw+iYIR0GSKiSlXS93G6THFlrp4YFy0dN1M4=
+github.com/go-ruby-widgets/widgets v0.4.0 h1:el5/2V0TvRdsDa84qAdrdDPdTZraoeFCKyFmHK0gwBg=
+github.com/go-ruby-widgets/widgets v0.4.0/go.mod h1:PnMZ/VxYQy/LSxhiiyO9h37XPh5m9RoDVx0Rw9aUQ0k=
 github.com/go-ruby-xslt/xslt v0.0.0-20260702171958-146eaf3f0176 h1:iHTCF/Eu0/lwOEank8pLKqoW5j9MI2ERXErrvqsZZ+4=
 github.com/go-ruby-xslt/xslt v0.0.0-20260702171958-146eaf3f0176/go.mod h1:1C3Bx0pQIsqLqC2SnqV7pJnGuLJsgYmar2NrD+CmVXw=
 github.com/go-ruby-yaml/yaml v0.0.0-20260706120500-56d458798003 h1:SJ9mY8e11Lv0MbTh9CSxYMhY4AyaDHRmc3mYE+WQOQM=
