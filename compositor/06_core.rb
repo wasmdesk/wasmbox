@@ -1060,6 +1060,17 @@ class Compositor
   # use the Theme::MENU_* palette: MENU_BG fill, MENU_BORDER 1-px frame,
   # MENU_TEXT label ink, and MENU_HILITE band for the hovered row.
   def draw_menu
+    # PILOT (2026-08-02): when Compositor::MENU_WIDGETS is on (see
+    # 08_menu_widgets.rb), paint the menu through the go-widgets `require
+    # "widgets"` binding (render -> RGBA -> putImageData) instead of
+    # hand-drawing it on the canvas below. Only the PAINT changes — the Ruby
+    # hit-testing (menu_resolve / handle_menu_click / handle_menu_hover) is
+    # untouched, so the menu stays clickable exactly as before. The flag keeps
+    # the hand-drawn draw_menu_panel path below as the shippable fallback.
+    if MENU_WIDGETS
+      draw_menu_widgets
+      return
+    end
     state = @menu
     draw_menu_panel(state[:menu], state[:x], state[:y], state[:hover],
                     state[:submenu_idx])
