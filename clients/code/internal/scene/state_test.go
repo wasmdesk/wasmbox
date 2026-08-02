@@ -496,3 +496,18 @@ func TestActivateSidebar_OutOfRange(t *testing.T) {
 		t.Fatal("out-of-range activate should leave dirty false")
 	}
 }
+
+// TestBuildMonoFace_FallbackOnBadBlob drives buildMonoFace's parse-failure
+// branch (never reached with the bundled blob) by handing it garbage bytes:
+// it must still return a usable (bitmap) font, never nil, so the editor
+// degrades to legible bitmap text rather than to no text.
+func TestBuildMonoFace_FallbackOnBadBlob(t *testing.T) {
+	if f := buildMonoFace([]byte("not a font"), editorFontPx); f == nil {
+		t.Fatal("buildMonoFace returned nil on a bad blob; want bitmap fallback")
+	}
+	// The success path is exercised by every New()/editorFace() call, but assert
+	// it explicitly too so both return statements are self-documented.
+	if f := editorFace(); f == nil || f.Advance() <= 0 {
+		t.Fatalf("editorFace() = %v, want a usable monospace face", f)
+	}
+}
