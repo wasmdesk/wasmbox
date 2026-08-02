@@ -175,6 +175,18 @@ try {
     await page.waitForTimeout(40);
   }
 
+  // clearScreen resets the grid to a fresh prompt via the `clear` builtin.
+  // The ink-growth tests below compare an absolute before/after ink count;
+  // leaving a prior test's menu output on screen makes the baseline
+  // nondeterministic (and a subsequent scroll can even make the count drop),
+  // so we blank the screen first to measure each expansion against a clean,
+  // deterministic prompt.
+  async function clearScreen() {
+    await page.keyboard.type("clear", { delay: 4 });
+    await page.keyboard.press("Enter");
+    await page.waitForTimeout(120);
+  }
+
   // ---- SETUP: create /scratch/{foo.txt, foobar.txt, baz.txt} via the
   // shell itself, so the VFS state matches what the unit tests assume.
   await page.keyboard.type("mkdir /scratch", { delay: 4 });
@@ -192,6 +204,7 @@ try {
   // common prefix. The grid should grow only by the extension bytes, NOT
   // by a whole new menu row.
   {
+    await clearScreen(); // deterministic baseline (SETUP left output on screen)
     const rowsBefore = await countInkedRows();
     const inkBefore = await countInk();
     await page.keyboard.type("cat /scratch/f", { delay: 4 });
@@ -228,6 +241,7 @@ try {
   // ---- TEST 3: single-match argument completion. "cat /scratch/b" + Tab
   // -> "cat /scratch/baz.txt" outright.
   {
+    await clearScreen(); // deterministic baseline (T2 left a menu on screen)
     const inkBefore = await countInk();
     await page.keyboard.type("cat /scratch/b", { delay: 4 });
     await page.keyboard.press("Tab");
