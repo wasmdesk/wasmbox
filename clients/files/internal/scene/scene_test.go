@@ -44,9 +44,12 @@ func countIn(buf []byte, w, x, y, rw, rh int, c toolkit.RGBA) int {
 	return n
 }
 
-// list-row geometry helpers (surface coordinates).
-func listTop() int      { return HeaderBarHeight + ColumnHeaderHeight }
-func rowCenterY(i int) int { return listTop() + i*RowHeight + RowHeight/2 }
+// list-row geometry helpers (surface coordinates). The list is a toolkit.Table,
+// so the body starts below the Table's own header row and rows advance at the
+// Table's row pitch.
+func listTop() int         { return HeaderBarHeight + toolkit.TableHeaderHeight }
+func rowTop(i int) int     { return listTop() + i*toolkit.TableRowHeight }
+func rowCenterY(i int) int { return rowTop(i) + toolkit.TableRowHeight/2 }
 
 // firstBookmarkRowY is the y of the Home row (first entry under BOOKMARKS).
 func firstBookmarkRowY() int {
@@ -69,8 +72,8 @@ func TestNewSeedsRoot(t *testing.T) {
 	if s.SidebarSelected != 0 {
 		t.Errorf("SidebarSelected = %d, want 0 (Home owns /)", s.SidebarSelected)
 	}
-	if len(s.list.rows) != 4 {
-		t.Errorf("list rows = %d, want 4", len(s.list.rows))
+	if len(s.table.Rows) != 4 {
+		t.Errorf("table rows = %d, want 4", len(s.table.Rows))
 	}
 	if got := s.crumbs.Segments; len(got) != 1 || got[0] != "Home" {
 		t.Errorf("crumbs = %v, want [Home]", got)
@@ -107,11 +110,10 @@ func TestGoldenRects(t *testing.T) {
 		{"back", s.backBtn.Bounds(), toolkit.Rect{X: 46, Y: 10, W: 28, H: 24}},
 		{"forward", s.fwdBtn.Bounds(), toolkit.Rect{X: 78, Y: 10, W: 28, H: 24}},
 		{"sidebar", s.sidebar.Bounds(), toolkit.Rect{X: 0, Y: 44, W: 160, H: 396}},
-		{"content", s.content.Bounds(), toolkit.Rect{X: 160, Y: 44, W: 560, H: 396}},
-		{"colHeader", s.colHeader.Bounds(), toolkit.Rect{X: 160, Y: 44, W: 560, H: 28}},
-		{"list", s.list.Bounds(), toolkit.Rect{X: 160, Y: 72, W: 560, H: 368}},
-		{"row0", s.list.rows[0].Bounds(), toolkit.Rect{X: 160, Y: 72, W: 560, H: 32}},
-		{"row1", s.list.rows[1].Bounds(), toolkit.Rect{X: 160, Y: 104, W: 560, H: 32}},
+		// The Table is the whole content pane: it draws its own Name/Size header
+		// row (TableHeaderHeight) then the body, so it fills the flex column
+		// directly (no separate colHeader / list widgets any more).
+		{"table", s.table.Bounds(), toolkit.Rect{X: 160, Y: 44, W: 560, H: 396}},
 	}
 	for _, c := range checks {
 		if c.got != c.want {
@@ -139,8 +141,8 @@ func TestGoldenRectsWidth(t *testing.T) {
 		if got := s.crumbs.Bounds().W; got != w-118 {
 			t.Errorf("w=%d: crumbs width = %d, want %d", w, got, w-118)
 		}
-		if got := s.list.Bounds().W; got != w-SidebarWidth {
-			t.Errorf("w=%d: list width = %d, want %d", w, got, w-SidebarWidth)
+		if got := s.table.Bounds().W; got != w-SidebarWidth {
+			t.Errorf("w=%d: table width = %d, want %d", w, got, w-SidebarWidth)
 		}
 	}
 }
@@ -166,18 +168,25 @@ func TestPixelParity(t *testing.T) {
 		t.Errorf("header BG = %v, want %v", px, ColorHeaderBarBG)
 	}
 
-	// Selected row 0 accent strip at the list top.
-	if px := pixelAt(buf, surfW, SidebarWidth+4, rowCenterY(0)); !eqRGB(px, ColorAccent) {
+	// Selected row 0 accent strip at the list top. Sample the 4-px pure-accent
+	// inset before the icon gutter (the Table fills the whole row background
+	// with the accent before painting the icon at TableCellPadX).
+	if px := pixelAt(buf, surfW, SidebarWidth+2, rowCenterY(0)); !eqRGB(px, ColorAccent) {
 		t.Errorf("row 0 accent = %v, want %v", px, ColorAccent)
 	}
 
 	// Foreground content: folder icon + name + sidebar text (the "frame with
-	// nothing inside" regression guard).
-	iconY := listTop() + RowHeight + (RowHeight-IconSize)/2
-	if n := countIn(buf, surfW, NameColX, iconY, 24, IconSize, ColorFolderFill); n < 30 {
+	// nothing inside" regression guard). The RowIcon glyph paints in the Name
+	// column gutter at table.X + TableCellPadX, in a TableIconSize box.
+	iconX := SidebarWidth + toolkit.TableCellPadX
+	iconY := rowTop(1) + (toolkit.TableRowHeight-toolkit.TableIconSize)/2
+	if n := countIn(buf, surfW, iconX, iconY, toolkit.TableIconSize, toolkit.TableIconSize, ColorFolderFill); n < 30 {
 		t.Errorf("list row 1 folder-fill pixels = %d, want >= 30", n)
 	}
-	if n := countIn(buf, surfW, NameColX+IconSize+10, listTop()+RowHeight, 160, RowHeight, ColorTextPrimary); n < 20 {
+	// Name text lands after the gutter (TableCellPadX + TableIconSize) plus the
+	// cell's own left pad.
+	nameX := SidebarWidth + toolkit.TableCellPadX + toolkit.TableIconSize + toolkit.TableCellPadX
+	if n := countIn(buf, surfW, nameX, rowTop(1), 200, toolkit.TableRowHeight, ColorTextPrimary); n < 20 {
 		t.Errorf("list row 1 name-text pixels = %d, want >= 20", n)
 	}
 	sbDocsY := firstBookmarkRowY() + SidebarRowHeight
@@ -187,9 +196,9 @@ func TestPixelParity(t *testing.T) {
 	if n := countIn(buf, surfW, 8, firstBookmarkRowY(), SidebarWidth-16, SidebarRowHeight, ColorOnAccent); n < 8 {
 		t.Errorf("sidebar Home selected white pixels = %d, want >= 8", n)
 	}
-	// Column-header labels in secondary ink.
-	if n := countIn(buf, surfW, SidebarWidth, HeaderBarHeight, surfW-SidebarWidth, ColumnHeaderHeight, ColorTextSecondary); n < 10 {
-		t.Errorf("column-header secondary ink = %d, want >= 10", n)
+	// Table header labels ("Name"/"Size") in secondary ink.
+	if n := countIn(buf, surfW, SidebarWidth, HeaderBarHeight, surfW-SidebarWidth, toolkit.TableHeaderHeight, ColorTextSecondary); n < 10 {
+		t.Errorf("table-header secondary ink = %d, want >= 10", n)
 	}
 }
 
@@ -201,10 +210,10 @@ func TestArrowDownMovesAccent(t *testing.T) {
 	}
 	buf := newSurface(surfW, surfH)
 	Render(s, buf)
-	if px := pixelAt(buf, surfW, SidebarWidth+4, rowCenterY(0)); eqRGB(px, ColorAccent) {
+	if px := pixelAt(buf, surfW, SidebarWidth+2, rowCenterY(0)); eqRGB(px, ColorAccent) {
 		t.Errorf("row 0 still accent after ArrowDown: %v", px)
 	}
-	if px := pixelAt(buf, surfW, SidebarWidth+4, rowCenterY(1)); !eqRGB(px, ColorAccent) {
+	if px := pixelAt(buf, surfW, SidebarWidth+2, rowCenterY(1)); !eqRGB(px, ColorAccent) {
 		t.Errorf("row 1 not accent after ArrowDown: %v", px)
 	}
 }
@@ -264,8 +273,8 @@ func TestClickFolderRowDescends(t *testing.T) {
 	if s.Browser.CurrentPath != "/Documents" {
 		t.Errorf("path = %q, want /Documents", s.Browser.CurrentPath)
 	}
-	if len(s.list.rows) != 2 {
-		t.Errorf("list rows after descent = %d, want 2", len(s.list.rows))
+	if len(s.table.Rows) != 2 {
+		t.Errorf("table rows after descent = %d, want 2", len(s.table.Rows))
 	}
 }
 
@@ -284,10 +293,10 @@ func TestClickFileRowSelects(t *testing.T) {
 
 func TestClickColumnHeaderAndEmptyAreaAreNoops(t *testing.T) {
 	s := New(surfW, surfH)
-	if s.HandleMouse(SidebarWidth+50, HeaderBarHeight+ColumnHeaderHeight/2) {
+	if s.HandleMouse(SidebarWidth+50, HeaderBarHeight+toolkit.TableHeaderHeight/2) {
 		t.Error("column-header click returned true")
 	}
-	if s.HandleMouse(SidebarWidth+50, listTop()+10*RowHeight) {
+	if s.HandleMouse(SidebarWidth+50, listTop()+10*toolkit.TableRowHeight) {
 		t.Error("empty-area click returned true")
 	}
 }
@@ -299,26 +308,51 @@ func TestRenderSelectedFileRow(t *testing.T) {
 	Render(s, newSurface(surfW, surfH))
 }
 
-// fileList.Draw clips rows past a short surface (the break branch).
+// The Table windows/clips its own body when the surface is too short to show
+// every row (the toolkit's scrollbar/clip path). Rendering must not panic.
 func TestRenderClipsRowsBeyondSurface(t *testing.T) {
-	h := HeaderBarHeight + ColumnHeaderHeight + RowHeight + 2
+	h := HeaderBarHeight + toolkit.TableHeaderHeight + toolkit.TableRowHeight + 2
 	s := New(surfW, h)
 	Render(s, newSurface(surfW, h)) // must not panic
 }
 
-// fileList.OnEvent ignores non-click events + clicks that miss every row.
-func TestFileListOnEventEdges(t *testing.T) {
+// fileTable.OnEvent ignores non-click events + clicks that miss every body row
+// (the header band, a horizontal miss, and a point below the last row all map
+// to -1). rowAt/rowAtLocal cover the surface + local entry points.
+func TestFileTableOnEventEdges(t *testing.T) {
 	s := New(surfW, surfH)
-	s.list.OnEvent(toolkit.Event{Kind: toolkit.EventKeyDown})
-	// A click far below the last row hits no row.
-	b := s.list.Bounds()
+	// Non-click event: ignored (no clickRow, no dirty).
 	s.dirty = false
-	s.list.OnEvent(toolkit.Event{Kind: toolkit.EventClick, X: 10, Y: b.H - 1})
+	s.table.OnEvent(toolkit.Event{Kind: toolkit.EventKeyDown})
 	if s.dirty {
-		t.Error("miss click set dirty")
+		t.Error("non-click event set dirty")
 	}
-	if s.list.rowAt(0, 0) != -1 {
+	// A local click in the header band resolves to no row.
+	s.dirty = false
+	s.table.OnEvent(toolkit.Event{Kind: toolkit.EventClick, X: 10, Y: toolkit.TableHeaderHeight - 1})
+	if s.dirty {
+		t.Error("header-band click set dirty")
+	}
+	// A local click far below the last row resolves to no row.
+	s.dirty = false
+	b := s.table.Bounds()
+	s.table.OnEvent(toolkit.Event{Kind: toolkit.EventClick, X: 10, Y: b.H - 1})
+	if s.dirty {
+		t.Error("below-last-row click set dirty")
+	}
+	// Surface-space rowAt: outside the widget, in the header band, and a
+	// horizontal miss all collapse to -1; a real body cell resolves to its row.
+	if s.table.rowAt(0, 0) != -1 {
 		t.Error("rowAt outside bounds should be -1")
+	}
+	if s.table.rowAt(SidebarWidth+50, HeaderBarHeight+2) != -1 {
+		t.Error("rowAt in header band should be -1")
+	}
+	if s.table.rowAtLocal(b.W+5, toolkit.TableHeaderHeight+2) != -1 {
+		t.Error("rowAtLocal horizontal miss should be -1")
+	}
+	if got := s.table.rowAt(SidebarWidth+50, rowCenterY(1)); got != 1 {
+		t.Errorf("rowAt body row 1 = %d, want 1", got)
 	}
 }
 
@@ -439,7 +473,7 @@ func TestRightClickRowMenu(t *testing.T) {
 
 func TestRightClickEmptyAreaCreateMenu(t *testing.T) {
 	s := New(surfW, surfH)
-	if !s.HandleMouseButton(SidebarWidth+50, listTop()+8*RowHeight, 2, 1) {
+	if !s.HandleMouseButton(SidebarWidth+50, listTop()+8*toolkit.TableRowHeight, 2, 1) {
 		t.Fatal("right-click empty area returned false")
 	}
 	items := s.ctxMenu.Menu.Items
@@ -469,7 +503,7 @@ func TestMenuRenameAndNewFolderViaMenu(t *testing.T) {
 		t.Error("Rename clobbered the file")
 	}
 	// New Folder (create menu item 0).
-	_ = s.HandleMouseButton(SidebarWidth+50, listTop()+8*RowHeight, 2, 1)
+	_ = s.HandleMouseButton(SidebarWidth+50, listTop()+8*toolkit.TableRowHeight, 2, 1)
 	mx, my = menuItemPoint(s, 0)
 	_ = s.HandleMouseButton(mx, my, 0, 1)
 	if !s.VFS.IsDir("/untitled") {
@@ -600,7 +634,7 @@ func TestDoubleClickFolderDescends(t *testing.T) {
 func TestDoubleClickEmptyAreaFallsThrough(t *testing.T) {
 	s := New(surfW, surfH)
 	// Double-click below the last row: previewAt misses, normal routing no-op.
-	if s.HandleMouseButton(SidebarWidth+50, listTop()+9*RowHeight, 0, 2) {
+	if s.HandleMouseButton(SidebarWidth+50, listTop()+9*toolkit.TableRowHeight, 0, 2) {
 		t.Error("double-click empty area returned true")
 	}
 }
@@ -653,25 +687,27 @@ func TestSyncSidebarUnknownPath(t *testing.T) {
 	}
 }
 
-// HitTest of the non-interactive leaves returns false.
+// HitTest of the non-interactive sidebar section label returns false.
 func TestNonInteractiveHitTests(t *testing.T) {
 	if (&sectionLabel{}).HitTest(1, 1) {
 		t.Error("sectionLabel HitTest should be false")
 	}
-	if (&columnHeader{}).HitTest(1, 1) {
-		t.Error("columnHeader HitTest should be false")
-	}
 }
 
 // Every file-type + sidebar icon glyph paints in both the plain + selected
-// variant (both colour arms of each drawer).
+// variant (both colour arms of each drawer). The file-type glyphs paint into a
+// TableIconSize box (the RowIcon gutter); the sidebar glyphs keep their own
+// point-anchored form.
 func TestIconGlyphs(t *testing.T) {
 	w, h := 64, 64
+	iconRect := func(x, y int) toolkit.Rect {
+		return toolkit.Rect{X: x, Y: y, W: toolkit.TableIconSize, H: toolkit.TableIconSize}
+	}
 	for _, sel := range []bool{false, true} {
 		buf := newSurface(w, h)
 		p := painter.NewPixelPainter(buf, w, h)
-		drawFolderIcon(p, 4, 4, sel)
-		drawFileIcon(p, 30, 4, sel)
+		drawFolderIconRect(p, iconRect(4, 4), sel)
+		drawFileIconRect(p, iconRect(30, 4), sel)
 		for _, kind := range []string{"home", "computer", "trash", "folder", "unknown"} {
 			drawSidebarIcon(p, 4, 40, kind, sel)
 		}
@@ -686,5 +722,51 @@ func TestIconGlyphs(t *testing.T) {
 		if !any {
 			t.Errorf("icons (selected=%v) drew nothing", sel)
 		}
+	}
+}
+
+// The folder RowIcon keeps its two-tone blue fill on an unselected row and
+// inverts to white on the selected row (it ignores the ink Draw passes and
+// takes the variant from Browser.Cursor). This is the file-list appearance the
+// Table's single-ink default could not express on its own.
+func TestRowIconSelectedVariant(t *testing.T) {
+	s := New(surfW, surfH)
+	s.Browser.Cursor = 0 // row 0 (a folder) selected
+	w, h := 64, 64
+	rect := toolkit.Rect{X: 4, Y: 4, W: toolkit.TableIconSize, H: toolkit.TableIconSize}
+
+	// Unselected row 1 folder -> blue fill present, no white paper.
+	buf := newSurface(w, h)
+	p := painter.NewPixelPainter(buf, w, h)
+	draw, ok := s.table.RowIcon(1)
+	if !ok || draw == nil {
+		t.Fatal("RowIcon(1) returned no painter")
+	}
+	draw(p, rect, ColorTextPrimary)
+	if countIn(buf, w, 4, 4, toolkit.TableIconSize, toolkit.TableIconSize, ColorFolderFill) < 30 {
+		t.Error("unselected folder RowIcon has no blue fill")
+	}
+
+	// Selected row 0 folder -> white fill (ColorOnAccent), no blue.
+	buf = newSurface(w, h)
+	p = painter.NewPixelPainter(buf, w, h)
+	draw, ok = s.table.RowIcon(0)
+	if !ok || draw == nil {
+		t.Fatal("RowIcon(0) returned no painter")
+	}
+	draw(p, rect, ColorOnAccent)
+	if countIn(buf, w, 4, 4, toolkit.TableIconSize, toolkit.TableIconSize, ColorFolderFill) != 0 {
+		t.Error("selected folder RowIcon still painted blue")
+	}
+	if countIn(buf, w, 4, 4, toolkit.TableIconSize, toolkit.TableIconSize, ColorOnAccent) < 30 {
+		t.Error("selected folder RowIcon has no white fill")
+	}
+
+	// Out-of-range rows yield no icon (both guard arms).
+	if _, ok := s.table.RowIcon(-1); ok {
+		t.Error("RowIcon(-1) should be (nil,false)")
+	}
+	if _, ok := s.table.RowIcon(len(s.Browser.Entries)); ok {
+		t.Error("RowIcon(len) should be (nil,false)")
 	}
 }
