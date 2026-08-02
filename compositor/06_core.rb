@@ -1115,6 +1115,14 @@ class Compositor
   end
 
   def draw_hud
+    # When Compositor::HUD_WIDGETS is on (see 09_hud_widgets.rb), paint the HUD
+    # through the go-widgets binding (render -> RGBA -> alpha-composited blit)
+    # instead of the raw-ctx fillText below. The flag keeps this hand-drawn path
+    # as the shippable fallback during the live co-edit.
+    if HUD_WIDGETS
+      draw_hud_widgets
+      return
+    end
     n = @wm.windows.length
     line = "rbgo compositor — #{n} window#{n == 1 ? '' : 's'} — #{'%.0f' % @fps} fps — frame #{@frames}"
     text(line, 10, @height - 12, Theme::HUD_TEXT, 12)

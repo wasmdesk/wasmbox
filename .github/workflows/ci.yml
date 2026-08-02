@@ -184,6 +184,10 @@ jobs:
         working-directory: test
         run: node probe-rootmenu.mjs
 
+      - name: Run headless HUD probe (widgets Label render + composited blit)
+        working-directory: test
+        run: node probe-hud.mjs
+
       - name: Run headless Files client probe
         working-directory: test
         run: node probe-files.mjs
