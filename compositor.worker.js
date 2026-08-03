@@ -672,6 +672,25 @@ globalThis.wasmboxSpawnExternal = function (url) {
   dispatch();
 };
 
+// `__wasmboxPostNotification(opts)` -- TEST HOOK. Injects a `notify` protocol
+// message into the running compositor (as if a client posted it) by dispatching
+// it on the compositor's Ruby event bus, exactly like wasmboxSpawnExternal. Used
+// by test/probe-notifications.mjs to trigger toasts deterministically without
+// spawning a client. `opts` carries the notify fields (title/body/kind/timeout/
+// action_label/action/icon); `type:"notify"` is stamped on for the caller.
+// Returns true once the bus was found (dispatch may retry until the compositor
+// has created the bus element at boot).
+globalThis.__wasmboxPostNotification = function (opts) {
+  const detail = Object.assign({ type: "notify" }, opts || {});
+  function dispatch() {
+    const bus = fakeDocument.getElementById("__wasmbox_bus");
+    if (!bus) { setTimeout(dispatch, 16); return; }
+    bus.dispatchEvent(new CustomEvent("wasmbox-notify", { detail: detail }));
+  }
+  dispatch();
+  return true;
+};
+
 // `wasmboxSpawnExternalOCI(ref)` -- OCI twin of wasmboxSpawnExternal. Dispatches
 // a `wasmbox-spawn-external-oci` CustomEvent on the bus; compositor.rb listens
 // for it and runs spawn_external_oci(ref), which then calls

@@ -81,6 +81,15 @@ class Compositor
       title = detail.get("title").to_s
       spawn_dom_window(url, w, h, title)
     end
+    # Notification test hook: __wasmboxPostNotification(opts) (compositor.worker.js)
+    # dispatches a `notify` message here so a probe can trigger a toast without a
+    # client. Routed through the FULL decode -> handle -> route path (nil worker,
+    # since there is no posting client), so it exercises the real wiring. The
+    # handler is inert when Compositor::NOTIFICATIONS is off (post_notification
+    # no-ops), so registering it unconditionally keeps main shippable.
+    @bus.on("wasmbox-notify") do |e|
+      route_worker_message(nil, e.get("detail"))
+    end
     @worker_seq = 0
     @workers_by_id = {}
   end
@@ -234,6 +243,11 @@ class Compositor
       # to EVERY external client (the panel repaints with the new colours;
       # other clients may opt in via the SDK's onInput hook).
       notify_theme_changed
+    when :notify
+      # A client posted a desktop notification — push it onto the toast stack
+      # (12_notifications.rb). `worker` is the poster, so a toast action can fire
+      # back to it. The draw + auto-expiry run from render/tick.
+      post_notification(msg, worker)
     end
   end
 
@@ -365,7 +379,12 @@ class Compositor
     # popup placement (without them a popup hello would land at (0,0)).
     # `lock_aspect` rides on `hello` (optional intrinsic ratio); `ratio` rides
     # on `set_lock_aspect` (post-handshake declaration).
-    %w[window_id w h stride title role app index workspace name parent rel_x rel_y lock_aspect ratio].each do |k|
+    # `body`/`kind`/`icon`/`timeout`/`action_label`/`action` ride on `notify`
+    # (a desktop notification: headline + detail line, severity, optional base64
+    # icon, seconds-until-dismiss, and a single click-to-act button). Fields NOT
+    # listed here arrive nil, so a new notify field must be added to this list.
+    %w[window_id w h stride title role app index workspace name parent rel_x rel_y lock_aspect ratio
+       body kind icon timeout action_label action].each do |k|
       v = data.get(k)
       h[k.to_sym] = v unless v.nil?
     end
@@ -536,6 +555,15 @@ class Compositor
   def on_mousedown(e)
     mx = e.get("offsetX")
     my = e.get("offsetY")
+
+    # Toasts are the always-on-top overlay stratum: a click on one dismisses it
+    # (and fires its action back to the posting client, if any) and is consumed
+    # here before anything else can see the click. Self-gates on NOTIFICATIONS.
+    toast = notify_at(mx, my)
+    if toast
+      dismiss_notification(toast)
+      return
+    end
 
     # A menu is open: a click either activates an item or dismisses it.
     if @menu
@@ -911,6 +939,10 @@ class Compositor
     end
     @last_t = t
 
+    # Age + expire the desktop-notification toast stack (12_notifications.rb).
+    # Self-gates on Compositor::NOTIFICATIONS; captures @now for post expiry.
+    tick_notifications(t)
+
     # Persist the layout whenever it actually changed (a move, resize, spawn,
     # close or restack), not every frame.
     sig = @wm.layout_signature
@@ -960,6 +992,10 @@ class Compositor
     end
     draw_menu if @menu
     draw_hud
+    # Desktop-notification toasts are the always-on-top overlay stratum: painted
+    # last so they sit above windows, panels, the menu and the HUD
+    # (12_notifications.rb). Self-gates on Compositor::NOTIFICATIONS.
+    draw_notifications
   end
 
   def fill_rect(rect, colour)

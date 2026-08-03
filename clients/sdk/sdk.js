@@ -277,6 +277,43 @@
       send({ type: "set_frame", name: name });
     }
 
+    // Post a DESKTOP notification: the compositor shows an auto-expiring toast in
+    // the top-right corner of the screen (wasmbox/compositor/12_notifications.rb),
+    // independent of this window's own surface. opts:
+    //   title    (string)  headline line
+    //   body     (string)  detail line (optional)
+    //   kind     (string)  "info" | "success" | "warning" | "error" (default info)
+    //   timeout  (number)  SECONDS before auto-dismiss; <= 0 = sticky (default 5)
+    //   icon     (string)  optional base64 RGBA (reserved; not painted yet)
+    //   actions  (array)   [{ label, id }] — the FIRST arms a click-to-act
+    //                      button; its `id` fires back as an onInput event of
+    //                      kind "notification_action". (Or pass actionLabel /
+    //                      action scalars directly.)
+    // window_id is attached (when known) so the action can route back to this
+    // client; unlike setTitle this still posts before welcome — a notification
+    // is desktop-global, it just cannot carry an actionable button until the
+    // window exists to receive the callback.
+    notify(opts) {
+      opts = opts || {};
+      let label = opts.actionLabel || "";
+      let action = opts.action || "";
+      if (Array.isArray(opts.actions) && opts.actions.length) {
+        label = opts.actions[0].label || label;
+        action = opts.actions[0].id || action;
+      }
+      send({
+        type: "notify",
+        window_id: this.windowId,
+        title: opts.title || "",
+        body: opts.body || "",
+        kind: opts.kind || "info",
+        icon: opts.icon || "",
+        timeout: (opts.timeout === undefined ? 5 : opts.timeout),
+        action_label: label,
+        action: action,
+      });
+    }
+
     // Write a single RGBA pixel into the SAB at (x, y). Bounds-checked; OOB is
     // a no-op so naive clients can scribble freely.
     putPixel(x, y, r, gr, b, a) {

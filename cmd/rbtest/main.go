@@ -1099,5 +1099,88 @@ assert_eq(tw["title_color"], PALETTES::WHITESUR_LIGHT[:title_active], "themed aq
 assert_eq(tw["buttons"][0]["face"], AquaFrame::CLOSE_RED, "themed aqua keeps canonical traffic-lights")
 FrameRegistry.select("openbox")
 
+# ---- Desktop notifications (05_notifications.rb) ---------------------------
+# Notification model: kind normalization, the composed pill line, expiry.
+assert_eq(Notification.normalize_kind("warning"), "warning", "known kind kept")
+assert_eq(Notification.normalize_kind("bogus"), "info", "unknown kind -> info")
+assert_eq(Notification.normalize_kind(nil), "info", "nil kind -> info")
+
+nfull = Notification.new(1, { title: "T", body: "B", kind: "error", timeout_ms: 2000 }, 100)
+assert_eq(nfull.text, "T — B", "text joins title and body with an em dash")
+assert_eq(nfull.kind, "error", "kind stored")
+assert_eq(nfull.expire_at, 2100, "expire_at = now + timeout_ms")
+assert(!nfull.sticky?, "positive timeout is not sticky")
+assert(!nfull.has_action?, "no action label -> no action")
+assert_eq(nfull.key, "notif#1", "key encodes id")
+assert(!nfull.expired?(2099), "not expired before deadline")
+assert(nfull.expired?(2100), "expired at deadline")
+
+ntitle = Notification.new(2, { title: "only" }, 0)
+assert_eq(ntitle.text, "only", "title-only text drops the separator")
+assert(!ntitle.sticky?, "default timeout (5000) is not sticky")
+nbody = Notification.new(3, { body: "hey" }, 0)
+assert_eq(nbody.text, "hey", "body-only text drops the separator")
+nstick = Notification.new(4, { title: "x", timeout_ms: 0 }, 50)
+assert(nstick.sticky?, "timeout_ms 0 -> sticky")
+assert(!nstick.expired?(999999), "sticky never expires")
+nact = Notification.new(5, { title: "x", action_label: "Undo", action: "undo" }, 0)
+assert(nact.has_action?, "action label -> has_action")
+
+# NotificationStack: post + stack order + top-right placement.
+ns = NotificationStack.new
+assert(ns.empty?, "fresh stack is empty")
+a = ns.post({ title: "A", timeout_ms: 1000 }, 0)
+b = ns.post({ title: "B", timeout_ms: 3000 }, 0)
+assert_eq(ns.length, 2, "two toasts stacked")
+assert(!ns.empty?, "stack is non-empty after post")
+lay = ns.layout(1000)
+assert_eq(lay[0][:notif].id, a.id, "first posted is the top row")
+assert_eq(lay[1][:notif].id, b.id, "second posted stacks below the first")
+assert_eq(lay[0][:x], 1000 - 300 - 16, "toast x is top-right (screen_w - w - margin)")
+assert_eq(lay[0][:y], 16, "row 0 y == margin")
+assert_eq(lay[1][:y], 16 + 44 + 10, "row 1 y == margin + h + gap")
+
+# Expiry drops A (deadline 1000); B survives and reflows up to row 0.
+dropped = ns.tick(1000)
+assert_eq(dropped.length, 1, "one toast expired at its deadline")
+assert_eq(dropped[0].id, a.id, "A is the expired toast")
+assert_eq(ns.length, 1, "B survives the tick")
+assert_eq(ns.layout(1000)[0][:notif].id, b.id, "B reflowed up to row 0")
+assert(ns.find(b.id).equal?(b), "find returns the live toast")
+
+# dismiss: found returns the toast; unknown returns nil.
+d = ns.dismiss(b.id)
+assert_eq(d.id, b.id, "dismiss returns the removed toast")
+assert(ns.empty?, "stack empty after the last dismiss")
+assert_eq(ns.dismiss(999), nil, "dismiss of an unknown id -> nil")
+
+# Cap: a chatty poster can never grow past MAX_VISIBLE — the oldest drop.
+nc = NotificationStack.new
+first = nc.post({ title: "0", timeout_ms: 9999 }, 0)
+second = nc.post({ title: "1", timeout_ms: 9999 }, 0)
+j = 2
+while j < NotificationStack::MAX_VISIBLE + 2
+  nc.post({ title: j.to_s, timeout_ms: 9999 }, 0)
+  j += 1
+end
+assert_eq(nc.length, NotificationStack::MAX_VISIBLE, "stack capped at MAX_VISIBLE")
+assert_eq(nc.find(first.id), nil, "oldest toast dropped by the cap")
+assert_eq(nc.find(second.id), nil, "second-oldest toast dropped by the cap")
+
+# Hit-testing: inside a toast rect hits it; outside misses; row1 hits the lower.
+nh = NotificationStack.new
+t1 = nh.post({ title: "hit", timeout_ms: 9999 }, 0)
+assert(nh.at(1000 - 316 + 5, 16 + 5, 1000).equal?(t1), "click inside a toast hits it")
+assert_eq(nh.at(10, 10, 1000), nil, "click far from any toast misses")
+assert_eq(nh.at(1000 - 316 + 5, 400, 1000), nil, "click below the column misses")
+t2 = nh.post({ title: "hit2", timeout_ms: 9999 }, 0)
+assert(nh.at(1000 - 316 + 5, 16 + 44 + 10 + 5, 1000).equal?(t2), "click in row 1 hits the second toast")
+
+# WindowManager notify wire arm: a title OR a body yields :notify; empty drops.
+wmn = WindowManager.new
+assert_eq(wmn.handle_client_message({ type: "notify", title: "hi" }), :notify, "notify with a title -> :notify")
+assert_eq(wmn.handle_client_message({ type: "notify", body: "yo" }), :notify, "notify with a body -> :notify")
+assert_eq(wmn.handle_client_message({ type: "notify" }), :ignored, "notify with neither title nor body -> :ignored")
+
 puts "rbtest: ran all pure-WM assertions"
 `
