@@ -202,6 +202,16 @@ class Compositor
     @bus.on("wasmbox-spotlight") do |e|
       spotlight_probe(e.get("detail"))
     end
+    # Exposé test hook: __wasmboxExpose(cmd) (compositor.worker.js) dispatches an
+    # expose command ("toggle"/"open"/"left"/"right"/"up"/"down"/"select:i"/
+    # "click:x,y"/"commit"/"cancel") here so test/probe-expose.mjs can drive the
+    # spread without a real F3 chord + pixel-perfect thumbnail reads (unreliable
+    # headless). Routed to the SAME transitions the keyboard + mouse use
+    # (17_expose.rb#expose_probe). Inert when Compositor::EXPOSE is off
+    # (expose_probe no-ops), so registering it unconditionally keeps main shippable.
+    @bus.on("wasmbox-expose") do |e|
+      expose_probe(e.get("detail"))
+    end
     @worker_seq = 0
     @workers_by_id = {}
   end
@@ -713,6 +723,15 @@ class Compositor
     mx = e.get("offsetX")
     my = e.get("offsetY")
 
+    # Exposé is a full-screen modal: while the spread is up a click focuses the
+    # window whose tile was hit (and exits), or dismisses the spread when it lands
+    # on the dim gap. Consumed here before anything beneath can see it. Self-gates
+    # on Compositor::EXPOSE + an open spread.
+    if EXPOSE && expose_active?
+      expose_click(mx, my)
+      return
+    end
+
     # Toasts are the always-on-top overlay stratum: a click on one dismisses it
     # (and fires its action back to the posting client, if any) and is consumed
     # here before anything else can see the click. Self-gates on NOTIFICATIONS.
@@ -815,6 +834,13 @@ class Compositor
   end
 
   def on_mousemove(e)
+    # Exposé spread is up: a hover highlights the tile under the pointer (moves the
+    # keyboard selection to it) and consumes the event before any window drag /
+    # client forwarding. Self-gates on Compositor::EXPOSE + an open spread.
+    if EXPOSE && expose_active?
+      expose_hover(e.get("offsetX"), e.get("offsetY"))
+      return
+    end
     # A live applet drag moves the tile under the pointer and consumes the event
     # (before window drag / client forwarding). Inert unless a drag is active, so
     # this is a no-op when Compositor::APPLETS is off.
@@ -938,6 +964,31 @@ class Compositor
       elsif top.external?
         forward_key_to_client(top, "keydown", e)
       end
+      return
+    end
+    # Exposé keyboard grab (17_expose.rb): while the spread is up it owns the
+    # keyboard. Arrows move the selection across the grid, Enter focuses the
+    # selected window + exits, Escape (or F3 again) exits without changing focus,
+    # and every other key is swallowed so nothing leaks to a client. Self-gated on
+    # Compositor::EXPOSE + an open spread.
+    if EXPOSE && expose_active?
+      case key
+      when "ArrowLeft"       then expose_move(:left)
+      when "ArrowRight"      then expose_move(:right)
+      when "ArrowUp"         then expose_move(:up)
+      when "ArrowDown"       then expose_move(:down)
+      when "Enter", "Return" then expose_commit
+      when "Escape", "F3"    then expose_cancel
+      end
+      e.call("preventDefault")
+      return
+    end
+    # Exposé toggle chord: F3 fans every window on the workspace into the spread
+    # (17_expose.rb). Checked before the switcher + `case key` so the key never
+    # falls through to a client. Self-gated on Compositor::EXPOSE.
+    if EXPOSE && expose_trigger?(key)
+      e.call("preventDefault")
+      expose_toggle
       return
     end
     # Spotlight launcher keyboard grab (16_spotlight.rb): while the palette is up
@@ -1360,6 +1411,11 @@ class Compositor
     # reads as the top-most modal. Self-gates on Compositor::SPOTLIGHT + an open
     # palette (else it only publishes the "inactive" probe state).
     draw_spotlight if SPOTLIGHT
+    # Exposé / "show all windows" (17_expose.rb): a dimmed desktop under a grid of
+    # window thumbnails, painted OVER everything while the spread is up (F3).
+    # Drawn last so it reads as the top-most modal. Self-gates on Compositor::EXPOSE
+    # + an open spread (else it only publishes the "inactive" probe state).
+    draw_expose if EXPOSE
     # Publish the focused window's live geometry + the work-area metrics for the
     # snapping probe (test/probe-snapping.mjs reads globalThis.__wasmboxFocusedRect).
     # One cheap JS call per frame, self-gated on SNAPPING so main is unaffected.

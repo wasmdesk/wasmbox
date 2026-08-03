@@ -920,6 +920,51 @@ globalThis.__wasmboxSpotlightState = function () {
   return globalThis.__wasmboxSpotlightData;
 };
 
+// `__wasmboxExpose(cmd)` -- TEST HOOK. Drives the REAL Exposé / "show all
+// windows" transitions (compositor/17_expose.rb) via the bus, because a
+// synthetic F3 chord + pixel-perfect thumbnail reads are unreliable headless.
+// cmd is one of "toggle" / "open" / "left" / "right" / "up" / "down" /
+// "select:<i>" / "click:<x>,<y>" / "commit" / "cancel"; the Ruby bus listener
+// (06_core.rb) routes it to expose_probe, the same code the keyboard + mouse use.
+globalThis.__wasmboxExpose = function (cmd) {
+  const detail = String(cmd == null ? "toggle" : cmd);
+  function dispatch() {
+    const bus = fakeDocument.getElementById("__wasmbox_bus");
+    if (!bus) { setTimeout(dispatch, 16); return; }
+    bus.dispatchEvent(new CustomEvent("wasmbox-expose", { detail: detail }));
+  }
+  dispatch();
+  return true;
+};
+
+// `wasmboxPublishExpose(...)` -- called by the Ruby compositor once per frame
+// (draw_expose, 17_expose.rb) to publish the spread's live grid geometry +
+// selection. active is 0/1; count is the spread tile count; cols/rows are the
+// grid dimensions; index is the selected tile; (sx,sy,sw,sh) is the SELECTED
+// window's body rect (so a probe can confirm a commit/click focuses exactly that
+// window against __wasmboxFocusedRect); tilesJson is a JSON "[[x,y,w,h],...]" of
+// every tile rectangle (so a probe can assert the tiles are non-overlapping +
+// within the work area). The probe reads the stash via __wasmboxExposeState().
+globalThis.__wasmboxExposeData = { active: 0 };
+globalThis.wasmboxPublishExpose = function (active, count, cols, rows, index, sx, sy, sw, sh, tilesJson) {
+  let tiles = [];
+  try { tiles = JSON.parse(String(tilesJson || "[]")); } catch (_) { tiles = []; }
+  globalThis.__wasmboxExposeData = {
+    active: active | 0,
+    count: count | 0,
+    cols: cols | 0,
+    rows: rows | 0,
+    index: index | 0,
+    sel_x: sx | 0, sel_y: sy | 0, sel_w: sw | 0, sel_h: sh | 0,
+    tiles: tiles,
+  };
+};
+// `__wasmboxExposeState()` -- TEST HOOK. Returns the last-published spread state
+// (or { active: 0 } before the first frame).
+globalThis.__wasmboxExposeState = function () {
+  return globalThis.__wasmboxExposeData;
+};
+
 // `wasmboxClock()` -- wall-clock + calendar math for the clock/calendar applets
 // (compositor/14_applets.rb reads the fields off the returned object). Kept on
 // the JS side so the Ruby applet render never does Gregorian date arithmetic.

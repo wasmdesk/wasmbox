@@ -212,6 +212,10 @@ jobs:
         working-directory: test
         run: node probe-spotlight.mjs
 
+      - name: Run headless Exposé probe (F3 dim + non-overlapping thumbnail grid + arrow/commit focus + click focus + cancel)
+        working-directory: test
+        run: node probe-expose.mjs
+
       - name: Run headless desktop-background probe (widgets Backdrop fill + grid, cached, z-order)
         working-directory: test
         run: node probe-desktop.mjs
