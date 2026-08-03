@@ -1,6 +1,13 @@
 # ---------------------------------------------------------------------------
 class Window
   attr_accessor :id, :title, :x, :y, :w, :h, :fill, :focused, :role, :minimized, :workspace, :shaded, :lock_aspect
+  # Window-snapping / half-tiling state (WindowManager#snap, 04_window_manager.rb).
+  # @snap_state is nil for a free (un-snapped) window, or one of :left / :right /
+  # :max once the window has been snapped to a screen zone. @pre_snap holds the
+  # geometry (x/y/w/h Hash) the window had BEFORE its first snap so a later
+  # restore returns to exactly that size + position. Purely WM policy — no JS,
+  # so rbtest exercises the whole save/restore round-trip natively.
+  attr_accessor :snap_state, :pre_snap
 
   def initialize(id, title, x, y, w, h, fill, role = "window")
     @id = id
@@ -43,11 +50,25 @@ class Window
     # two-finger swipe over the titlebar (up = fold, down = unfold). Distinct from
     # minimize (which folds into the dock iconbar). Panels/popups never shade.
     @shaded = false
+    # Snapping: fresh windows are free (un-snapped) with no saved geometry.
+    @snap_state = nil
+    @pre_snap = nil
   end
 
   def focused? = @focused
   def minimized? = @minimized
   def shaded? = @shaded
+  # A window is "snapped" while it occupies a half / maximized zone. Used by the
+  # WM to decide whether to save pre-snap geometry (only on the FIRST snap out of
+  # a free state) and by restore_snap to know there is something to restore.
+  def snapped? = !@snap_state.nil?
+
+  # Capture the current geometry as the pre-snap geometry to restore to. Called
+  # by WindowManager#snap on the first snap out of a free state; a no-op-safe
+  # plain Hash so restore_snap can move_to/resize_to back to it.
+  def save_pre_snap
+    @pre_snap = { x: @x, y: @y, w: @w, h: @h }
+  end
 
   # A panel (dock-style surface) has no decoration and is anchored, never
   # cascade-placed. A popup is a child surface anchored to a parent window

@@ -39,6 +39,11 @@ module Theme
   MENU_BORDER    = "#3a3d4a"
   MENU_TEXT      = "#e6e7ee"
   MENU_HILITE    = "#9b1c2e"
+  # Drag-to-edge snap landing preview: a translucent accent fill + a brighter
+  # hairline edge, drawn where a dragged window will snap. Uses rgba so the
+  # desktop / windows read through the hint (like a tiling WM's zone overlay).
+  SNAP_PREVIEW_FILL = "rgba(239, 68, 68, 0.22)"
+  SNAP_PREVIEW_EDGE = "rgba(239, 68, 68, 0.85)"
 
   TITLE_H   = 22 # titlebar height
   BORDER    = 1  # decoration border width

@@ -619,6 +619,76 @@ class WindowManager
     win
   end
 
+  # --- window snapping / half-tiling ---------------------------------------
+  # Pure geometry + state, no JS: the Compositor (06_core.rb) feeds the live
+  # screen size + the reserved strips (dock at the bottom, titlebar headroom at
+  # the top) and drives these from the Super+arrow shortcuts and the drag-to-edge
+  # gesture; rbtest drives the same methods with explicit numbers so the rect
+  # math + save/restore round-trip is pinned deterministically.
+  #
+  # A "zone" is one of :left (left half), :right (right half) or :max (fill the
+  # work area). The WORK AREA is the screen minus the reserved strips:
+  #   x = 0, y = reserved_top, w = screen_w, h = screen_h - reserved_top - reserved_bottom
+  # reserved_top keeps a snapped window's titlebar on-screen (it sits ABOVE the
+  # body); reserved_bottom keeps the body clear of the dock so a snapped window
+  # never hides under it. Returns [x, y, w, h] for the window BODY, or nil for an
+  # unknown zone. Right-half width is (w - w/2) so an odd screen width still
+  # reaches the right edge with no 1px seam.
+  def snap_rect(zone, screen_w, screen_h, reserved_top = 0, reserved_bottom = 0)
+    aw_x = 0
+    aw_y = reserved_top
+    aw_w = screen_w
+    aw_h = screen_h - reserved_top - reserved_bottom
+    half = aw_w / 2
+    case zone
+    when :left  then [aw_x,        aw_y, half,        aw_h]
+    when :right then [aw_x + half, aw_y, aw_w - half, aw_h]
+    when :max   then [aw_x,        aw_y, aw_w,        aw_h]
+    else nil
+    end
+  end
+
+  # Snap `win` to `zone` within the work area. Only a decorated ("window" role)
+  # surface snaps — panels/popups/tray/notifications/applets are excluded (they
+  # are not decorated). Aspect-locked windows (lock_aspect > 0, e.g. Quake) are
+  # skipped so their ratio is never broken — matching the resize policy. Saves
+  # the pre-snap geometry ONCE, on the first snap out of a free state, so a later
+  # restore_snap returns to the size + position the user last chose. Returns the
+  # window on a real snap, nil on a no-op.
+  def snap(win, zone, screen_w, screen_h, reserved_top = 0, reserved_bottom = 0)
+    return nil unless win
+    return nil unless win.decorated?
+    return nil if win.lock_aspect > 0
+    rect = snap_rect(zone, screen_w, screen_h, reserved_top, reserved_bottom)
+    return nil unless rect
+    return nil if rect[2] <= 0 || rect[3] <= 0
+    win.save_pre_snap unless win.snapped?
+    win.snap_state = zone
+    win.move_to(rect[0], rect[1])
+    win.resize_to(rect[2], rect[3])
+    win
+  end
+
+  # Named zones (the shortcut + drag targets). Each is a thin wrapper over #snap.
+  def snap_left(win, sw, sh, rt = 0, rb = 0)  = snap(win, :left,  sw, sh, rt, rb)
+  def snap_right(win, sw, sh, rt = 0, rb = 0) = snap(win, :right, sw, sh, rt, rb)
+  def maximize(win, sw, sh, rt = 0, rb = 0)   = snap(win, :max,   sw, sh, rt, rb)
+
+  # Un-snap: return a snapped window to its saved pre-snap geometry. A no-op
+  # (nil) for a free window or when no geometry was saved. Clears @snap_state so
+  # the next snap re-captures a fresh baseline. Returns the window on a real
+  # restore.
+  def restore_snap(win)
+    return nil unless win
+    return nil unless win.snapped?
+    geo = win.pre_snap
+    win.snap_state = nil
+    return win if geo.nil?
+    win.move_to(geo[:x], geo[:y])
+    win.resize_to(geo[:w], geo[:h])
+    win
+  end
+
   # Shade ("roll up") a window: collapse it to just its titlebar (the body stops
   # rendering + hit-testing). Only decorated windows shade; idempotent. Returns
   # the window on a real state change, nil otherwise.

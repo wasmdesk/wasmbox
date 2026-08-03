@@ -1,7 +1,23 @@
 class Compositor
+  # Master switch for window snapping / half-tiling (first Batch-4 window-
+  # management feature). `false` makes every snap path below a no-op: the
+  # Super/⌘+arrow shortcuts fall through to the focused client, the drag-to-edge
+  # preview never appears, and the geometry test hook publishes nothing — so main
+  # stays byte-shippable during the live co-edit exactly as it was before.
+  SNAPPING = true
+
+  # Drag-to-edge hot-zone: a move-drag whose pointer comes within this many
+  # pixels of a screen edge arms a snap (left/right edge → half, top edge →
+  # maximize) and shows the landing preview; released there, the window snaps.
+  SNAP_EDGE_MARGIN = 16
+
   def initialize(wm)
     @wm = wm
     @drag = nil      # {win:, mode: :move|:resize, dx:, dy:}
+    # Active drag-to-edge snap target (:left / :right / :max) or nil. Set while a
+    # move-drag hovers an edge (on_mousemove), consumed on release (on_mouseup),
+    # and drawn as a translucent landing preview each frame (draw_snap_preview).
+    @snap_preview = nil
     # @menu is either nil (no popup) or a Hash describing the active popup:
     #   { x:, y:, menu: <Menu>, kind: :root|:window, win:?, hover:?,
     #     submenu_idx:?, submenu:?, submenu_x:?, submenu_y:?, submenu_hover:? }
@@ -155,6 +171,16 @@ class Compositor
     # unconditionally keeps main shippable.
     @bus.on("wasmbox-set-wallpaper") do |e|
       route_worker_message(nil, e.get("detail"))
+    end
+    # Snap test hook: __wasmboxSpawnWindow(title) (compositor.worker.js) dispatches
+    # here so test/probe-snapping.mjs can put a real decorated, focused window on
+    # the desktop WITHOUT racing a client's wasm load. It is an in-process Window
+    # (compositor-painted from #fill), role "window", so it snaps like any client
+    # window. Registering it unconditionally is harmless — it only ever fires from
+    # the probe-only JS hook.
+    @bus.on("wasmbox-spawn-window") do |e|
+      @wm.spawn(e.get("detail").to_s)
+      notify_windows_changed
     end
     @worker_seq = 0
     @workers_by_id = {}
@@ -601,6 +627,13 @@ class Compositor
       applet_drag_end
       return
     end
+    # Commit a drag-to-edge snap: if the move-drag ended over an armed edge, snap
+    # the dragged window there. Done BEFORE clearing @drag so we still know which
+    # window was being moved; the preview is cleared unconditionally after.
+    if SNAPPING && @drag && @drag[:mode] == :move && @snap_preview
+      commit_snap_preview(@drag[:win])
+    end
+    @snap_preview = nil
     @drag = nil
     win = @wm.focused
     return nil unless win&.external?
@@ -766,6 +799,13 @@ class Compositor
       win = @drag[:win]
       if @drag[:mode] == :move
         win.move_to(mx - @drag[:dx], my - @drag[:dy])
+        # Drag-to-edge: arm (and preview) a snap when the pointer reaches a screen
+        # edge; keep free-drag otherwise. A window already snapped by dragging
+        # un-snaps back to free geometry the moment the pointer leaves every edge,
+        # so the user can pull it away without a second gesture.
+        if SNAPPING && win.decorated?
+          @snap_preview = edge_snap_zone(mx, my)
+        end
       else
         win.resize_to(mx + @drag[:dx] - win.x, my + @drag[:dy] - win.y)
       end
@@ -883,12 +923,94 @@ class Compositor
         return
       end
       # fall through to forward_key_to_client
+    when "ArrowLeft", "ArrowRight", "ArrowUp", "ArrowDown"
+      # Super/⌘ + arrow snaps the focused window (Left = left half, Right = right
+      # half, Up = maximize, Down = restore / un-snap). Only fires with the snap
+      # modifier held AND a decorated window focused; otherwise the arrow falls
+      # through to the client (a terminal/editor uses arrows for navigation).
+      if SNAPPING && snap_modifier?(e) && handle_snap_key(key)
+        e.call("preventDefault")
+        return
+      end
+      # fall through to forward_key_to_client
     when "Escape"
       @menu = nil
       return
     end
     win = @wm.focused
     forward_key_to_client(win, "keydown", e) if win&.external?
+  end
+
+  # The snap chord modifier. The primary binding is Super/⌘ (metaKey), matching
+  # macOS/GNOME half-tiling. Because some headless/browser setups never deliver
+  # metaKey to a page keydown (the OS eats ⌘+arrow), Ctrl+Alt+arrow is accepted
+  # as an equivalent the probe (and users on such setups) can always drive. Reads
+  # the same bracket-access idiom as the Shift+Tab handler; an absent modifier
+  # property is nil (falsy), so a bare arrow never counts as a chord.
+  def snap_modifier?(e)
+    return true if e[:metaKey]
+    e[:ctrlKey] && e[:altKey] ? true : false
+  end
+
+  # Reserved strips for the work area a snapped window lives in. The bottom strip
+  # is the tallest registered panel (the dock) so a snapped/maximized window's
+  # body never hides under it; the top strip is the current chrome's titlebar
+  # height so the snapped window's titlebar (which sits ABOVE its body) stays
+  # fully on-screen.
+  def snap_reserved_bottom
+    h = 0
+    @wm.panels.each { |p| h = p.h if p.h > h }
+    h
+  end
+  def snap_reserved_top = Frame.current.title_h
+
+  # Apply a Super+arrow snap to the focused window. Returns true when it acted on
+  # a decorated window (so on_keydown can preventDefault + swallow the arrow), or
+  # false/nil when there is nothing to snap (arrow then reaches the client). Down
+  # restores a snapped window and is a genuine no-op on a free one — returning
+  # false there lets the client keep the key.
+  def handle_snap_key(key)
+    win = @wm.focused
+    return false unless win && win.decorated?
+    sw = @width
+    sh = @height
+    rt = snap_reserved_top
+    rb = snap_reserved_bottom
+    case key
+    when "ArrowLeft"  then @wm.snap_left(win, sw, sh, rt, rb)
+    when "ArrowRight" then @wm.snap_right(win, sw, sh, rt, rb)
+    when "ArrowUp"    then @wm.maximize(win, sw, sh, rt, rb)
+    when "ArrowDown"  then return !@wm.restore_snap(win).nil?
+    else return false
+    end
+    true
+  end
+
+  # The snap zone a move-drag pointer is currently over, or nil. Left edge → left
+  # half, right edge → right half, top edge → maximize. Bottom edge is left free
+  # (the dock lives there). Only decorated windows arm a preview.
+  def edge_snap_zone(mx, my)
+    return nil if mx <= SNAP_EDGE_MARGIN && my <= SNAP_EDGE_MARGIN # ignore the corner ambiguity
+    return :left  if mx <= SNAP_EDGE_MARGIN
+    return :right if mx >= @width - SNAP_EDGE_MARGIN
+    return :max   if my <= SNAP_EDGE_MARGIN
+    nil
+  end
+
+  # Commit the armed drag-to-edge snap to `win` (called from on_mouseup before
+  # @drag/@snap_preview are cleared). No-op when nothing is armed.
+  def commit_snap_preview(win)
+    return nil unless win && @snap_preview
+    sw = @width
+    sh = @height
+    rt = snap_reserved_top
+    rb = snap_reserved_bottom
+    case @snap_preview
+    when :left  then @wm.snap_left(win, sw, sh, rt, rb)
+    when :right then @wm.snap_right(win, sw, sh, rt, rb)
+    when :max   then @wm.maximize(win, sw, sh, rt, rb)
+    end
+    nil
   end
 
   # Resolve a (mx, my) click against the currently-open menu (parent + an
@@ -1139,6 +1261,10 @@ class Compositor
       next if !win.panel? && win.workspace != active
       draw_window(win)
     end
+    # Drag-to-edge landing preview: a translucent rect of where the window will
+    # snap, drawn OVER the windows (like a tiling hint) while a move-drag hovers
+    # an edge. Self-gates on Compositor::SNAPPING + an armed @snap_preview.
+    draw_snap_preview
     draw_menu if @menu
     draw_hud
     # The tray status strip + notification toasts are the always-on-top overlay
@@ -1147,6 +1273,46 @@ class Compositor
     # column — see 05_tray.rb). Self-gate on Compositor::TRAY / ::NOTIFICATIONS.
     draw_tray
     draw_notifications
+    # Publish the focused window's live geometry + the work-area metrics for the
+    # snapping probe (test/probe-snapping.mjs reads globalThis.__wasmboxFocusedRect).
+    # One cheap JS call per frame, self-gated on SNAPPING so main is unaffected.
+    publish_snap_geometry if SNAPPING
+  end
+
+  # Snap landing preview. Draws the frame extent (body + titlebar headroom) of
+  # the armed zone as a filled translucent panel with a hairline border, so the
+  # user sees exactly where the window lands before releasing. No-op when nothing
+  # is armed. The preview rect mirrors WindowManager#snap_rect but expands the
+  # top by the reserved titlebar strip so the hint covers the whole future frame.
+  def draw_snap_preview
+    return nil unless SNAPPING && @snap_preview
+    rt = snap_reserved_top
+    rb = snap_reserved_bottom
+    body = @wm.snap_rect(@snap_preview, @width, @height, rt, rb)
+    return nil unless body
+    frame = [body[0], body[1] - rt, body[2], body[3] + rt]
+    fill_rect(frame, Theme::SNAP_PREVIEW_FILL)
+    stroke_rect(frame, Theme::SNAP_PREVIEW_EDGE, 2)
+    nil
+  end
+
+  # Push the focused window rect + work-area metrics to the JS test hook. Sends a
+  # sentinel (-1,-1,0,0) when nothing is focused. The snap_state ("left"/"right"/
+  # "max"/"") and the armed drag preview ride along so the probe can assert both
+  # the keyboard and the drag path deterministically without reading pixels.
+  def publish_snap_geometry
+    win = @wm.focused
+    rt = snap_reserved_top
+    rb = snap_reserved_bottom
+    prev = @snap_preview.nil? ? "" : @snap_preview.to_s
+    if win.nil? || !win.decorated?
+      JS.global.call("wasmboxPublishFocusedRect", -1, -1, 0, 0, "", @width, @height, rt, rb, prev)
+      return nil
+    end
+    state = win.snap_state.nil? ? "" : win.snap_state.to_s
+    JS.global.call("wasmboxPublishFocusedRect",
+      win.x, win.y, win.w, win.h, state, @width, @height, rt, rb, prev)
+    nil
   end
 
   def fill_rect(rect, colour)

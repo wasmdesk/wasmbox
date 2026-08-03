@@ -1497,5 +1497,74 @@ root_without = RootMenu.build(wmr)
 lbls2 = root_without.entries.map { |e| e[:label] }
 assert(!lbls2.include?("Applets"), "1-arg build omits the Applets entry (feature-gated)")
 
+# ---- window snapping / half-tiling: snap_rect geometry -------------------
+# A 1000x800 screen with a 40px dock strip at the bottom and a 22px titlebar
+# strip at the top: the work area is (0, 22) .. (1000, 738).
+wsnap = WindowManager.new
+SW = 1000; SH = 800; RT = 22; RB = 40
+lr = wsnap.snap_rect(:left, SW, SH, RT, RB)
+assert_eq(lr, [0, 22, 500, 738], "snap_rect :left = left half of the work area")
+rr = wsnap.snap_rect(:right, SW, SH, RT, RB)
+assert_eq(rr, [500, 22, 500, 738], "snap_rect :right = right half, flush to the right edge")
+mr = wsnap.snap_rect(:max, SW, SH, RT, RB)
+assert_eq(mr, [0, 22, 1000, 738], "snap_rect :max = the whole work area (dock + titlebar reserved)")
+assert(wsnap.snap_rect(:bogus, SW, SH, RT, RB).nil?, "snap_rect unknown zone is nil")
+# Odd width: right half must still reach the right edge (no 1px seam).
+odd = wsnap.snap_rect(:right, 1001, 800, 0, 0)
+assert_eq(odd, [500, 0, 501, 800], "snap_rect :right on odd width covers the last column")
+lodd = wsnap.snap_rect(:left, 1001, 800, 0, 0)
+assert_eq(lodd[0] + lodd[2], odd[0], "left + right halves tile with no overlap/gap on odd width")
+# Zero reserve degrades to a full-screen work area.
+assert_eq(wsnap.snap_rect(:max, 800, 600, 0, 0), [0, 0, 800, 600], "snap_rect :max with no reserve = full screen")
+
+# ---- snap: applies geometry + saves pre-snap, restore round-trips ---------
+sww = wsnap.spawn("snapme", 300, 200)
+sww.move_to(120, 90)
+ox, oy, ownd, oht = sww.x, sww.y, sww.w, sww.h
+assert(!sww.snapped?, "fresh window is not snapped")
+res = wsnap.snap_left(sww, SW, SH, RT, RB)
+assert(!res.nil?, "snap_left returns the window on a real snap")
+assert(sww.snapped?, "window reports snapped? after snap_left")
+assert_eq(sww.snap_state, :left, "snap_state records the zone")
+assert_eq([sww.x, sww.y, sww.w, sww.h], [0, 22, 500, 738], "snap_left moved+resized to the left half")
+# Pre-snap geometry captured exactly once (the ORIGINAL free geometry).
+assert_eq(sww.pre_snap, { x: ox, y: oy, w: ownd, h: oht }, "pre_snap captured the original free geometry")
+# Re-snap to another zone must NOT overwrite the saved pre-snap geometry.
+wsnap.snap_right(sww, SW, SH, RT, RB)
+assert_eq(sww.snap_state, :right, "snap_right updates the zone")
+assert_eq([sww.x, sww.y, sww.w, sww.h], [500, 22, 500, 738], "snap_right moved to the right half")
+assert_eq(sww.pre_snap, { x: ox, y: oy, w: ownd, h: oht }, "pre_snap unchanged across a re-snap")
+wsnap.maximize(sww, SW, SH, RT, RB)
+assert_eq(sww.snap_state, :max, "maximize sets the :max zone")
+assert_eq([sww.x, sww.y, sww.w, sww.h], [0, 22, 1000, 738], "maximize fills the work area")
+# Restore returns to the exact original free geometry + clears the state.
+rres = wsnap.restore_snap(sww)
+assert(!rres.nil?, "restore_snap returns the window on a real restore")
+assert(!sww.snapped?, "window is free again after restore_snap")
+assert_eq([sww.x, sww.y, sww.w, sww.h], [ox, oy, ownd, oht], "restore_snap returned the original geometry")
+# Restore on a free window is a no-op.
+assert(wsnap.restore_snap(sww).nil?, "restore_snap on a free window is a no-op")
+
+# ---- snap: exclusions (only decorated 'window' role, no aspect-lock) -------
+# Panels never snap.
+wsnap.register_external("dock-snap", 480, 28, "panel")
+pnl = wsnap.last_registered
+assert(wsnap.snap_left(pnl, SW, SH, RT, RB).nil?, "snap_left on a panel is a no-op")
+assert(!pnl.snapped?, "panel never gets a snap_state")
+# Popups never snap.
+wsnap.handle_client_message({ type: "hello", title: "menu", role: "popup",
+                              parent: sww.id, rel_x: 5, rel_y: 5, w: 40, h: 24 })
+pop = wsnap.last_registered
+assert(wsnap.snap_left(pop, SW, SH, RT, RB).nil?, "snap_left on a popup is a no-op")
+# Aspect-locked windows are skipped (ratio preserved, matching resize policy).
+lockw = wsnap.spawn("locked", 320, 240)
+lockw.lock_aspect = 320.0 / 240.0
+assert(wsnap.snap_left(lockw, SW, SH, RT, RB).nil?, "snap on an aspect-locked window is a no-op")
+assert(!lockw.snapped?, "aspect-locked window never snaps")
+# nil / degenerate work-area guards.
+assert(wsnap.snap_left(nil, SW, SH, RT, RB).nil?, "snap on nil window is a no-op")
+tiny = wsnap.spawn("tiny-area")
+assert(wsnap.snap(tiny, :max, 10, 10, 20, 20).nil?, "snap into a non-positive work area is a no-op")
+
 puts "rbtest: ran all pure-WM assertions"
 `
