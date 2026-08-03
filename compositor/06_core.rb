@@ -182,6 +182,17 @@ class Compositor
       @wm.spawn(e.get("detail").to_s)
       notify_windows_changed
     end
+    # Live-thumbnail test hook: __wasmboxSpawnExternalStub(title, w, h)
+    # (compositor.worker.js) dispatches a `hello`-shaped detail carrying a
+    # SharedArrayBuffer surface here so test/probe-alttab.mjs / probe-expose.mjs
+    # can put a REAL external (SAB) window on the desktop without racing a client's
+    # wasm load — the deterministic surface whose pixels the Alt-Tab / Exposé grab
+    # path captures. Routed through the SAME register_external + build_image_data
+    # path a real client's welcome uses (spawn_external_stub). Registering it
+    # unconditionally is harmless — it only ever fires from the probe-only JS hook.
+    @bus.on("wasmbox-spawn-external-stub") do |e|
+      spawn_external_stub(e.get("detail"))
+    end
     # Alt-Tab test hook: __wasmboxAltTab(cmd) (compositor.worker.js) dispatches an
     # `alttab` command ("open"/"advance"/"advance_reverse"/"commit"/"cancel")
     # here so test/probe-alttab.mjs can drive the switcher without a real
@@ -229,6 +240,33 @@ class Compositor
     win = @wm.spawn_dom(title, w, h, url)
     body = win.body_rect
     JS.global.call("wasmboxIframeAttach", win.id, url, body[0], body[1], body[2], body[3])
+    win
+  end
+
+  # Register a synthetic EXTERNAL (SharedArrayBuffer-backed) window from the
+  # live-thumbnail test hook (__wasmboxSpawnExternalStub). It mirrors the
+  # `:welcome` arm of route_worker_message — register_external + stash the SAB /
+  # ctl refs + build_image_data — but there is no client worker, so it posts no
+  # `welcome` back (worker stays nil) and never expects commits: the SAB already
+  # holds a complete frame. The window is a normal ExternalWindow (role "window"),
+  # so it composites, snaps, alt-tabs and exposes like any client surface, and its
+  # pixels are reachable to wasmboxGrabWindow. Focused so a probe finds it.
+  def spawn_external_stub(detail)
+    return nil if detail.nil?
+    title = detail.get("title")
+    title = title.nil? ? "ext-stub" : title.to_s
+    w = detail.get("w").to_i
+    h = detail.get("h").to_i
+    w = 240 if w <= 0
+    h = 180 if h <= 0
+    win = @wm.register_external(title, w, h, "window")
+    win.sab = detail.get("sab")
+    win.ctl = detail.get("ctl")
+    win.stride = 4 * w
+    win.merge_damage({ x: 0, y: 0, w: w, h: h })
+    build_image_data(win)
+    @wm.focus(win)
+    notify_windows_changed
     win
   end
 

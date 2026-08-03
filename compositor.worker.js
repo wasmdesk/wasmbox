@@ -206,10 +206,17 @@ globalThis.__wasmboxReadRegion = function (x, y, w, h) {
   try { img = ctx.getImageData(x | 0, y | 0, w | 0, h | 0); } catch (_) { return null; }
   const d = img.data;
   let sum = 0, nonblack = 0, hash = 2166136261;
+  // Luma mean + variance over the region, so a caller can tell a FLAT tile
+  // (a solid placeholder fill -> variance ~0) from a TEXTURED one (a live
+  // window snapshot -> high variance). Rec.601 luma, integer weights.
+  let lsum = 0, lsq = 0;
   for (let i = 0; i < d.length; i += 4) {
     const r = d[i], g = d[i + 1], b = d[i + 2];
     sum += r + g + b;
     if (r + g + b > 40) nonblack++;
+    const luma = (r * 77 + g * 150 + b * 29) >> 8; // ~0.299/0.587/0.114
+    lsum += luma;
+    lsq += luma * luma;
     if ((i & 255) === 0) { // sample the hash cheaply
       hash = ((hash ^ r) * 16777619) >>> 0;
       hash = ((hash ^ g) * 16777619) >>> 0;
@@ -217,7 +224,9 @@ globalThis.__wasmboxReadRegion = function (x, y, w, h) {
     }
   }
   const px = d.length / 4;
-  return { w: w | 0, h: h | 0, brightness: Math.round(sum / px / 3), nonblackPct: Math.round((100 * nonblack) / px), hash: hash >>> 0 };
+  const lmean = lsum / px;
+  const variance = Math.max(0, lsq / px - lmean * lmean);
+  return { w: w | 0, h: h | 0, brightness: Math.round(sum / px / 3), nonblackPct: Math.round((100 * nonblack) / px), hash: hash >>> 0, variance: Math.round(variance) };
 };
 // __wasmboxGrabRegion(x,y,w,h): TEST HOOK. Same source as __wasmboxReadRegion,
 // but returns the actual pixels as a PNG data URL so a test can save a frame to
@@ -573,6 +582,71 @@ globalThis.wasmboxBlitFromSABScaled = function (ctx, slot, sx, sy, sw, sh, dx, d
   ctx.drawImage(slot.canvas, 0, 0, slot.w, slot.h, dx, dy, dw, dh);
 };
 
+// wasmboxWindowSeq(slot): the content sequence of an external window's live
+// surface -- the seq the blit path last COPIED into slot.canvas (slot.lastSeq),
+// so it changes exactly when the client committed new pixels and we re-copied
+// them. Used by the Ruby thumbnail cache (compositor/15_alttab.rb) to key a
+// grabbed Alt-Tab / Exposé thumbnail by (window id, size, content-seq): an idle
+// window holds this value (the tile is re-presented from cache), an animating
+// one bumps it (the tile is re-grabbed + re-rendered). Reuses the SAME seqlock
+// bookkeeping the blit path already maintains — no extra per-frame copy. Returns
+// -1 for a slot with no surface (never built / no image_data).
+globalThis.wasmboxWindowSeq = function (slot) {
+  if (!slot) return -1;
+  if (typeof slot.lastSeq === "number") return slot.lastSeq | 0;
+  if (slot.seq) return Atomics.load(slot.seq, 0) & ~1; // clear the odd mid-paint bit
+  return 0;
+};
+
+// wasmboxGrabWindow(slot, dw, dh): grab an external window's CURRENT framebuffer
+// downscaled to dw x dh and return it as base64 RGBA (top-left origin, 4 B/px,
+// row-major — the exact layout Widgets.thumbnail + wasmboxBlitRGBAOver expect).
+//
+// The pixel source is slot.canvas — the seqlock-protected last-complete
+// native-size frame the blit path (wasmboxBlitFromSAB) already produced THIS
+// frame (windows draw before the Alt-Tab / Exposé overlay in Compositor#render).
+// So the grab never samples a half-painted SAB and costs one hardware-accelerated
+// drawImage downscale + one getImageData, NOT a fresh W x H SAB copy per tile.
+// It falls back to staging the raw SAB (slot.src, seqlock-checked) only when the
+// window has never been composited (slot.canvas absent). Returns { b64, w, h,
+// seq } or null when there is nothing capturable (no slot / no surface / a torn
+// read on the fallback path — the caller then keeps its placeholder tile).
+globalThis.wasmboxGrabWindow = function (slot, dw, dh) {
+  if (!slot) return null;
+  dw = dw | 0; dh = dh | 0;
+  if (dw < 1 || dh < 1) return null;
+  const seq = globalThis.wasmboxWindowSeq(slot);
+  const oc = new OffscreenCanvas(dw, dh);
+  const octx = oc.getContext("2d");
+  if (slot.canvas) {
+    // Downscale the last complete frame (bilinear, imageSmoothingEnabled=true).
+    octx.drawImage(slot.canvas, 0, 0, slot.w, slot.h, 0, 0, dw, dh);
+  } else if (slot.src) {
+    // Never-composited fallback: stage the raw SAB at native size (seqlock-safe:
+    // discard a mid-paint or torn read), then scale it down.
+    let s1 = 0;
+    if (slot.seq) { s1 = Atomics.load(slot.seq, 0); if (s1 & 1) return null; }
+    const img = new ImageData(slot.w, slot.h);
+    img.data.set(slot.src.subarray(0, slot.w * slot.h * 4));
+    if (slot.seq && Atomics.load(slot.seq, 0) !== s1) return null;
+    const stage = new OffscreenCanvas(slot.w, slot.h);
+    stage.getContext("2d").putImageData(img, 0, 0);
+    octx.drawImage(stage, 0, 0, slot.w, slot.h, 0, 0, dw, dh);
+  } else {
+    return null;
+  }
+  let data;
+  try { data = octx.getImageData(0, 0, dw, dh).data; } catch (_) { return null; }
+  // Encode the RGBA bytes to base64 (ASCII survives the rbgo string bridge
+  // intact, unlike raw binary — same reason the widgets blit path base64s).
+  let bin = "";
+  const CHUNK = 0x8000;
+  for (let i = 0; i < data.length; i += CHUNK) {
+    bin += String.fromCharCode.apply(null, data.subarray(i, Math.min(i + CHUNK, data.length)));
+  }
+  return { b64: btoa(bin), w: dw, h: dh, seq: seq };
+};
+
 // Blit an opaque RGBA buffer (top-left origin, 4 bytes/px, row-major — exactly
 // the layout of the Ruby `Widgets.render` "pixels" field, and of ImageData) at
 // (dx, dy). Used by the widgets-painted compositor menu
@@ -817,6 +891,47 @@ globalThis.__wasmboxSpawnWindow = function (title) {
   return true;
 };
 
+// `__wasmboxSpawnExternalStub(title, w, h)` -- TEST HOOK. Puts a real EXTERNAL
+// (SharedArrayBuffer-backed) window on the desktop WITHOUT racing a client's wasm
+// load, so the live-thumbnail probes (test/probe-alttab.mjs / probe-expose.mjs)
+// have a deterministic external surface whose pixels the Alt-Tab / Exposé grab
+// path (wasmboxGrabWindow) can capture. It allocates a SAB, paints a bold
+// full-range gradient into it (a NON-uniform pattern so a grabbed thumbnail is
+// visibly textured, unlike a flat placeholder), plus a seqlock control word set
+// even (=2, "committed, not mid-paint"), and dispatches a `hello`-shaped detail
+// on the Ruby bus -> spawn_external_stub (06_core.rb) registers it through the
+// SAME register_external + build_image_data path a real client uses.
+globalThis.__wasmboxSpawnExternalStub = function (title, w, h) {
+  w = (w | 0) || 240;
+  h = (h | 0) || 180;
+  const sab = new SharedArrayBuffer(w * h * 4);
+  const px = new Uint8ClampedArray(sab);
+  for (let y = 0; y < h; y++) {
+    for (let x = 0; x < w; x++) {
+      const o = (y * w + x) * 4;
+      px[o] = Math.round((x * 255) / (w - 1));            // R ramps across x
+      px[o + 1] = Math.round((y * 255) / (h - 1));        // G ramps across y
+      px[o + 2] = Math.round(((x + y) * 255) / (w + h - 2)); // B diagonal
+      px[o + 3] = 255;
+    }
+  }
+  const ctlSab = new SharedArrayBuffer(4);
+  new Int32Array(ctlSab)[0] = 2; // even seq: a committed, non-torn surface
+  const detail = {
+    type: "hello",
+    title: String(title == null ? "ext-stub" : title),
+    w: w, h: h, stride: w * 4,
+    sab: sab, ctl: ctlSab,
+  };
+  function dispatch() {
+    const bus = fakeDocument.getElementById("__wasmbox_bus");
+    if (!bus) { setTimeout(dispatch, 16); return; }
+    bus.dispatchEvent(new CustomEvent("wasmbox-spawn-external-stub", { detail: detail }));
+  }
+  dispatch();
+  return true;
+};
+
 // `__wasmboxSnap(dir)` -- TEST HOOK. Drives the REAL on_keydown -> snap path by
 // dispatching a synthetic Super+arrow keydown onto the compositor's window
 // event target. dir is "left"/"right"/"up"/"down" (or "max" == "up"). Both
@@ -860,14 +975,20 @@ globalThis.__wasmboxAltTab = function (cmd) {
 // SELECTED window's body rect (so a probe can confirm a commit focuses exactly
 // that window against __wasmboxFocusedRect). The probe reads the stash via
 // __wasmboxAltTabState().
+// sel_live is 1 when the SELECTED tile shows a LIVE grabbed framebuffer (an
+// external SAB window) rather than a flat placeholder (in-process / dom), and
+// (tx,ty,tw,th) is that tile's on-screen rect on the composited canvas, so a
+// probe can sample it via __wasmboxReadRegion and assert real (textured) pixels.
 globalThis.__wasmboxAltTabData = { active: 0 };
-globalThis.wasmboxPublishAltTab = function (active, count, index, px, py, pw, ph, sx, sy, sw, sh) {
+globalThis.wasmboxPublishAltTab = function (active, count, index, px, py, pw, ph, sx, sy, sw, sh, selLive, tx, ty, tw, th) {
   globalThis.__wasmboxAltTabData = {
     active: active | 0,
     count: count | 0,
     index: index | 0,
     panel_x: px | 0, panel_y: py | 0, panel_w: pw | 0, panel_h: ph | 0,
     sel_x: sx | 0, sel_y: sy | 0, sel_w: sw | 0, sel_h: sh | 0,
+    sel_live: selLive | 0,
+    tile_x: tx | 0, tile_y: ty | 0, tile_w: tw | 0, tile_h: th | 0,
   };
 };
 // `__wasmboxAltTabState()` -- TEST HOOK. Returns the last-published switcher
@@ -945,8 +1066,12 @@ globalThis.__wasmboxExpose = function (cmd) {
 // window against __wasmboxFocusedRect); tilesJson is a JSON "[[x,y,w,h],...]" of
 // every tile rectangle (so a probe can assert the tiles are non-overlapping +
 // within the work area). The probe reads the stash via __wasmboxExposeState().
+// sel_live is 1 when the SELECTED tile shows a LIVE grabbed framebuffer (an
+// external SAB window) rather than a flat placeholder (in-process / dom); the
+// selected tile's on-screen rect is tiles[index], which a probe can sample via
+// __wasmboxReadRegion and assert real (textured) pixels.
 globalThis.__wasmboxExposeData = { active: 0 };
-globalThis.wasmboxPublishExpose = function (active, count, cols, rows, index, sx, sy, sw, sh, tilesJson) {
+globalThis.wasmboxPublishExpose = function (active, count, cols, rows, index, sx, sy, sw, sh, tilesJson, selLive) {
   let tiles = [];
   try { tiles = JSON.parse(String(tilesJson || "[]")); } catch (_) { tiles = []; }
   globalThis.__wasmboxExposeData = {
@@ -956,6 +1081,7 @@ globalThis.wasmboxPublishExpose = function (active, count, cols, rows, index, sx
     rows: rows | 0,
     index: index | 0,
     sel_x: sx | 0, sel_y: sy | 0, sel_w: sw | 0, sel_h: sh | 0,
+    sel_live: selLive | 0,
     tiles: tiles,
   };
 };
