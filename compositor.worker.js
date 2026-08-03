@@ -320,9 +320,62 @@ try {
 //
 // Regression test: scratchpad/probe-loadingbar-xbrowser.mjs fails on
 // Firefox when this override is removed; passes on all three when present.
+// --- per-frame cost instrumentation (test hook) ---------------------------
+// A cheap set of counters the blit helpers below bump, plus a wrapper around
+// the rAF callback that times each Compositor#render. `__wasmboxFrameStats()`
+// snapshots them so a headless probe (test/probe-frame-cost.mjs) can attribute
+// the idle per-frame cost to a specific overlay: an overlay that RE-RENDERS
+// every frame shows up as a non-zero *DecodesPerFrame (a Widgets.render +
+// base64 + atob round-trip), whereas a cached one shows only *PresentsPerFrame
+// (a single drawImage of a cached buffer). The counters are integer bumps
+// (negligible cost) and left in permanently as a regression guard.
+globalThis.__wasmboxStats = {
+  frames: 0, frameMsSum: 0, frameMsMax: 0,
+  sabCopies: 0, sabPresents: 0,      // external-window SAB blits (copy vs cached)
+  rgbaDecodes: 0, rgbaPresents: 0,   // opaque putImageData path (desktop/menu)
+  overDecodes: 0, overPresents: 0,   // translucent drawImage path (hud/tray/…)
+  decodeKeys: {},                    // per-key decode count (attribution)
+};
+globalThis.__wasmboxStatsBumpDecode = function (key) {
+  const s = globalThis.__wasmboxStats;
+  s.decodeKeys[key] = (s.decodeKeys[key] || 0) + 1;
+};
+globalThis.__wasmboxFrameStats = function (reset) {
+  const s = globalThis.__wasmboxStats;
+  const n = s.frames || 1;
+  const snap = {
+    frames: s.frames,
+    avgFrameMs: s.frameMsSum / n,
+    maxFrameMs: s.frameMsMax,
+    sabCopiesPerFrame: s.sabCopies / n,
+    sabPresentsPerFrame: s.sabPresents / n,
+    rgbaDecodesPerFrame: s.rgbaDecodes / n,
+    rgbaPresentsPerFrame: s.rgbaPresents / n,
+    overDecodesPerFrame: s.overDecodes / n,
+    overPresentsPerFrame: s.overPresents / n,
+    decodeKeys: Object.assign({}, s.decodeKeys),
+  };
+  if (reset) {
+    s.frames = 0; s.frameMsSum = 0; s.frameMsMax = 0;
+    s.sabCopies = 0; s.sabPresents = 0;
+    s.rgbaDecodes = 0; s.rgbaPresents = 0;
+    s.overDecodes = 0; s.overPresents = 0;
+    s.decodeKeys = {};
+  }
+  return snap;
+};
+
 globalThis.requestAnimationFrame = function (cb) {
   const t = performance.now();
-  return setTimeout(() => cb(t), 16);
+  return setTimeout(() => {
+    const s = globalThis.__wasmboxStats;
+    const t0 = performance.now();
+    cb(t);
+    const dt = performance.now() - t0;
+    s.frames++;
+    s.frameMsSum += dt;
+    if (dt > s.frameMsMax) s.frameMsMax = dt;
+  }, 16);
 };
 globalThis.cancelAnimationFrame = function (id) { clearTimeout(id); };
 
@@ -519,9 +572,11 @@ globalThis.wasmboxBlitFromSAB = function (ctx, slot, dx, dy, sx, sy, sw, sh) {
   // churn when a large external window (e.g. clients/showcase at 480×360) is
   // open, and memory grew unboundedly in idle.
   if (slot.seq && slot.lastSeq === s1) {
+    globalThis.__wasmboxStats.sabPresents++;
     ctx.drawImage(slot.canvas, sx, sy, sw, sh, dx + sx, dy + sy, sw, sh);
     return;
   }
+  globalThis.__wasmboxStats.sabCopies++;
   const dst = slot.image.data;
   for (let row = 0; row < sh; row++) {
     const srcOff = (sy + row) * stride + sx * 4;
@@ -562,9 +617,11 @@ globalThis.wasmboxBlitFromSABScaled = function (ctx, slot, sx, sy, sw, sh, dx, d
   // wasmboxBlitFromSAB for the motivation (Firefox GC pressure with idle
   // windows).
   if (slot.seq && slot.lastSeq === s1) {
+    globalThis.__wasmboxStats.sabPresents++;
     ctx.drawImage(slot.canvas, 0, 0, slot.w, slot.h, dx, dy, dw, dh);
     return;
   }
+  globalThis.__wasmboxStats.sabCopies++;
   const dst = slot.image.data;
   for (let row = 0; row < sh; row++) {
     const srcOff = (sy + row) * stride + sx * 4;
@@ -594,6 +651,23 @@ globalThis.wasmboxBlitFromSABScaled = function (ctx, slot, sx, sy, sw, sh, dx, d
 globalThis.wasmboxWindowSeq = function (slot) {
   if (!slot) return -1;
   if (typeof slot.lastSeq === "number") return slot.lastSeq | 0;
+  if (slot.seq) return Atomics.load(slot.seq, 0) & ~1; // clear the odd mid-paint bit
+  return 0;
+};
+
+// wasmboxWindowLiveSeq(slot): the client's CURRENTLY-PUBLISHED content seq (not
+// the seq the blit path last copied). Reads the live seqlock word with the odd
+// mid-paint bit cleared, so it changes exactly when the client commits a new
+// frame — BEFORE the compositor blits it. The idle-repaint gate
+// (compositor/06_core.rb Compositor#needs_paint?) polls this per external window
+// each frame to decide whether a client committed new pixels since the last
+// painted frame; if none did (and nothing else is dirty), the whole frame is
+// skipped. Unlike wasmboxWindowSeq (which returns lastSeq — what we COPIED), this
+// must return the LIVE value or the gate would never observe a pending commit.
+// Returns 0 for a slot with no seqlock (older client — its repaints ride the
+// "commit" message path instead) and -1 for a missing slot.
+globalThis.wasmboxWindowLiveSeq = function (slot) {
+  if (!slot) return -1;
   if (slot.seq) return Atomics.load(slot.seq, 0) & ~1; // clear the odd mid-paint bit
   return 0;
 };
@@ -668,11 +742,15 @@ globalThis.wasmboxBlitRGBA = function (ctx, b64, w, h, dx, dy, key) {
   const cache = (globalThis.__wasmboxRGBACache ||= {});
   let slot = cache[key];
   if (b64 && b64.length) {
+    globalThis.__wasmboxStats.rgbaDecodes++;
+    globalThis.__wasmboxStatsBumpDecode(key);
     const bin = atob(b64);
     const n = bin.length;
     const buf = new Uint8ClampedArray(n);
     for (let i = 0; i < n; i++) buf[i] = bin.charCodeAt(i);
     slot = cache[key] = new ImageData(buf, w, h);
+  } else {
+    globalThis.__wasmboxStats.rgbaPresents++;
   }
   if (!slot) return;
   ctx.putImageData(slot, dx, dy);
@@ -695,6 +773,8 @@ globalThis.wasmboxBlitRGBAOver = function (ctx, b64, w, h, dx, dy, key) {
   const cache = (globalThis.__wasmboxRGBAOverCache ||= {});
   let slot = cache[key];
   if (b64 && b64.length) {
+    globalThis.__wasmboxStats.overDecodes++;
+    globalThis.__wasmboxStatsBumpDecode(key);
     const bin = atob(b64);
     const n = bin.length;
     const buf = new Uint8ClampedArray(n);
@@ -702,6 +782,8 @@ globalThis.wasmboxBlitRGBAOver = function (ctx, b64, w, h, dx, dy, key) {
     const oc = new OffscreenCanvas(w, h);
     oc.getContext("2d").putImageData(new ImageData(buf, w, h), 0, 0);
     slot = cache[key] = oc;
+  } else {
+    globalThis.__wasmboxStats.overPresents++;
   }
   if (!slot) return;
   ctx.drawImage(slot, dx, dy);
