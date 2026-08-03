@@ -1182,5 +1182,107 @@ assert_eq(wmn.handle_client_message({ type: "notify", title: "hi" }), :notify, "
 assert_eq(wmn.handle_client_message({ type: "notify", body: "yo" }), :notify, "notify with a body -> :notify")
 assert_eq(wmn.handle_client_message({ type: "notify" }), :ignored, "notify with neither title nor body -> :ignored")
 
+# ---- System tray / status area (05_tray.rb) -------------------------------
+# TrayItem: construction, glyph vs image, key, compositor-owned, partial update.
+ti = TrayItem.new("mail", { glyph: "search", tooltip: "Inbox",
+                            owner: :wk, owner_window: 7,
+                            menu: [{ label: "Open", action: [:noop, "o"] }] })
+assert_eq(ti.id, "mail", "tray item stores its id")
+assert(ti.glyph?, "glyph item reports glyph?")
+assert_eq(ti.key, "tray#mail", "tray item key encodes id")
+assert(!ti.compositor_owned?, "an owned item is not compositor-owned")
+assert_eq(ti.owner_window, 7, "owner_window stored")
+# An image item (base64 + size, no glyph) is not a glyph item.
+tii = TrayItem.new("pic", { icon: "AAAA", w: 2, h: 2, tooltip: "img" })
+assert(!tii.glyph?, "image item is not a glyph item")
+assert(tii.compositor_owned?, "an owner-less item is compositor-owned")
+# A blank glyph string is treated as "no glyph".
+tblank = TrayItem.new("b", { glyph: "" })
+assert(!tblank.glyph?, "empty glyph string -> not a glyph item")
+# Partial update overwrites only the supplied fields + invalidates the cache.
+ti.b64 = "cached"; ti.blitted = true
+ti.update({ tooltip: "Unread" })
+assert_eq(ti.tooltip, "Unread", "update applied the new tooltip")
+assert_eq(ti.glyph, "search", "update left the untouched glyph intact")
+assert_eq(ti.b64, nil, "update dropped the render cache")
+assert_eq(ti.blitted, false, "update reset the blitted flag")
+
+# TrayArea: add / find / dedup / update / remove / owner cleanup / layout / hit.
+ta = TrayArea.new
+assert(ta.empty?, "fresh tray is empty")
+i1 = ta.add("a", { glyph: "settings", owner_window: 1 })
+i2 = ta.add("b", { glyph: "search", owner_window: 2 })
+assert_eq(ta.length, 2, "two items added")
+assert(!ta.empty?, "tray non-empty after add")
+assert(ta.find("a").equal?(i1), "find returns the live item")
+# Re-adding a known id updates in place (no duplicate).
+again = ta.add("a", { tooltip: "changed" })
+assert(again.equal?(i1), "re-add of a known id returns the SAME item (update)")
+assert_eq(ta.length, 2, "re-add did not grow the tray")
+assert_eq(i1.tooltip, "changed", "re-add applied the update")
+# update by id: known -> item, unknown -> nil.
+assert(ta.update("b", { tooltip: "t" }).equal?(i2), "update of a known id returns the item")
+assert_eq(i2.tooltip, "t", "update mutated the item")
+assert_eq(ta.update("nope", { tooltip: "x" }), nil, "update of an unknown id -> nil")
+
+# Layout: right-to-left from just LEFT of the reserved notification column, so
+# the two top strips never overlap. Item 0 (oldest) sits nearest the right.
+reserve = NotificationStack::TOAST_W + 2 * NotificationStack::TOAST_MARGIN
+assert_eq(TrayArea.notif_reserve, reserve, "notif_reserve mirrors the toast column width")
+lay = ta.layout(1280)
+right = 1280 - reserve
+assert_eq(lay[0][:item].id, "a", "layout item 0 is the oldest add")
+assert_eq(lay[0][:x], right - TrayArea::ICON, "item 0 hugs the right of the tray strip")
+assert_eq(lay[0][:y], TrayArea::MARGIN, "tray strip sits at the top margin")
+assert_eq(lay[1][:x], right - TrayArea::ICON - (TrayArea::ICON + TrayArea::GAP),
+          "item 1 steps one cell + gap further LEFT")
+# The tray strip's right edge stays clear of the toast column's left edge.
+toast_left = 1280 - NotificationStack::TOAST_W - NotificationStack::TOAST_MARGIN
+assert(lay[0][:x] + TrayArea::ICON <= toast_left,
+       "tray strip never overlaps the notification toast column")
+
+# Hit-test: inside a cell hits it; a miss returns nil.
+hit = ta.at(lay[0][:x] + 2, lay[0][:y] + 2, 1280)
+assert(hit.equal?(i1), "click inside cell 0 hits item a")
+assert_eq(ta.at(10, 10, 1280), nil, "click far from the strip misses")
+assert(ta.at(lay[1][:x] + 2, lay[1][:y] + 2, 1280).equal?(i2), "click in cell 1 hits item b")
+
+# remove: known -> item, unknown -> nil.
+r = ta.remove("a")
+assert(r.equal?(i1), "remove returns the removed item")
+assert_eq(ta.length, 1, "tray shrank after remove")
+assert_eq(ta.remove("gone"), nil, "remove of an unknown id -> nil")
+
+# Owner cleanup: dropping a window removes only ITS items; compositor-owned
+# (owner_window nil) survive.
+tc = TrayArea.new
+tc.add("app1", { glyph: "search", owner_window: 5 })
+tc.add("app2", { glyph: "settings", owner_window: 5 })
+tc.add("app3", { glyph: "copy", owner_window: 9 })
+tc.add("builtin", { glyph: "settings" }) # owner_window nil -> compositor-owned
+dropped = tc.remove_for_window(5)
+assert_eq(dropped.length, 2, "remove_for_window dropped both items owned by window 5")
+assert_eq(tc.length, 2, "window-9 item + the compositor-owned item survive")
+assert(!tc.find("builtin").nil?, "compositor-owned item is never window-dropped")
+assert(!tc.find("app3").nil?, "another window's item is untouched")
+assert_eq(tc.remove_for_window(123), [], "remove_for_window of a window with no items -> []")
+
+# WindowManager tray wire arms: a non-empty id yields the tray verb; empty drops.
+wmt_tray = WindowManager.new
+assert_eq(wmt_tray.handle_client_message({ type: "tray_add", id: "x", glyph: "search" }),
+          :tray_add, "tray_add with an id -> :tray_add")
+assert_eq(wmt_tray.handle_client_message({ type: "tray_add" }), :ignored,
+          "tray_add with no id -> :ignored")
+assert_eq(wmt_tray.handle_client_message({ type: "tray_remove", id: "x" }),
+          :tray_remove, "tray_remove with an id -> :tray_remove")
+assert_eq(wmt_tray.handle_client_message({ type: "tray_remove" }), :ignored,
+          "tray_remove with no id -> :ignored")
+assert_eq(wmt_tray.handle_client_message({ type: "tray_update", id: "x", tooltip: "t" }),
+          :tray_update, "tray_update with an id -> :tray_update")
+assert_eq(wmt_tray.handle_client_message({ type: "tray_update" }), :ignored,
+          "tray_update with no id -> :ignored")
+# A tray message never creates a window.
+assert_eq(wmt_tray.windows.length, 0, "tray messages create no window")
+
 puts "rbtest: ran all pure-WM assertions"
 `

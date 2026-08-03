@@ -314,6 +314,59 @@
       });
     }
 
+    // Register (or update) a SYSTEM-TRAY status icon: the compositor paints it in
+    // the top status strip (wasmbox/compositor/13_tray.rb), independent of this
+    // window's surface. opts:
+    //   id       (string)  caller-chosen unique key (required; re-using an id
+    //                      updates that slot in place)
+    //   glyph    (string)  a stock go-widgets glyph: "settings", "search",
+    //                      "new", "open", "save", "cut", "copy", "paste",
+    //                      "undo", "redo" (preferred — no pixels to ship)
+    //   icon     (string)  OR a base64 RGBA image at w x h (used when glyph is
+    //                      absent)
+    //   w, h     (number)  the icon image dimensions
+    //   tooltip  (string)  hover text
+    // A LEFT click on the icon fires back an onInput event of kind
+    // "tray_clicked"; a RIGHT click fires "tray_menu" — both carry { tray_id }.
+    // window_id is attached so those events route back to this client, so call
+    // trayAdd AFTER the window's welcome (unlike notify, a tray click is only
+    // useful once the window exists to receive it).
+    trayAdd(opts) {
+      opts = opts || {};
+      send({
+        type: "tray_add",
+        window_id: this.windowId,
+        id: opts.id || "",
+        glyph: opts.glyph || "",
+        icon: opts.icon || "",
+        w: opts.w | 0,
+        h: opts.h | 0,
+        tooltip: opts.tooltip || "",
+      });
+    }
+
+    // Update a live tray slot (new glyph/image/tooltip) by id. Only the fields
+    // you pass overwrite; the rest stay put.
+    trayUpdate(opts) {
+      opts = opts || {};
+      send({
+        type: "tray_update",
+        window_id: this.windowId,
+        id: opts.id || "",
+        glyph: opts.glyph || "",
+        icon: opts.icon || "",
+        w: opts.w | 0,
+        h: opts.h | 0,
+        tooltip: opts.tooltip || "",
+      });
+    }
+
+    // Remove a tray slot by id. (The compositor also drops all of a client's
+    // tray items automatically when its window closes.)
+    trayRemove(id) {
+      send({ type: "tray_remove", window_id: this.windowId, id: id || "" });
+    }
+
     // Write a single RGBA pixel into the SAB at (x, y). Bounds-checked; OOB is
     // a no-op so naive clients can scribble freely.
     putPixel(x, y, r, gr, b, a) {

@@ -192,6 +192,10 @@ jobs:
         working-directory: test
         run: node probe-notifications.mjs
 
+      - name: Run headless system-tray probe (status strip render + add/remove + click-menu)
+        working-directory: test
+        run: node probe-tray.mjs
+
       - name: Run headless desktop-background probe (widgets Backdrop fill + grid, cached, z-order)
         working-directory: test
         run: node probe-desktop.mjs

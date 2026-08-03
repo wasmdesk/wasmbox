@@ -90,6 +90,19 @@ class Compositor
     @bus.on("wasmbox-notify") do |e|
       route_worker_message(nil, e.get("detail"))
     end
+    # Tray test hooks: __wasmboxTrayAdd(opts) / __wasmboxTrayRemove(id)
+    # (compositor.worker.js) dispatch `tray_add` / `tray_remove` messages here so
+    # a probe can populate + clear the strip without a client. Routed through the
+    # FULL decode -> handle -> route path (nil worker → compositor-owned items),
+    # so they exercise the real wiring. Inert when Compositor::TRAY is off
+    # (add/remove_tray_item no-op), so registering them unconditionally keeps main
+    # shippable.
+    @bus.on("wasmbox-tray-add") do |e|
+      route_worker_message(nil, e.get("detail"))
+    end
+    @bus.on("wasmbox-tray-remove") do |e|
+      route_worker_message(nil, e.get("detail"))
+    end
     @worker_seq = 0
     @workers_by_id = {}
   end
@@ -206,6 +219,8 @@ class Compositor
       stub_msg = JS.global.call("wasmboxMakeObject",
         "type", "closed", "window_id", win_id, "reason", "client")
       JS.global.call("wasmboxPostMessage", worker, stub_msg)
+      # The client is gone — drop any status icons it registered (13_tray.rb).
+      drop_tray_for_window(win_id)
       notify_windows_changed
     when :closed_by_peer
       # The dock right-clicked an iconbar entry — handle_client_message already
@@ -218,6 +233,8 @@ class Compositor
           "type", "closed", "window_id", stash[:window_id], "reason", "peer")
         JS.global.call("wasmboxPostMessage", stash[:worker], stub_msg)
       end
+      # Drop any status icons the peer-closed window registered (13_tray.rb).
+      drop_tray_for_window(stash[:window_id]) if stash
       notify_windows_changed
     when :restored
       # The dock asked to restore a minimized window — push a refreshed window
@@ -248,6 +265,16 @@ class Compositor
       # (12_notifications.rb). `worker` is the poster, so a toast action can fire
       # back to it. The draw + auto-expiry run from render/tick.
       post_notification(msg, worker)
+    when :tray_add
+      # A client registered a status icon — add it to the tray strip
+      # (13_tray.rb). `worker` is the poster, so a tray click can fire back to it.
+      add_tray_item(msg, worker)
+    when :tray_remove
+      # A client removed one of its status icons by id.
+      remove_tray_item(msg)
+    when :tray_update
+      # A client mutated a live status icon (glyph/image/tooltip) by id.
+      update_tray_item(msg)
     end
   end
 
@@ -383,8 +410,11 @@ class Compositor
     # (a desktop notification: headline + detail line, severity, optional base64
     # icon, seconds-until-dismiss, and a single click-to-act button). Fields NOT
     # listed here arrive nil, so a new notify field must be added to this list.
+    # `id`/`glyph`/`tooltip` ride on `tray_add`/`tray_remove`/`tray_update` (a
+    # status icon: its caller-chosen id, a stock glyph name OR a base64 RGBA
+    # `icon` at `w`x`h`, and the hover tooltip).
     %w[window_id w h stride title role app index workspace name parent rel_x rel_y lock_aspect ratio
-       body kind icon timeout action_label action].each do |k|
+       body kind icon timeout action_label action id glyph tooltip].each do |k|
       v = data.get(k)
       h[k.to_sym] = v unless v.nil?
     end
@@ -565,6 +595,18 @@ class Compositor
       return
     end
 
+    # The tray status strip is part of the same top overlay stratum: a click on
+    # an icon is consumed here before anything beneath. A LEFT click fires the
+    # item (or opens a compositor-owned indicator's menu); a RIGHT click is left
+    # for on_contextmenu to open the menu (both consume the event). Self-gates on
+    # TRAY.
+    item = tray_at(mx, my)
+    if item
+      btn = e.get("button")
+      tray_activate(item, mx, my) if btn.nil? || btn == 0
+      return
+    end
+
     # A menu is open: a click either activates an item or dismisses it.
     if @menu
       handle_menu_click(mx, my)
@@ -699,6 +741,14 @@ class Compositor
     e.call("preventDefault")
     mx = e.get("offsetX")
     my = e.get("offsetY")
+    # A right-click on a tray icon opens its menu (a compositor menu for a
+    # built-in indicator, or a forwarded tray_menu event for an app item) and is
+    # swallowed here so no desktop menu opens underneath. Self-gates on TRAY.
+    item = tray_at(mx, my)
+    if item
+      open_tray_menu(item, mx, my)
+      return
+    end
     return if panel_at(mx, my)
     win = @wm.window_at(mx, my)
     if win
@@ -992,9 +1042,11 @@ class Compositor
     end
     draw_menu if @menu
     draw_hud
-    # Desktop-notification toasts are the always-on-top overlay stratum: painted
-    # last so they sit above windows, panels, the menu and the HUD
-    # (12_notifications.rb). Self-gates on Compositor::NOTIFICATIONS.
+    # The tray status strip + notification toasts are the always-on-top overlay
+    # stratum: painted last so they sit above windows, panels, the menu and the
+    # HUD. They share the top edge but never overlap (tray left of the toast
+    # column — see 05_tray.rb). Self-gate on Compositor::TRAY / ::NOTIFICATIONS.
+    draw_tray
     draw_notifications
   end
 
