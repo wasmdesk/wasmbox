@@ -200,6 +200,10 @@ jobs:
         working-directory: test
         run: node probe-applets.mjs
 
+      - name: Run headless window-snapping probe (Super+arrow half-tiling + drag-to-edge preview + restore)
+        working-directory: test
+        run: node probe-snapping.mjs
+
       - name: Run headless desktop-background probe (widgets Backdrop fill + grid, cached, z-order)
         working-directory: test
         run: node probe-desktop.mjs

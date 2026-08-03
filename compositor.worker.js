@@ -779,6 +779,64 @@ globalThis.__wasmboxAppletRemove = function (kind) {
   return true;
 };
 
+// --- window snapping (test/probe-snapping.mjs) ----------------------------
+
+// `wasmboxPublishFocusedRect(...)` -- called by the Ruby compositor once per
+// frame (render, self-gated on Compositor::SNAPPING) to publish the focused
+// window's live geometry + the work-area metrics. The probe reads the stashed
+// object via __wasmboxFocusedRect(). x < 0 means "nothing focused". `state` is
+// the snap zone the window occupies ("left"/"right"/"max"/""); `preview` is the
+// drag-to-edge zone currently armed ("left"/"right"/"max"/"").
+globalThis.__wasmboxFocusedRectData = null;
+globalThis.wasmboxPublishFocusedRect = function (x, y, w, h, state, sw, sh, rtop, rbot, preview) {
+  globalThis.__wasmboxFocusedRectData = {
+    x: x | 0, y: y | 0, w: w | 0, h: h | 0,
+    state: String(state || ""),
+    screen_w: sw | 0, screen_h: sh | 0,
+    reserved_top: rtop | 0, reserved_bottom: rbot | 0,
+    preview: String(preview || ""),
+  };
+};
+// `__wasmboxFocusedRect()` -- TEST HOOK. Returns the last-published focused
+// window rect + work-area metrics (or null before the first frame).
+globalThis.__wasmboxFocusedRect = function () {
+  return globalThis.__wasmboxFocusedRectData;
+};
+
+// `__wasmboxSpawnWindow(title)` -- TEST HOOK. Puts a real decorated, focused,
+// compositor-painted (in-process) window on the desktop via the Ruby bus, so the
+// probe has a deterministic window to snap without racing a client's wasm load.
+globalThis.__wasmboxSpawnWindow = function (title) {
+  const detail = String(title == null ? "snap" : title);
+  function dispatch() {
+    const bus = fakeDocument.getElementById("__wasmbox_bus");
+    if (!bus) { setTimeout(dispatch, 16); return; }
+    bus.dispatchEvent(new CustomEvent("wasmbox-spawn-window", { detail: detail }));
+  }
+  dispatch();
+  return true;
+};
+
+// `__wasmboxSnap(dir)` -- TEST HOOK. Drives the REAL on_keydown -> snap path by
+// dispatching a synthetic Super+arrow keydown onto the compositor's window
+// event target. dir is "left"/"right"/"up"/"down" (or "max" == "up"). Both
+// metaKey AND ctrl+alt are set so it fires whichever modifier the compositor's
+// snap chord accepts.
+globalThis.__wasmboxSnap = function (dir) {
+  const map = { left: "ArrowLeft", right: "ArrowRight", up: "ArrowUp", max: "ArrowUp", down: "ArrowDown" };
+  const key = map[String(dir)] || String(dir);
+  function dispatch() {
+    if (!fakeWindow) { setTimeout(dispatch, 16); return; }
+    fakeWindow.dispatchEvent({
+      type: "keydown", key: key, code: key,
+      metaKey: true, ctrlKey: true, altKey: true, shiftKey: false,
+      preventDefault() {},
+    });
+  }
+  dispatch();
+  return true;
+};
+
 // `wasmboxClock()` -- wall-clock + calendar math for the clock/calendar applets
 // (compositor/14_applets.rb reads the fields off the returned object). Kept on
 // the JS side so the Ruby applet render never does Gregorian date arithmetic.
@@ -991,6 +1049,13 @@ function dispatchDomEvent(m) {
     button: m.button ?? 0,
     deltaX: m.deltaX ?? 0,   // wheel / two-finger swipe
     deltaY: m.deltaY ?? 0,
+    // Keyboard modifiers — forwarded so the compositor can read the Shift+Tab
+    // and Super/⌘+arrow (snapping) chords off a relayed keydown, not just the
+    // synthetic test-hook events.
+    metaKey: m.metaKey ?? false,
+    ctrlKey: m.ctrlKey ?? false,
+    altKey: m.altKey ?? false,
+    shiftKey: m.shiftKey ?? false,
     preventDefault() {},
   };
   // The Ruby `e.get("foo")` path goes through syscall/js .Get, which reads a
