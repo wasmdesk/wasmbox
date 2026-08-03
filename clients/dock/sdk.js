@@ -39,6 +39,13 @@
   // Channel: set once the compositor hands us a MessagePort. Until then,
   // application sends (hello/commit/...) buffer in pendingSends.
   let activeChannel = null;
+  // A worker may own SEVERAL surfaces (the dock panel + a right-click menu
+  // popup), all multiplexed over the single port. `clients` is every started
+  // surface; `pendingWelcome` matches each `welcome` (which arrives in hello
+  // order) to the oldest un-welcomed surface, and every other message routes to
+  // the surface carrying its window_id.
+  const clients = [];
+  const pendingWelcome = [];
   let activeClient  = null;
   const pendingSends = [];
 
@@ -59,12 +66,25 @@
     }
   }
 
+  // One dispatcher for the whole worker. `welcome` is matched to the oldest
+  // un-welcomed surface (the compositor replies in hello order over an ordered
+  // port); every other message routes to the surface with that window_id.
+  function dispatch(ev) {
+    const m = ev && ev.data;
+    if (!m || typeof m.type !== "string") return;
+    if (m.type === "welcome") {
+      const c = pendingWelcome.shift();
+      if (c) c._applyWelcome(m);
+      return;
+    }
+    const c = clients.find((x) => x.windowId === m.window_id);
+    if (c) c._handle(m);
+  }
+
   function swapChannel(port) {
     if (!port || activeChannel === port) return;
-    if (activeClient && activeClient._onMessage) {
-      port.addEventListener("message", activeClient._onMessage);
-      try { port.start(); } catch (_) {}
-    }
+    port.addEventListener("message", dispatch);
+    try { port.start(); } catch (_) {}
     activeChannel = port;
     flushPending();
   }
@@ -83,6 +103,10 @@
       if (!w || !h) throw new Error("WasmboxClient requires positive w + h");
       this.title = opts.title || "client";
       this.role = opts.role || "window"; // dock requests the "panel" role
+      // Popups only: the parent window_id + parent-relative placement.
+      this.parent = (opts.parent != null) ? (opts.parent | 0) : null;
+      this.relX = opts.rel_x | 0;
+      this.relY = opts.rel_y | 0;
       this.w = w;
       this.h = h;
       this.stride = 4 * w;
@@ -107,20 +131,20 @@
       // initial snapshot would be silently dropped. Flushed (in FIFO order)
       // by the first onInput() call.
       this._pendingInputs = [];
-      this._onMessage = (e) => this._handle(e.data);
     }
 
     get channel() { return activeChannel; }
 
     // Begin listening + post hello. Returns a Promise that resolves with the
     // welcome payload (so the client can `await client.start()` and then paint).
+    // Several surfaces in one worker all multiplex over the single port (the
+    // dispatcher installed by swapChannel routes by window_id); welcome is
+    // matched FIFO to the oldest un-welcomed surface.
     start() {
-      activeClient = this;
-      if (activeChannel) {
-        activeChannel.addEventListener("message", this._onMessage);
-        try { activeChannel.start && activeChannel.start(); } catch (_) {}
-      }
-      send({
+      clients.push(this);
+      pendingWelcome.push(this);
+      if (this.role !== "popup" && activeClient === null) activeClient = this;
+      const hello = {
         type: "hello",
         title: this.title,
         role: this.role, // panel role (compositor may ignore → defaults to window)
@@ -129,7 +153,13 @@
         sab: this.sab,
         stride: this.stride,
         ctl: this.ctl,
-      });
+      };
+      if (this.parent !== null) {
+        hello.parent = this.parent; // popup: anchor to this parent window_id
+        hello.rel_x = this.relX;    // ...at this offset inside the parent body
+        hello.rel_y = this.relY;
+      }
+      send(hello);
       return new Promise((resolve) => this.onWelcome(resolve));
     }
 
@@ -233,6 +263,30 @@
       send({ type: "set_theme", name: String(name) });
     }
 
+    // openPopup opens a child popup surface anchored at (rel_x, rel_y) inside
+    // this surface's body — the dock uses it for the right-click app context
+    // menu, which is far taller than the 28px bar can draw in-surface. The
+    // popup is undecorated, stacks just above its parent, takes mouse input via
+    // hit-testing, and the compositor grab-dismisses it (posts `closed`) on a
+    // click outside it. Returns the started child WasmboxClient — use its
+    // onWelcome before painting. Mirrors wasmbox/clients/sdk/sdk.js openPopup so
+    // the dock speaks the same popup protocol without a compositor change.
+    openPopup(opts) {
+      if (this.windowId === null) {
+        throw new Error("openPopup: call after the parent's welcome");
+      }
+      const popup = new WasmboxClient({
+        title: opts.title || (this.title + " menu"),
+        w: opts.w, h: opts.h,
+        role: "popup",
+        parent: this.windowId,
+        rel_x: opts.rel_x | 0,
+        rel_y: opts.rel_y | 0,
+      });
+      popup.start();
+      return popup;
+    }
+
     // putPixel + fillRect: minimal SAB scribblers used by bootWasm's loading
     // progress bar (kept in lockstep with clients/sdk/sdk.js).
     putPixel(x, y, r, gr, b, a) {
@@ -261,16 +315,17 @@
     }
 
     // --- internals -------------------------------------------------------
+    _applyWelcome(msg) {
+      this.windowId = msg.window_id;
+      this.w = msg.granted_w | 0;
+      this.h = msg.granted_h | 0;
+      this.stride = 4 * this.w;
+      for (const fn of this._welcomeCbs) fn(msg);
+    }
+
     _handle(msg) {
       if (!msg || typeof msg.type !== "string") return;
       switch (msg.type) {
-        case "welcome":
-          this.windowId = msg.window_id;
-          this.w = msg.granted_w | 0;
-          this.h = msg.granted_h | 0;
-          this.stride = 4 * this.w;
-          for (const fn of this._welcomeCbs) fn(msg);
-          break;
         case "input":
           if (this._inputCbs.length) {
             for (const fn of this._inputCbs) fn(msg.event || {});
@@ -282,9 +337,10 @@
           break;
         case "closed":
           for (const fn of this._closedCbs) fn(msg.reason || "user");
-          if (activeChannel) {
-            try { activeChannel.removeEventListener("message", this._onMessage); } catch (_) {}
-          }
+          // Drop this surface from dispatch; the shared port stays open for the
+          // worker's other surfaces (e.g. the dock panel after its menu goes).
+          const i = clients.indexOf(this);
+          if (i >= 0) clients.splice(i, 1);
           break;
       }
     }

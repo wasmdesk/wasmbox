@@ -117,6 +117,12 @@ type Window struct {
 	// so a future "show all workspaces" view (e.g. a pager) needs no
 	// schema change.
 	Workspace int `json:"workspace"`
+	// App is the launcher id the window was spawned from (e.g. "terminal").
+	// Forward-compatible: the compositor's windows_snapshot does not send it
+	// yet, so it rides the payload the moment it does; until then the running
+	// / focused-app indicators fall back to matching the window Title against
+	// a launcher Label (see appIndexForWindow).
+	App string `json:"app"`
 }
 
 // Glyph enumerates the built-in icon drawings.
@@ -197,6 +203,11 @@ type State struct {
 	CursorY         int
 	CursorInside    bool
 	Theme           theme.Theme
+	// Magnify configures the macOS-style hover magnification (see magnify.go).
+	Magnify Magnify
+	// badges holds the per-launcher attention-badge counts, keyed by app id
+	// (see indicators.go). nil until the first SetBadge; read via BadgeCount.
+	badges map[string]int
 }
 
 // DefaultApps is the built-in launcher set the iconbar ships with.
@@ -225,6 +236,7 @@ func New(width, height int) *State {
 		WorkspaceCount:  4,
 		Clock:           "",
 		Theme:           theme.DefaultFluxboxLight(),
+		Magnify:         DefaultMagnify(),
 	}
 	s.Workspace = workspaceLabel(s.ActiveWorkspace, s.WorkspaceCount)
 	return s
@@ -458,15 +470,17 @@ func (s *State) HitTest(x, y int) int {
 	if x < ix || x >= ix+iw {
 		return -1
 	}
-	for i := range s.Apps {
-		bx, by, bw, bh := s.IconbarButtonRect(i)
-		if x >= bx && x < bx+bw && y >= by && y < by+bh {
-			// The button might overflow the iconbar's right edge when the
-			// surface is narrow; only count the click if the button start
-			// is still inside the iconbar.
-			if bx >= ix && bx < ix+iw {
-				return i
-			}
+	// Hit-test the LAID-OUT geometry (magnified under a hovering cursor, resting
+	// otherwise) so a click lands on the button where it is actually painted.
+	// The click is already confined to the iconbar by the range guard above, so
+	// a slot that contains it is genuinely visible there — even a magnified
+	// button whose anchor was cursor-shifted just outside the iconbar edge.
+	for _, sl := range s.laidOutSlots() {
+		if sl.isWindow {
+			continue
+		}
+		if x >= sl.x && x < sl.x+sl.w && y >= sl.y && y < sl.y+sl.h {
+			return sl.idx
 		}
 	}
 	return -1
@@ -484,15 +498,15 @@ func (s *State) HitTestWindow(x, y int) int {
 	if x < ix || x >= ix+iw {
 		return -1
 	}
-	for i := range s.Windows {
-		bx, by, bw, bh := s.WindowButtonRect(i)
-		if bx >= ix+iw {
-			return -1
+	// Hit-test the LAID-OUT window buttons (magnified under a hovering cursor,
+	// resting otherwise) so a click lands on the button where it is painted.
+	// The range guard above already confines the click to the iconbar.
+	for _, sl := range s.laidOutSlots() {
+		if !sl.isWindow {
+			continue
 		}
-		if x >= bx && x < bx+bw && y >= by && y < by+bh {
-			if bx >= ix && bx < ix+iw {
-				return i
-			}
+		if x >= sl.x && x < sl.x+sl.w && y >= sl.y && y < sl.y+sl.h {
+			return sl.idx
 		}
 	}
 	return -1
@@ -555,12 +569,6 @@ func buildRoot(s *State) *toolkit.HBox {
 	root.AddFixed(ws, WorkspaceW)
 
 	ib := &iconbar{s: s}
-	for i := range s.Apps {
-		ib.launchers = append(ib.launchers, &launcherButton{s: s, app: s.Apps[i]})
-	}
-	for i := range s.Windows {
-		ib.windows = append(ib.windows, &windowButton{s: s, win: s.Windows[i]})
-	}
 	root.AddFlex(ib, 1)
 
 	clock := s.Clock
@@ -602,58 +610,67 @@ func (w *section) Draw(p painter.Painter, _ *toolkit.Theme) {
 // the surface geometry dictates so a narrow surface degrades gracefully.
 type iconbar struct {
 	toolkit.Base
-	s         *State
-	launchers []*launcherButton
-	windows   []*windowButton
+	s *State
 }
 
-// Draw paints the iconbar background then fans out to the button leaves.
+// Draw paints the iconbar background then fans out to the button leaves,
+// iterating the LAID-OUT slots so a hovering cursor's magnification is drawn
+// exactly where HitTest expects it. Launcher buttons additionally carry their
+// running / focused indicators + attention badge; the launcher/window separator
+// is placed at the (possibly magnified) boundary between the two rows.
 func (ib *iconbar) Draw(p painter.Painter, th *toolkit.Theme) {
 	s := ib.s
 	ix, _, iw, _ := s.IconbarRect()
 	paintBg(p, toolkit.Rect{X: ix, Y: 0, W: iw, H: s.H}, s.Theme.Window.Active.Title.Bg)
 	drawBevel(p, toolkit.Rect{X: ix, Y: 0, W: iw, H: s.H})
 
-	for i, lb := range ib.launchers {
-		bx, by, bw, bh := s.IconbarButtonRect(i)
+	running := s.launcherRunning()
+	focusApp := s.focusedLauncher()
+	slots := s.laidOutSlots()
+
+	// Right edge of the last drawn launcher slot, for the separator placement.
+	lastLauncherRight := -1
+	for _, sl := range slots {
 		// Skip buttons whose anchor falls outside the iconbar (very narrow
 		// surface fallback).
-		if bx >= ix+iw {
-			break
+		if sl.x >= ix+iw {
+			continue
 		}
-		// Clip the right edge of the last button to the iconbar's right.
-		cw := bw
-		if bx+cw > ix+iw {
-			cw = ix + iw - bx
+		// Clip the right edge of the button to the iconbar's right.
+		cw := sl.w
+		if sl.x+cw > ix+iw {
+			cw = ix + iw - sl.x
 		}
-		lb.SetBounds(toolkit.Rect{X: bx, Y: by, W: cw, H: bh})
+		r := toolkit.Rect{X: sl.x, Y: sl.y, W: cw, H: sl.h}
+		if sl.isWindow {
+			wb := &windowButton{s: s, win: s.Windows[sl.idx], scale: sl.scale}
+			wb.SetBounds(r)
+			wb.Draw(p, th)
+			continue
+		}
+		lastLauncherRight = sl.x + sl.w
+		lb := &launcherButton{
+			s: s, app: s.Apps[sl.idx], scale: sl.scale,
+			running: running[sl.idx],
+			focused: sl.idx == focusApp,
+			badge:   s.BadgeCount(s.Apps[sl.idx].Id),
+		}
+		lb.SetBounds(r)
 		lb.Draw(p, th)
 	}
 
 	// Separator between the static launcher row and the dynamic open-window
 	// row: a 1-pixel-wide dark vertical line centered inside the SeparatorW
-	// gap. Skipped entirely when no launchers exist (empty Apps).
-	if len(s.Apps) > 0 {
-		sepRight := ix + len(s.Apps)*(IconbarButtonW+IconbarButtonGap) - IconbarButtonGap + SeparatorW
-		sepX := sepRight - SeparatorW/2 - 1
+	// gap past the last launcher's right edge. Skipped entirely when no
+	// launchers were drawn (empty Apps or all clipped away).
+	if len(s.Apps) > 0 && lastLauncherRight >= 0 {
+		sepX := lastLauncherRight + SeparatorW - SeparatorW/2 - 1
 		if sepX >= ix && sepX < ix+iw {
 			sepInk := toolkit.RGB(0x40, 0x40, 0x40)
 			for jj := IconbarVPad; jj < s.H-IconbarVPad; jj++ {
 				p.PutPixel(sepX, jj, sepInk)
 			}
 		}
-	}
-
-	for i, wb := range ib.windows {
-		bx, by, bw, bh := s.WindowButtonRect(i)
-		if bx >= ix+iw {
-			break
-		}
-		// No right-edge clip is needed here: WindowButtonRect already shrinks
-		// the window-button width so N buttons always fit inside the iconbar
-		// (see its comment), so bx+bw never exceeds the iconbar's right edge.
-		wb.SetBounds(toolkit.Rect{X: bx, Y: by, W: bw, H: bh})
-		wb.Draw(p, th)
 	}
 }
 
@@ -663,22 +680,54 @@ type launcherButton struct {
 	toolkit.Base
 	s   *State
 	app App
+	// scale is the magnification factor of this button (1 = resting); it grows
+	// the glyph so a hovered launcher's icon swells with its button.
+	scale float64
+	// running / focused drive the running dot + active underline; badge is the
+	// attention count (0 = none).
+	running bool
+	focused bool
+	badge   int
 }
 
-// Draw paints the launcher button (bevelled face + glyph + truncated label).
+// glyphSize returns the icon side length for a launcher slot: the resting
+// IconGlyphPx scaled by the button's magnification, clamped so it never spills
+// past the button height.
+func (b *launcherButton) glyphSize(r toolkit.Rect) int {
+	g := IconGlyphPx
+	if b.scale > 1 {
+		g = int(float64(IconGlyphPx)*b.scale + 0.5)
+	}
+	if max := r.H - 4; g > max {
+		g = max
+	}
+	if g < 1 {
+		g = 1
+	}
+	return g
+}
+
+// Draw paints the launcher button (bevelled face + glyph + truncated label),
+// then its running / focused indicators and any attention badge on top.
 func (b *launcherButton) Draw(p painter.Painter, _ *toolkit.Theme) {
 	r := b.Bounds()
 	paintBg(p, r, b.s.Theme.Window.Inactive.Title.Bg)
 	drawBevel(p, r)
-	// Glyph at the left.
-	gy := r.Y + (r.H-IconGlyphPx)/2
+	// Glyph at the left, swelling with the button under magnification.
+	gsz := b.glyphSize(r)
+	gy := r.Y + (r.H-gsz)/2
 	gx := r.X + IconGlyphLeftPad
-	drawGlyph(p, b.app.Glyph, toolkit.Rect{X: gx, Y: gy, W: IconGlyphPx, H: IconGlyphPx})
+	drawGlyph(p, b.app.Glyph, toolkit.Rect{X: gx, Y: gy, W: gsz, H: gsz})
 	// Label to the right of the glyph, truncated to the remaining width.
-	tx := gx + IconGlyphPx + IconLabelGap
+	tx := gx + gsz + IconLabelGap
 	ty := r.Y + (r.H-toolkit.GlyphHeight())/2
 	maxW := r.X + r.W - tx - 2
 	drawClippedText(p, b.app.Label, tx, ty, rgba(b.s.Theme.Window.Active.Title.Label.Color), maxW)
+	// Running / focused indicators + attention badge overlay.
+	if b.running {
+		b.s.drawRunningIndicator(p, r, b.focused)
+	}
+	drawBadge(p, r, b.badge)
 }
 
 // windowButton is one open-window leaf. Its look follows Fluxbox-style
@@ -695,6 +744,11 @@ type windowButton struct {
 	toolkit.Base
 	s   *State
 	win Window
+	// scale is the magnification factor of this button (1 = resting). The
+	// window button is text-only, so the swell is carried by the button rect
+	// (set by the iconbar from the laid-out slot); the field is kept for parity
+	// with launcherButton and future glyphed window entries.
+	scale float64
 }
 
 // Draw paints the window button in one of the three focus / minimized styles.
