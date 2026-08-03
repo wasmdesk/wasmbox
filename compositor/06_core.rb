@@ -31,6 +31,28 @@ class Compositor
     @fps = 0.0
     @last_layout_sig = nil
     @opentype_text = false # flips true after the one-shot AA-text opt-in
+    # --- idle-repaint gate state (see needs_paint?) ------------------------
+    # The render loop runs every rAF, but a full frame is only PAINTED when
+    # something that affects pixels changed. @force_paint is the sticky "dirty"
+    # flag every input + client-message entry point raises (mark_dirty); it is
+    # cleared the instant a frame is painted. @last_applet_sig / @last_content_seqs
+    # remember the self-driven state (a live clock applet, a window's committed
+    # content seq) the last painted frame captured, so a change since then forces
+    # the next paint without any input. true on construction so the FIRST frame
+    # always paints (nothing has been drawn yet).
+    @force_paint = true
+    @last_applet_sig = nil
+    @last_content_seqs = nil
+  end
+
+  # Raise the idle-repaint dirty flag: the next rAF frame will paint. Called from
+  # every input handler (install_input wraps each DOM event), every client / bus
+  # message (route_worker_message + the spawn bus), and viewport resize
+  # (fit_canvas) — i.e. every externally-triggered state change. Self-driven
+  # changes (a live applet tick, a window commit) are detected in needs_paint?
+  # instead, so they need no explicit call here.
+  def mark_dirty
+    @force_paint = true
   end
 
   # --- persistence ---------------------------------------------------------
@@ -108,14 +130,17 @@ class Compositor
     @bus.set("id", "__wasmbox_bus")
     @doc.get("body").call("appendChild", @bus)
     @bus.on("wasmbox-spawn-external") do |e|
+      mark_dirty
       url = e.get("detail")
       spawn_external(url.to_s)
     end
     @bus.on("wasmbox-spawn-external-oci") do |e|
+      mark_dirty
       ref = e.get("detail")
       spawn_external_oci(ref.to_s)
     end
     @bus.on("wasmbox-spawn-dom-window") do |e|
+      mark_dirty
       detail = e.get("detail")
       url = detail.get("url").to_s
       w = detail.get("w").to_i
@@ -153,13 +178,16 @@ class Compositor
     # when Compositor::APPLETS is off (the helpers no-op), so registering them
     # unconditionally keeps main shippable.
     @bus.on("wasmbox-applet-toggle") do |e|
+      mark_dirty
       toggle_applet(e.get("detail").to_s)
     end
     @bus.on("wasmbox-applet-place") do |e|
+      mark_dirty
       d = e.get("detail")
       place_applet(d.get("kind").to_s, d.get("x").to_i, d.get("y").to_i)
     end
     @bus.on("wasmbox-applet-remove") do |e|
+      mark_dirty
       remove_applet(e.get("detail").to_s)
     end
     # Wallpaper test hook: __wasmboxSetWallpaper(name) (compositor.worker.js)
@@ -179,6 +207,7 @@ class Compositor
     # window. Registering it unconditionally is harmless — it only ever fires from
     # the probe-only JS hook.
     @bus.on("wasmbox-spawn-window") do |e|
+      mark_dirty
       @wm.spawn(e.get("detail").to_s)
       notify_windows_changed
     end
@@ -191,6 +220,7 @@ class Compositor
     # path a real client's welcome uses (spawn_external_stub). Registering it
     # unconditionally is harmless — it only ever fires from the probe-only JS hook.
     @bus.on("wasmbox-spawn-external-stub") do |e|
+      mark_dirty
       spawn_external_stub(e.get("detail"))
     end
     # Alt-Tab test hook: __wasmboxAltTab(cmd) (compositor.worker.js) dispatches an
@@ -201,6 +231,7 @@ class Compositor
     # off (alttab_probe no-ops), so registering it unconditionally keeps main
     # shippable.
     @bus.on("wasmbox-alttab") do |e|
+      mark_dirty
       alttab_probe(e.get("detail"))
     end
     # Spotlight test hook: __wasmboxSpotlight(cmd) (compositor.worker.js)
@@ -211,6 +242,7 @@ class Compositor
     # spotlight_probe). Inert when Compositor::SPOTLIGHT is off (spotlight_probe
     # no-ops), so registering it unconditionally keeps main shippable.
     @bus.on("wasmbox-spotlight") do |e|
+      mark_dirty
       spotlight_probe(e.get("detail"))
     end
     # Exposé test hook: __wasmboxExpose(cmd) (compositor.worker.js) dispatches an
@@ -221,6 +253,7 @@ class Compositor
     # (17_expose.rb#expose_probe). Inert when Compositor::EXPOSE is off
     # (expose_probe no-ops), so registering it unconditionally keeps main shippable.
     @bus.on("wasmbox-expose") do |e|
+      mark_dirty
       expose_probe(e.get("detail"))
     end
     @worker_seq = 0
@@ -322,6 +355,11 @@ class Compositor
   # stays unit-testable; only the JS-touching pieces (ImageData construction,
   # welcome/closed postMessage) live here.
   def route_worker_message(worker, data)
+    # Any client / bus message can change what is on screen (a hello, a commit, a
+    # title change, a close, a tray/notification/applet/wallpaper bus event), so
+    # raise the idle-repaint dirty flag before dispatching. Window pixel commits
+    # ride the "commit" arm here too, so a client that repaints wakes the gate.
+    mark_dirty
     msg = decode_message(data)
     return nil unless msg
     result = @wm.handle_client_message(msg)
@@ -637,16 +675,24 @@ class Compositor
     @canvas.set("height", h)
     @width = w
     @height = h
+    # Setting canvas.width/height clears the surface, so the next frame MUST
+    # repaint even if nothing else changed.
+    mark_dirty
   end
 
+  # Every DOM input event is a potential state change, so each handler is wrapped
+  # to raise the idle-repaint dirty flag before it runs. This is the belt half of
+  # the belt-and-suspenders gate: any user input paints the next frame; the
+  # suspenders half (needs_paint?) additionally catches self-driven changes
+  # (applet ticks, window commits) that arrive with no DOM event.
   def install_input
-    @canvas.on("mousedown")   { |e| on_mousedown(e) }
-    @canvas.on("mousemove")   { |e| on_mousemove(e) }
-    @canvas.on("mouseup")     { |e| on_mouseup(e) }
-    @canvas.on("contextmenu") { |e| on_contextmenu(e) }
-    @canvas.on("wheel")       { |e| on_wheel(e) }
-    JS.window.on("keydown")   { |e| on_keydown(e) }
-    JS.window.on("keyup")     { |e| on_keyup(e) }
+    @canvas.on("mousedown")   { |e| mark_dirty; on_mousedown(e) }
+    @canvas.on("mousemove")   { |e| mark_dirty; on_mousemove(e) }
+    @canvas.on("mouseup")     { |e| mark_dirty; on_mouseup(e) }
+    @canvas.on("contextmenu") { |e| mark_dirty; on_contextmenu(e) }
+    @canvas.on("wheel")       { |e| mark_dirty; on_wheel(e) }
+    JS.window.on("keydown")   { |e| mark_dirty; on_keydown(e) }
+    JS.window.on("keyup")     { |e| mark_dirty; on_keyup(e) }
   end
 
   # Scroll-wheel input. Forwarded to the panel under the pointer (the dock —
@@ -1403,8 +1449,52 @@ class Compositor
     Widgets.use_opentype_text
   end
 
+  # The per-rAF entry point. Runs every animation frame but only PAINTS a full
+  # frame when needs_paint? reports a pixel-affecting change. An idle desktop —
+  # no window commits, no live-applet tick, no input — skips the whole
+  # desktop→windows→overlays repaint, so idle CPU approaches zero instead of
+  # re-compositing a static scene ~60×/sec (the Firefox 100%-CPU regression the
+  # DE overlays surfaced: every overlay re-PRESENTS a cached buffer each frame,
+  # and the desktop does a full-canvas putImageData, even when nothing moved).
+  # The focused-rect probe publish runs every frame regardless (one cheap JS
+  # call) so the snapping probe reads a fresh value even on skipped frames.
   def render
     enable_opentype_text_once
+    paint_frame if needs_paint?
+    # Publish the focused window's live geometry + the work-area metrics for the
+    # snapping probe (test/probe-snapping.mjs reads globalThis.__wasmboxFocusedRect).
+    # One cheap JS call per frame, self-gated on SNAPPING so main is unaffected.
+    publish_snap_geometry if SNAPPING
+  end
+
+  # True when this frame must be repainted. The BELT: @force_paint, raised by
+  # every input + client/bus message (mark_dirty), sticky until the paint clears
+  # it. The SUSPENDERS: self-driven state that changes with no DOM event — an
+  # open menu / modal / drag / non-empty notification stack (these animate or are
+  # transient, so they keep painting while up), a live applet whose content
+  # signature ticked (a clock second), or an external window that committed new
+  # pixels since the last painted frame. The debug HUD's frame/fps counter is
+  # deliberately NOT a trigger, so it never keeps a static desktop awake.
+  def needs_paint?
+    return true if @force_paint
+    return true if @menu
+    return true if @drag
+    return true if SNAPPING && @snap_preview
+    return true if ALTTAB && alttab_active?
+    return true if SPOTLIGHT && spotlight_active?
+    return true if EXPOSE && expose_active?
+    return true if NOTIFICATIONS && !notifications.empty?
+    return true if applets_changed?
+    return true if external_content_changed?
+    false
+  end
+
+  # The full-frame paint: desktop → applets → windows → snap preview → menu →
+  # HUD → tray → notifications → modals. Extracted from render so the idle gate
+  # can skip it wholesale. Clears the dirty flag and snapshots the self-driven
+  # state (applet signature, per-window content seqs) so the NEXT needs_paint?
+  # compares against exactly what this frame drew.
+  def paint_frame
     draw_desktop
     # Desktop applets (14_applets.rb): the BOTTOM interactive stratum — painted
     # right after the wallpaper and BEFORE the windows, so every window
@@ -1454,10 +1544,50 @@ class Compositor
     # Drawn last so it reads as the top-most modal. Self-gates on Compositor::EXPOSE
     # + an open spread (else it only publishes the "inactive" probe state).
     draw_expose if EXPOSE
-    # Publish the focused window's live geometry + the work-area metrics for the
-    # snapping probe (test/probe-snapping.mjs reads globalThis.__wasmboxFocusedRect).
-    # One cheap JS call per frame, self-gated on SNAPPING so main is unaffected.
-    publish_snap_geometry if SNAPPING
+    # This frame is now on the canvas: clear the dirty flag and record the
+    # self-driven state it reflects, so the next needs_paint? only re-fires on a
+    # real change (a client commit, an applet tick, or a fresh input/message).
+    @force_paint = false
+    @last_applet_sig = applet_signature
+    @last_content_seqs = content_seqs
+  end
+
+  # The combined content signature of every desktop applet ("" when none / APPLETS
+  # off), so a live applet forces a repaint exactly when its pixels must change (a
+  # clock second, a monitor step) and no more often. Reuses applet_sig
+  # (14_applets.rb) — the same signature the per-applet render cache keys on.
+  def applet_signature
+    return "" unless APPLETS
+    b = applets
+    return "" if b.empty?
+    b.items.map { |a| applet_sig(a) }.join("|")
+  end
+
+  # True when an applet's content signature changed since the last painted frame.
+  def applets_changed?
+    applet_signature != @last_applet_sig
+  end
+
+  # The live committed-content seq of every external window (0 for in-process or
+  # seqlock-less surfaces), read straight from the SAB control word so a client
+  # that painted new pixels is observed BEFORE the blit. The window-set length
+  # rides along too, so a spawn/close is caught even before its message lands.
+  def content_seqs
+    @wm.ordered_windows.map do |win|
+      # Only external (SAB-backed) windows carry a seqlock + image_data slot; the
+      # base in-process Window has neither, so it never self-animates (0).
+      next 0 unless win.external?
+      slot = win.image_data
+      slot.nil? ? 0 : JS.global.call("wasmboxWindowLiveSeq", slot).to_i
+    end
+  end
+
+  # True when any external window committed new pixels since the last painted
+  # frame (or the window set changed). Suspenders for the SDK "commit" message
+  # path: even a client that bumps only the seqlock (no commit message) wakes the
+  # gate, and a live/animating window keeps painting at its own cadence.
+  def external_content_changed?
+    content_seqs != @last_content_seqs
   end
 
   # Snap landing preview. Draws the frame extent (body + titlebar headroom) of

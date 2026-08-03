@@ -82,7 +82,11 @@ class Compositor
   def tick_notifications(t)
     return nil unless NOTIFICATIONS
     @now = t
-    notifications.tick(t)
+    # Expire aged toasts. When any drop, force one repaint so their pixels are
+    # cleared even if the stack becomes empty (an empty stack no longer keeps the
+    # idle-repaint gate awake, so the clearing frame must be requested explicitly).
+    dropped = notifications.tick(t)
+    mark_dirty if dropped && !dropped.empty?
     nil
   end
 
