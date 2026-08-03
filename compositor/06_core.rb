@@ -129,6 +129,23 @@ class Compositor
     @bus.on("wasmbox-tray-remove") do |e|
       route_worker_message(nil, e.get("detail"))
     end
+    # Applet test hooks: __wasmboxAppletToggle(kind) / __wasmboxAppletPlace(kind,
+    # x, y) / __wasmboxAppletRemove(kind) (compositor.worker.js) dispatch here so
+    # a probe can add/place/remove desktop applets without driving the root menu.
+    # Applets are compositor-owned (no wm involvement), so these call the applet
+    # helpers (14_applets.rb) directly rather than route_worker_message. Inert
+    # when Compositor::APPLETS is off (the helpers no-op), so registering them
+    # unconditionally keeps main shippable.
+    @bus.on("wasmbox-applet-toggle") do |e|
+      toggle_applet(e.get("detail").to_s)
+    end
+    @bus.on("wasmbox-applet-place") do |e|
+      d = e.get("detail")
+      place_applet(d.get("kind").to_s, d.get("x").to_i, d.get("y").to_i)
+    end
+    @bus.on("wasmbox-applet-remove") do |e|
+      remove_applet(e.get("detail").to_s)
+    end
     # Wallpaper test hook: __wasmboxSetWallpaper(name) (compositor.worker.js)
     # dispatches a `set_wallpaper` message here so a probe can switch the desktop
     # background without a client. Routed through the FULL decode -> handle ->
@@ -578,6 +595,12 @@ class Compositor
   end
 
   def on_mouseup(e)
+    # End a live applet drag (persist its new position) and consume the mouseup.
+    # Inert when no applet drag is active (so a no-op with APPLETS off).
+    if @applet_drag
+      applet_drag_end
+      return
+    end
     @drag = nil
     win = @wm.focused
     return nil unless win&.external?
@@ -699,7 +722,12 @@ class Compositor
 
     win = @wm.window_at(mx, my)
     unless win
-      return # empty desktop, left button: nothing (right button = menu)
+      # Empty desktop: a left mousedown over an applet tile starts a drag (the
+      # applet stratum sits behind the windows, so we only reach here when no
+      # window is under the point — a window on top keeps its clicks). Self-gates
+      # on Compositor::APPLETS. Otherwise nothing (right button = menu).
+      applet_mousedown(mx, my, e)
+      return
     end
 
     @wm.focus(win)
@@ -725,6 +753,13 @@ class Compositor
   end
 
   def on_mousemove(e)
+    # A live applet drag moves the tile under the pointer and consumes the event
+    # (before window drag / client forwarding). Inert unless a drag is active, so
+    # this is a no-op when Compositor::APPLETS is off.
+    if @applet_drag
+      applet_drag_move(e.get("offsetX"), e.get("offsetY"))
+      return
+    end
     if @drag
       mx = e.get("offsetX")
       my = e.get("offsetY")
@@ -809,7 +844,11 @@ class Compositor
                 submenu_idx: -1, submenu: nil, submenu_x: 0, submenu_y: 0,
                 submenu_hover: -1 }
     else
-      menu = RootMenu.build(@wm)
+      # Pass the applet board (14_applets.rb) so the root menu grows an "Applets"
+      # submenu toggling each desktop tile. applets_for_menu returns nil when
+      # Compositor::APPLETS is off, in which case RootMenu omits the entry and the
+      # menu is exactly what it was before applets landed.
+      menu = RootMenu.build(@wm, applets_for_menu)
       @menu = { kind: :root, x: mx, y: my, menu: menu, hover: -1,
                 submenu_idx: -1, submenu: nil, submenu_x: 0, submenu_y: 0,
                 submenu_hover: -1 }
@@ -997,6 +1036,10 @@ class Compositor
         notify_closed(win, "user")
         notify_windows_changed
       end
+    when :applet
+      # Root-menu Applets entry clicked: toggle that desktop tile on/off and
+      # persist the new shown-set (14_applets.rb). No-op when APPLETS is off.
+      toggle_applet(arg.to_s)
     when :noop
       # About / Reload / Exit are dismiss-only in v0: the click closes the
       # menu (already done by the caller setting @menu = nil) and does
@@ -1076,6 +1119,10 @@ class Compositor
   def render
     enable_opentype_text_once
     draw_desktop
+    # Desktop applets (14_applets.rb): the BOTTOM interactive stratum — painted
+    # right after the wallpaper and BEFORE the windows, so every window
+    # composites OVER an applet. Self-gates on Compositor::APPLETS.
+    draw_applets
     # Re-anchor every panel to the bottom-center of the current canvas, so the
     # dock tracks viewport resizes and never cascades.
     @wm.panels.each { |p| @wm.anchor_panel(p, @width, @height) }

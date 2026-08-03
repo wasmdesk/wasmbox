@@ -1347,5 +1347,155 @@ assert_eq(wmt_tray.handle_client_message({ type: "tray_update" }), :ignored,
 # A tray message never creates a window.
 assert_eq(wmt_tray.windows.length, 0, "tray messages create no window")
 
+# ---- Desktop applets (05_applets.rb) --------------------------------------
+# Applet: kind registry, per-kind geometry, cache invalidation, hit-test.
+assert(Applet.kind?("clock"), "clock is a known applet kind")
+assert(Applet.kind?("calendar"), "calendar is a known applet kind")
+assert(Applet.kind?("monitor"), "monitor is a known applet kind")
+assert(!Applet.kind?("bogus"), "unknown applet kind rejected")
+assert_eq(Applet::KINDS.length, 3, "three built-in applet kinds")
+assert_eq(Applet.label("clock"), "Clock", "clock friendly label")
+assert_eq(Applet.label("monitor"), "System Monitor", "monitor friendly label")
+ap = Applet.new("clock", 40, 50)
+assert_eq(ap.kind, "clock", "applet stores its kind")
+assert_eq(ap.x, 40, "applet x")
+assert_eq(ap.y, 50, "applet y")
+assert_eq(ap.w, Applet::SIZE["clock"][0], "applet w from SIZE")
+assert_eq(ap.h, Applet::SIZE["clock"][1], "applet h from SIZE")
+assert_eq(ap.key, "applet#clock", "applet cache key encodes kind")
+# contains? is half-open on the far edges.
+assert(ap.contains?(40, 50), "top-left corner is inside")
+assert(ap.contains?(40 + ap.w - 1, 50 + ap.h - 1), "bottom-right-most pixel inside")
+assert(!ap.contains?(39, 50), "one px left is outside")
+assert(!ap.contains?(40 + ap.w, 50), "far x edge is half-open (outside)")
+assert(!ap.contains?(40, 50 + ap.h), "far y edge is half-open (outside)")
+# invalidate clears the render cache.
+ap.b64 = "cached"; ap.blitted = true; ap.sig = "s"
+ap.invalidate
+assert_eq(ap.b64, nil, "invalidate dropped the buffer")
+assert_eq(ap.blitted, false, "invalidate reset the blitted flag")
+assert_eq(ap.sig, nil, "invalidate cleared the signature")
+
+# AppletBoard: add / dedup / find / shown? / remove / toggle.
+ab = AppletBoard.new
+assert(ab.empty?, "fresh board is empty")
+c1 = ab.add("clock")
+assert(!c1.nil?, "add clock returns the applet")
+assert_eq(ab.length, 1, "one applet after add")
+assert(ab.shown?("clock"), "clock reported shown")
+assert(!ab.shown?("monitor"), "monitor not shown yet")
+# Default position is the kind's DEFAULT_POS.
+assert_eq(c1.x, Applet::DEFAULT_POS["clock"][0], "add uses default x")
+assert_eq(c1.y, Applet::DEFAULT_POS["clock"][1], "add uses default y")
+# Re-adding a shown kind is a no-op (same object, no duplicate).
+again = ab.add("clock")
+assert(again.equal?(c1), "re-add of a shown kind returns the SAME applet")
+assert_eq(ab.length, 1, "re-add did not grow the board")
+# Unknown kind rejected.
+assert_eq(ab.add("bogus"), nil, "add of an unknown kind -> nil")
+# add with explicit coordinates.
+mon = ab.add("monitor", 500, 300)
+assert_eq(mon.x, 500, "add honours an explicit x")
+assert_eq(mon.y, 300, "add honours an explicit y")
+assert_eq(ab.shown_kinds.length, 2, "two kinds shown")
+# find + remove.
+assert(ab.find("monitor").equal?(mon), "find returns the live applet")
+r = ab.remove("monitor")
+assert(r.equal?(mon), "remove returns the removed applet")
+assert(!ab.shown?("monitor"), "monitor gone after remove")
+assert_eq(ab.remove("monitor"), nil, "remove of an unshown kind -> nil")
+# toggle: adds when hidden, removes when shown.
+t = ab.toggle("calendar")
+assert_eq(t[0], :added, "toggle of a hidden kind adds it")
+assert(ab.shown?("calendar"), "calendar shown after toggle-on")
+t2 = ab.toggle("calendar")
+assert_eq(t2[0], :removed, "toggle of a shown kind removes it")
+assert(!ab.shown?("calendar"), "calendar hidden after toggle-off")
+assert_eq(ab.toggle("bogus"), nil, "toggle of an unknown kind -> nil")
+
+# move: clamps the whole tile onto the desktop.
+ab2 = AppletBoard.new
+mv = ab2.add("clock", 0, 0)
+ab2.move(mv, -100, -100, 1280, 800)
+assert_eq(mv.x, 0, "move clamps x up to 0")
+assert_eq(mv.y, 0, "move clamps y up to 0")
+ab2.move(mv, 5000, 5000, 1280, 800)
+assert_eq(mv.x, 1280 - mv.w, "move clamps x to screen_w - w")
+assert_eq(mv.y, 800 - mv.h, "move clamps y to screen_h - h")
+ab2.move(mv, 300, 200, 1280, 800)
+assert_eq(mv.x, 300, "in-bounds move keeps x")
+assert_eq(mv.y, 200, "in-bounds move keeps y")
+assert_eq(ab2.move(nil, 1, 1, 1280, 800), nil, "move of nil applet -> nil")
+
+# at: topmost applet under a point, later-added wins a tie; miss -> nil.
+ab3 = AppletBoard.new
+a_lo = ab3.add("clock", 100, 100)
+assert(ab3.at(105, 105).equal?(a_lo), "at hits the clock under the point")
+assert_eq(ab3.at(10, 10), nil, "at far from any tile -> nil")
+# Overlapping tiles: the later-added monitor wins the shared point.
+a_hi = ab3.add("monitor", 110, 110)
+assert(ab3.at(115, 115).equal?(a_hi), "at returns the later-added tile on overlap")
+
+# serialize / parse round-trip (clamped), skipping malformed + unknown fields.
+ab4 = AppletBoard.new
+ab4.add("clock", 40, 40)
+ab4.add("monitor", 300, 120)
+s = ab4.serialize
+assert_eq(s, "clock:40,40;monitor:300,120", "serialize encodes kind:x,y;...")
+ab5 = AppletBoard.new
+ab5.parse(s, 1280, 800)
+assert_eq(ab5.length, 2, "parse restored both applets")
+assert(ab5.shown?("clock") && ab5.shown?("monitor"), "parse restored the kinds")
+assert_eq(ab5.find("monitor").x, 300, "parse restored the x")
+assert_eq(ab5.find("monitor").y, 120, "parse restored the y")
+# Malformed / unknown fields are skipped; a nil text yields an empty board.
+ab6 = AppletBoard.new
+ab6.parse("clock:10,10;bogus:1,1;garbage;monitor:oops", 1280, 800)
+assert_eq(ab6.length, 1, "parse skips unknown kind + malformed fields")
+assert(ab6.shown?("clock"), "the one valid field survived parse")
+assert_eq(ab6.find("clock").x, 10, "valid field parsed its x")
+ab7 = AppletBoard.new
+ab7.parse(nil, 1280, 800)
+assert(ab7.empty?, "parse(nil) yields an empty board")
+# parse clamps out-of-bounds saved positions.
+ab8 = AppletBoard.new
+ab8.parse("clock:99999,99999", 1280, 800)
+assert_eq(ab8.find("clock").x, 1280 - Applet::SIZE["clock"][0], "parse clamps a saved x onto the desktop")
+
+# ---- RootMenu Applets submenu (05_menu.rb) --------------------------------
+# build_applets: one entry per kind, in KINDS order, active marker on shown.
+board = AppletBoard.new
+board.add("clock")
+asub = RootMenu.build_applets(board)
+assert_eq(asub.entries.length, Applet::KINDS.length, "Applets submenu has one entry per kind")
+asub.entries.each do |e|
+  assert_eq(e[:action][0], :applet, "every Applets entry action[0] = :applet")
+  assert(Applet.kind?(e[:action][1]), "every Applets action[1] is a known kind")
+end
+alabels = asub.entries.map { |e| e[:label] }
+assert(alabels.include?("* Clock"), "shown applet marked with '* '")
+assert(alabels.include?("System Monitor"), "hidden applet has no marker")
+# A nil board (feature off) still builds a submenu, all unmarked.
+asub_nil = RootMenu.build_applets(nil)
+asub_nil.entries.each do |e|
+  assert(!e[:label].start_with?("* "), "nil board leaves every applet unmarked")
+end
+
+# RootMenu.build with a board inserts "Applets" after "Wallpaper"; without one
+# the menu is byte-for-byte the pre-applets shape (the top-level assertions
+# higher up pin the 1-arg shape — Applications/Workspaces/Theme/Frame/Wallpaper,
+# separator, About/Reload/Exit — so here we only check the 2-arg insertion).
+root_with = RootMenu.build(wmr, board)
+lbls = root_with.entries.map { |e| e[:label] }
+assert_eq(lbls[3], "Frame", "Frame still at index 3 with a board")
+assert_eq(lbls[4], "Wallpaper", "Wallpaper still at index 4 with a board")
+assert_eq(lbls[5], "Applets", "Applets inserted at index 5 (after Wallpaper)")
+assert_eq(root_with.entries[6][:separator], true, "separator follows Applets")
+assert(root_with.entries[5][:submenu].is_a?(Menu), "Applets carries a submenu")
+# 1-arg build (no board) omits the entry entirely.
+root_without = RootMenu.build(wmr)
+lbls2 = root_without.entries.map { |e| e[:label] }
+assert(!lbls2.include?("Applets"), "1-arg build omits the Applets entry (feature-gated)")
+
 puts "rbtest: ran all pure-WM assertions"
 `

@@ -196,6 +196,10 @@ jobs:
         working-directory: test
         run: node probe-tray.mjs
 
+      - name: Run headless desktop-applets probe (tile render + z-order + drag + remove + persistence)
+        working-directory: test
+        run: node probe-applets.mjs
+
       - name: Run headless desktop-background probe (widgets Backdrop fill + grid, cached, z-order)
         working-directory: test
         run: node probe-desktop.mjs
