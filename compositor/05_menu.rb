@@ -79,6 +79,94 @@ class Menu
 end
 
 # ---------------------------------------------------------------------------
+# Wallpaper — the selectable desktop-background registry (2026-08-03, the first
+# Batch-3 / desktop-layer feature). PURE data + selection state, mirroring the
+# Frame / FrameRegistry pattern so it is unit-testable off-wasm (rbtest loads
+# 01..05 only). The JS-touching render lives in 10_desktop_widgets.rb, which
+# reads Wallpaper.current every cache-miss; this module only says WHICH
+# background is active, never paints.
+#
+# Each preset is one of three kinds:
+#   {name:, kind: :grid}                     -> the faint-grid Backdrop (default
+#                                               + the WALLPAPER-flag-off fallback)
+#   {name:, kind: :gradient, top:, bottom:}  -> a vertical gradient painted via
+#                                               Widgets.wallpaper_gradient
+#   {name:, kind: :image, mode:}             -> the bundled procedural image
+#                                               painted via Widgets.wallpaper
+# ---------------------------------------------------------------------------
+module Wallpaper
+  # The selectable backgrounds, in root-menu order. "Grid" is first so it reads
+  # as the default; the gradient presets are hand-picked dark desktop tones; the
+  # trailing "Photo" is the bundled procedural image (10_desktop_widgets.rb
+  # generates its pixels — no external asset to decode).
+  PRESETS = [
+    { name: "Grid",     kind: :grid },
+    { name: "Midnight", kind: :gradient, top: "#0b1224", bottom: "#1b2a4a" },
+    { name: "Slate",    kind: :gradient, top: "#2b303b", bottom: "#0e1013" },
+    { name: "Aurora",   kind: :gradient, top: "#12343b", bottom: "#2c5364" },
+    { name: "Ember",    kind: :gradient, top: "#3a1c1c", bottom: "#0e0a08" },
+    { name: "Violet",   kind: :gradient, top: "#1a1033", bottom: "#3b1f5e" },
+    { name: "Photo",    kind: :image, mode: "fill" },
+  ].freeze
+
+  # The boot / fallback selection: the grid backdrop wasmbox has always shown.
+  DEFAULT = "Grid"
+  @@current = DEFAULT
+
+  # The names, in registry order, for the root-menu Wallpaper submenu.
+  def self.names
+    PRESETS.map { |p| p[:name] }
+  end
+
+  # The active preset NAME (marked with "* " in the submenu).
+  def self.current_name
+    @@current
+  end
+
+  # Look up a preset descriptor by name, or nil when unknown. Walks with an
+  # indexed while-loop because rbgo block-return does not unwind the enclosing
+  # method (same workaround as Menu#hit_test / WindowManager#find).
+  def self.descriptor(name)
+    i = 0
+    n = PRESETS.length
+    while i < n
+      return PRESETS[i] if PRESETS[i][:name] == name
+      i += 1
+    end
+    nil
+  end
+
+  # The active descriptor, falling back to the Grid default for an unknown
+  # @@current (defensive — select() only ever stores a known name).
+  def self.current
+    descriptor(@@current) || PRESETS[0]
+  end
+
+  # True when name is a registered preset.
+  def self.known?(name)
+    !descriptor(name.to_s).nil?
+  end
+
+  # Select a preset by name IF it exists AND differs from the active one.
+  # Returns the name on a real change, nil when unknown or already-active — so
+  # callers (the root-menu :wallpaper dispatch, the set_wallpaper wire message,
+  # restore_wallpaper) can skip a redundant repaint/persist, mirroring
+  # WindowManager#set_theme.
+  def self.select(name)
+    name = name.to_s
+    return nil unless known?(name)
+    return nil if name == @@current
+    @@current = name
+    name
+  end
+
+  # Reset to the default — test-only helper so a spec run is order-independent.
+  def self.reset!
+    @@current = DEFAULT
+  end
+end
+
+# ---------------------------------------------------------------------------
 # RootMenu — builder for the desktop right-click menu (the Openbox "root
 # menu"). Hierarchy:
 #
@@ -128,7 +216,7 @@ module RootMenu
   # top-level menu.
   #
   # `applets` is the Compositor's AppletBoard (14_applets.rb) or nil. When
-  # non-nil an "Applets" submenu is inserted (after "Frame") so the user can
+  # non-nil an "Applets" submenu is inserted (after "Wallpaper") so the user can
   # toggle each desktop applet on/off; when nil (the default — and the shape
   # cmd/rbtest asserts) the entry is omitted entirely, so the menu is byte-for-
   # byte what it was before applets landed and the feature stays flag-gated.
@@ -138,6 +226,7 @@ module RootMenu
       { label: "Workspaces",   submenu: build_workspaces(wm) },
       { label: "Theme",        submenu: build_themes(wm) },
       { label: "Frame",        submenu: build_frames },
+      { label: "Wallpaper",    submenu: build_wallpapers },
     ]
     rows << { label: "Applets", submenu: build_applets(applets) } unless applets.nil?
     rows.concat([
@@ -223,6 +312,21 @@ module RootMenu
     FrameRegistry.names.each do |name|
       label = (name == active) ? "* #{name}" : name
       rows << { label: label, action: [:frame, name] }
+    end
+    Menu.new(rows)
+  end
+
+  # Build the Wallpaper submenu — one entry per Wallpaper::PRESETS name ("Grid"
+  # + the gradient presets + the bundled "Photo" image). The active wallpaper is
+  # prefixed with "* ". Click action is [:wallpaper, "<name>"] —
+  # dispatch_menu_action routes that into Wallpaper.select + a persist, and
+  # draw_desktop_widgets repaints from Wallpaper.current on the next tick.
+  def self.build_wallpapers
+    rows = []
+    active = Wallpaper.current_name
+    Wallpaper.names.each do |name|
+      label = (name == active) ? "* #{name}" : name
+      rows << { label: label, action: [:wallpaper, name] }
     end
     Menu.new(rows)
   end

@@ -738,6 +738,25 @@ globalThis.__wasmboxAppletToggle = function (kind) {
   return true;
 };
 
+// `__wasmboxSetWallpaper(name)` -- TEST HOOK. Injects a `set_wallpaper` protocol
+// message into the running compositor (as if a client posted it, or the user
+// picked the root-menu Wallpaper submenu) by dispatching it on the compositor's
+// Ruby event bus, exactly like __wasmboxTrayAdd. Used by test/probe-wallpaper.mjs
+// to switch the desktop background (a gradient preset or the bundled image)
+// deterministically without spawning a client. `name` is a Wallpaper::PRESETS
+// name ("Grid"/"Midnight"/"Aurora"/"Photo"/...); an unknown or already-active
+// name is a no-op compositor-side.
+globalThis.__wasmboxSetWallpaper = function (name) {
+  const detail = { type: "set_wallpaper", name: String(name) };
+  function dispatch() {
+    const bus = fakeDocument.getElementById("__wasmbox_bus");
+    if (!bus) { setTimeout(dispatch, 16); return; }
+    bus.dispatchEvent(new CustomEvent("wasmbox-set-wallpaper", { detail: detail }));
+  }
+  dispatch();
+  return true;
+};
+
 globalThis.__wasmboxAppletPlace = function (kind, x, y) {
   const detail = { kind: String(kind), x: x | 0, y: y | 0 };
   function dispatch() {
