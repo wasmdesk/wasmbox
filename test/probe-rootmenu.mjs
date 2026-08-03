@@ -195,8 +195,20 @@ async function dockWindowCount(page) {
   const g = await dockGeo(page);
   return g ? g.buttons.length : -1;
 }
-// Right-click a window's dock iconbar entry (located from the geometry) to close
-// it — robust vs the window's on-canvas position. Returns true if it was found.
+// Read the dock's open context-menu geometry (null when no menu is open).
+async function dockMenu(page) {
+  for (const worker of page.workers()) {
+    try {
+      const m = await worker.evaluate(() => globalThis.__wasmdockMenu || null);
+      if (m && Array.isArray(m.rows)) return m;
+    } catch (_) { /* not the dock worker */ }
+  }
+  return null;
+}
+// Close a window via its dock iconbar entry: right-click the entry to open its
+// application context menu, then click the menu's "Close" row. (Robust vs the
+// window's on-canvas position; a right-click on the iconbar no longer closes
+// directly — it opens the context menu.) Returns true if it was driven.
 async function closeViaIconbar(page, titlePrefix) {
   const g = await dockGeo(page);
   if (!g) return false;
@@ -204,6 +216,17 @@ async function closeViaIconbar(page, titlePrefix) {
   if (!btn) return false;
   const dockX = Math.floor((VIEW_W - g.w) / 2), dockY = VIEW_H - g.h;
   await page.mouse.click(dockX + btn.x + Math.floor(btn.w / 2), dockY + btn.y + Math.floor(btn.h / 2), { button: "right" });
+  await page.waitForFunction(
+    () => globalThis.__wasmdockMenu && Array.isArray(globalThis.__wasmdockMenu.rows) && globalThis.__wasmdockMenu.rows.length > 0,
+    { timeout: 4000 },
+  ).catch(() => {});
+  const menu = await dockMenu(page);
+  if (!menu) return false;
+  const closeRow = menu.rows.find((r) => r.action === "close");
+  if (!closeRow) return false;
+  const g2 = await dockGeo(page) || g;
+  const dockX2 = Math.floor((VIEW_W - g2.w) / 2), dockY2 = VIEW_H - g2.h;
+  await page.mouse.click(dockX2 + menu.rel_x + Math.floor(menu.w / 2), dockY2 + menu.rel_y + closeRow.cy);
   return true;
 }
 
