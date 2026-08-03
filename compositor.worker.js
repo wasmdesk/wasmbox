@@ -719,6 +719,25 @@ globalThis.__wasmboxTrayRemove = function (id) {
   return true;
 };
 
+// `__wasmboxSetWallpaper(name)` -- TEST HOOK. Injects a `set_wallpaper` protocol
+// message into the running compositor (as if a client posted it, or the user
+// picked the root-menu Wallpaper submenu) by dispatching it on the compositor's
+// Ruby event bus, exactly like __wasmboxTrayAdd. Used by test/probe-wallpaper.mjs
+// to switch the desktop background (a gradient preset or the bundled image)
+// deterministically without spawning a client. `name` is a Wallpaper::PRESETS
+// name ("Grid"/"Midnight"/"Aurora"/"Photo"/...); an unknown or already-active
+// name is a no-op compositor-side.
+globalThis.__wasmboxSetWallpaper = function (name) {
+  const detail = { type: "set_wallpaper", name: String(name) };
+  function dispatch() {
+    const bus = fakeDocument.getElementById("__wasmbox_bus");
+    if (!bus) { setTimeout(dispatch, 16); return; }
+    bus.dispatchEvent(new CustomEvent("wasmbox-set-wallpaper", { detail: detail }));
+  }
+  dispatch();
+  return true;
+};
+
 // `wasmboxSpawnExternalOCI(ref)` -- OCI twin of wasmboxSpawnExternal. Dispatches
 // a `wasmbox-spawn-external-oci` CustomEvent on the bus; compositor.rb listens
 // for it and runs spawn_external_oci(ref), which then calls

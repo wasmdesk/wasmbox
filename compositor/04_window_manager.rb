@@ -868,6 +868,16 @@ class WindowManager
       return :ignored if name == Frame.current_name
       FrameRegistry.select(name)
       :frame_changed
+    when "set_wallpaper"
+      # A client (or the set-wallpaper test hook) asks to swap the desktop
+      # background preset — same effect as the root-menu Wallpaper submenu.
+      # Wallpaper.select stores the pick IF it is a known name AND differs from
+      # the active one; an unknown or already-active name is :ignored. The
+      # compositor's draw_desktop_widgets picks up Wallpaper.current on the next
+      # rAF tick (its render-once cache keys on Wallpaper.current_name, so
+      # exactly one re-render happens). No re-blit or re-spawn needed.
+      changed = Wallpaper.select(msg[:name].to_s)
+      changed.nil? ? :ignored : :wallpaper_changed
     when "set_lock_aspect"
       # A client (e.g. Quake) post-handshake declares an aspect-ratio lock for
       # the interactive resize grip. The compositor's resize_to then snaps

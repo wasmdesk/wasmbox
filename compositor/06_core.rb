@@ -40,6 +40,32 @@ class Compositor
     store.call("setItem", LAYOUT_KEY, @wm.serialize_layout)
   end
 
+  # The desktop wallpaper choice (Wallpaper.current_name) survives a reload the
+  # same way the layout does — a single localStorage key holding the preset
+  # name. restore_wallpaper runs at boot (before start), save_wallpaper fires
+  # only when the selection actually changes (the root-menu :wallpaper dispatch
+  # or a set_wallpaper wire message), never per frame.
+  WALLPAPER_KEY = "wasmbox.wallpaper"
+
+  # Load the saved wallpaper into the Wallpaper registry. Degrades to the Grid
+  # default when storage is unavailable (private mode) or the key is unset /
+  # names an unknown preset (Wallpaper.select drops it).
+  def restore_wallpaper
+    store = JS.window.get("localStorage")
+    return nil unless store
+    raw = store.call("getItem", WALLPAPER_KEY)
+    return nil if raw.nil?
+    Wallpaper.select(raw.to_s)
+  end
+
+  # Persist the active wallpaper name. Called from the :wallpaper dispatch and
+  # the :wallpaper_changed route only after a real change.
+  def save_wallpaper
+    store = JS.window.get("localStorage")
+    return nil unless store
+    store.call("setItem", WALLPAPER_KEY, Wallpaper.current_name)
+  end
+
   # --- bridge wiring -------------------------------------------------------
   def attach_to_canvas(canvas_id)
     @doc = JS.document
@@ -101,6 +127,16 @@ class Compositor
       route_worker_message(nil, e.get("detail"))
     end
     @bus.on("wasmbox-tray-remove") do |e|
+      route_worker_message(nil, e.get("detail"))
+    end
+    # Wallpaper test hook: __wasmboxSetWallpaper(name) (compositor.worker.js)
+    # dispatches a `set_wallpaper` message here so a probe can switch the desktop
+    # background without a client. Routed through the FULL decode -> handle ->
+    # route path (nil worker, since there is no posting client), so it exercises
+    # the real wiring. Inert when the name is unknown/already-active
+    # (Wallpaper.select returns nil -> :ignored), so registering it
+    # unconditionally keeps main shippable.
+    @bus.on("wasmbox-set-wallpaper") do |e|
       route_worker_message(nil, e.get("detail"))
     end
     @worker_seq = 0
@@ -260,6 +296,12 @@ class Compositor
       # to EVERY external client (the panel repaints with the new colours;
       # other clients may opt in via the SDK's onInput hook).
       notify_theme_changed
+    when :wallpaper_changed
+      # A client (or the set-wallpaper test hook) switched the desktop
+      # background. draw_desktop_widgets repaints from Wallpaper.current on the
+      # next rAF tick (its render-once cache re-renders exactly once); persist so
+      # the choice survives a reload, mirroring the root-menu :wallpaper path.
+      save_wallpaper
     when :notify
       # A client posted a desktop notification — push it onto the toast stack
       # (12_notifications.rb). `worker` is the poster, so a toast action can fire
@@ -932,6 +974,16 @@ class Compositor
       if FrameRegistry.names.include?(name) && name != Frame.current_name
         FrameRegistry.select(name)
       end
+    when :wallpaper
+      # Root-menu Wallpaper entry clicked. Swap the desktop-background preset
+      # (grid / a gradient / the bundled image) via Wallpaper.select. The change
+      # is picked up by draw_desktop_widgets on the next rAF tick — its
+      # render-once cache keys on Wallpaper.current_name so exactly one
+      # re-render happens (the Firefox-GC lesson) — and persisted to
+      # localStorage so it survives a reload. Unknown or already-active names
+      # are dropped (Wallpaper.select returns nil), skipping the persist.
+      changed = Wallpaper.select(arg.to_s)
+      save_wallpaper if changed
     when :focus
       win = @wm.find(arg.to_i)
       if win
