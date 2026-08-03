@@ -1783,5 +1783,166 @@ assert(!spk.active?, "palette closed after cancel")
 assert_eq(spk.query, "", "cancel cleared the query")
 
 puts "rbtest: ran all Spotlight model assertions"
+
+# ---- Expose: grid dimensions (near-square, integer sqrt) ------------------
+# cols = smallest c with c*c >= n; rows = ceil(n / cols).
+assert_eq(Expose.grid_dims(0), [0, 0], "grid_dims(0) is empty")
+assert_eq(Expose.grid_dims(1), [1, 1], "grid_dims(1) = 1x1")
+assert_eq(Expose.grid_dims(2), [2, 1], "grid_dims(2) = 2x1")
+assert_eq(Expose.grid_dims(3), [2, 2], "grid_dims(3) = 2x2 (short last row)")
+assert_eq(Expose.grid_dims(4), [2, 2], "grid_dims(4) = 2x2")
+assert_eq(Expose.grid_dims(5), [3, 2], "grid_dims(5) = 3x2")
+assert_eq(Expose.grid_dims(6), [3, 2], "grid_dims(6) = 3x2")
+assert_eq(Expose.grid_dims(7), [3, 3], "grid_dims(7) = 3x3")
+assert_eq(Expose.grid_dims(9), [3, 3], "grid_dims(9) = 3x3")
+assert_eq(Expose.grid_dims(10), [4, 3], "grid_dims(10) = 4x3")
+
+# ---- Expose: closed-state transitions are all inert -----------------------
+ex0 = Expose.new
+assert(!ex0.active?, "fresh spread is closed")
+assert_eq(ex0.count, 0, "closed spread has no tiles")
+assert(ex0.selected.nil?, "closed spread selects nothing")
+assert(ex0.move(:left).nil?, "move on a closed spread is a no-op")
+assert(ex0.select_index(0).nil?, "select_index on a closed spread is a no-op")
+assert(ex0.commit.nil?, "commit on a closed spread returns nil")
+assert(ex0.open([]).nil?, "open over an empty list returns nil")
+assert(!ex0.active?, "spread stays closed on an empty open")
+assert(ex0.open(nil).nil?, "open over nil is refused")
+
+# ---- Expose: open over a candidate ring (grid + parked selection) ---------
+# Build a real candidate ring from a WM: cycle_candidates is most-recent-first.
+wex = WindowManager.new
+ex_wins = []
+5.times { |i| ex_wins << wex.spawn("ex-#{i}") } # ex-4 focused -> head of ring
+ring = wex.cycle_candidates
+assert_eq(ring.length, 5, "candidate ring has all 5 windows")
+ex = Expose.new
+assert(!ex.open(ring).nil?, "open over a non-empty ring returns self")
+assert(ex.active?, "spread is up after open")
+assert_eq(ex.count, 5, "spread tile count = candidate count")
+assert_eq(ex.cols, 3, "5 tiles lay out in 3 columns")
+assert_eq(ex.rows, 2, "5 tiles lay out in 2 rows")
+assert_eq(ex.index, 0, "open parks the selection on the focused window (index 0)")
+assert(ex.selected.equal?(ring[0]), "index 0 selects the focused (head) window")
+# Re-open while up must NOT reset the selection.
+ex.move(:right)
+assert_eq(ex.index, 1, "move(:right) advanced the selection")
+ex.open(ring)
+assert_eq(ex.index, 1, "re-open while active keeps the current selection")
+
+# ---- Expose: row_tiles + rows_in_col shape (5 tiles, 3x2) -----------------
+# Grid index layout for n=5, cols=3:  row0 = [0,1,2]  row1 = [3,4]
+assert_eq(ex.row_tiles(0), 3, "row 0 holds a full 3 tiles")
+assert_eq(ex.row_tiles(1), 2, "row 1 (short last row) holds 2 tiles")
+assert_eq(ex.rows_in_col(0), 2, "column 0 spans both rows")
+assert_eq(ex.rows_in_col(1), 2, "column 1 spans both rows")
+assert_eq(ex.rows_in_col(2), 1, "column 2 only exists in row 0 (short last row)")
+
+# ---- Expose: 2-D selection move + wrap ------------------------------------
+# Left/right wrap within the row; up/down wrap within the column.
+exm = Expose.new
+exm.open(ring) # index 0 (row0,col0)
+assert_eq(exm.move(:right), 1, "right: 0 -> 1")
+assert_eq(exm.move(:right), 2, "right: 1 -> 2")
+assert_eq(exm.move(:right), 0, "right wraps within row 0: 2 -> 0")
+assert_eq(exm.move(:left), 2, "left wraps within row 0: 0 -> 2")
+# Down from (row0,col0=index0) -> (row1,col0=index3); down again wraps to 0.
+exm.select_index(0)
+assert_eq(exm.move(:down), 3, "down: index 0 -> 3 (next row, same column)")
+assert_eq(exm.move(:down), 0, "down wraps within column 0: 3 -> 0")
+assert_eq(exm.move(:up), 3, "up wraps within column 0: 0 -> 3")
+# Column 2 has only one row (index 2): up/down stay put (wrap to self).
+exm.select_index(2)
+assert_eq(exm.move(:down), 2, "down on a single-row column stays put")
+assert_eq(exm.move(:up), 2, "up on a single-row column stays put")
+# Down from index1 (row0,col1) -> index4 (row1,col1).
+exm.select_index(1)
+assert_eq(exm.move(:down), 4, "down: index 1 -> 4 (row1, col1)")
+
+# ---- Expose: tile rectangles are non-overlapping + fit the work area ------
+# Lay 5 tiles into a 1000x600 work area at origin (40,40) with an 10px gap and
+# assert every rect is inside the bounds and no two rects overlap.
+AX = 40; AY = 40; AW = 1000; AH = 600; GAP = 10
+rects = []
+5.times { |i| rects << exm.tile_rect(i, AX, AY, AW, AH, GAP) }
+rects.each_with_index do |r, i|
+  assert(r[0] >= AX, "tile #{i} left inside work area")
+  assert(r[1] >= AY, "tile #{i} top inside work area")
+  assert(r[0] + r[2] <= AX + AW, "tile #{i} right inside work area")
+  assert(r[1] + r[3] <= AY + AH, "tile #{i} bottom inside work area")
+  assert(r[2] > 0 && r[3] > 0, "tile #{i} has positive size")
+end
+# Pairwise non-overlap: two rects overlap iff they intersect on BOTH axes.
+def rects_overlap?(a, b)
+  ax1 = a[0]; ay1 = a[1]; ax2 = a[0] + a[2]; ay2 = a[1] + a[3]
+  bx1 = b[0]; by1 = b[1]; bx2 = b[0] + b[2]; by2 = b[1] + b[3]
+  ax1 < bx2 && bx1 < ax2 && ay1 < by2 && by1 < ay2
+end
+i = 0
+while i < rects.length
+  j = i + 1
+  while j < rects.length
+    assert(!rects_overlap?(rects[i], rects[j]), "tiles #{i} and #{j} do not overlap")
+    j += 1
+  end
+  i += 1
+end
+
+# ---- Expose: click -> tile resolution -------------------------------------
+# A point at a tile's center resolves to that tile; a point in the dim gap
+# between tiles (or outside the work area) resolves to -1.
+5.times do |i|
+  r = exm.tile_rect(i, AX, AY, AW, AH, GAP)
+  cx = r[0] + r[2] / 2
+  cy = r[1] + r[3] / 2
+  assert_eq(exm.tile_at(cx, cy, AX, AY, AW, AH, GAP), i,
+            "tile_at at the center of tile #{i} resolves to #{i}")
+end
+# A click far outside the work area hits nothing.
+assert_eq(exm.tile_at(-100, -100, AX, AY, AW, AH, GAP), -1,
+          "tile_at outside the work area is -1")
+# A click in the 1px seam between the first two tiles (the gap) hits nothing:
+# just past tile 0's right edge, before tile 1's left edge.
+r0 = exm.tile_rect(0, AX, AY, AW, AH, GAP)
+gap_x = r0[0] + r0[2] + 1 # 1px into the dim gap after tile 0
+gap_y = r0[1] + r0[3] / 2
+assert_eq(exm.tile_at(gap_x, gap_y, AX, AY, AW, AH, GAP), -1,
+          "tile_at in the gap between tiles is -1")
+
+# ---- Expose: commit + cancel ----------------------------------------------
+exc = Expose.new
+exc.open(ring)
+exc.move(:right) # select index 1
+picked = exc.commit
+assert(picked.equal?(ring[1]), "commit returns the selected candidate")
+assert(!exc.active?, "spread is closed after commit")
+assert_eq(exc.count, 0, "closed spread holds no candidates after commit")
+assert(exc.commit.nil?, "a second commit after close returns nil")
+# Cancel closes without choosing.
+exx = Expose.new
+exx.open(ring)
+exx.move(:down)
+assert(exx.active?, "spread is up before cancel")
+assert(exx.cancel.nil?, "cancel returns nil (chose nothing)")
+assert(!exx.active?, "spread is closed after cancel")
+# A single-window spread is degenerate but safe: 1x1 grid, moves stay on 0.
+solo_ex = WindowManager.new
+only_ex = solo_ex.spawn("solo-ex")
+exs = Expose.new
+exs.open(solo_ex.cycle_candidates)
+assert_eq(exs.count, 1, "single-window spread has one tile")
+assert_eq(exs.cols, 1, "single-window spread is 1 column")
+assert_eq(exs.rows, 1, "single-window spread is 1 row")
+assert_eq(exs.move(:right), 0, "move on a 1x1 spread stays on 0")
+assert_eq(exs.move(:down), 0, "down on a 1x1 spread stays on 0")
+assert(exs.commit.equal?(only_ex), "commit on a 1x1 spread returns that window")
+# select_index out of range is a no-op.
+exr = Expose.new
+exr.open(ring)
+assert(exr.select_index(99).nil?, "select_index out of range is a no-op")
+assert(exr.select_index(-1).nil?, "select_index negative is a no-op")
+assert_eq(exr.index, 0, "out-of-range select_index left the selection put")
+
+puts "rbtest: ran all Expose model assertions"
 puts "rbtest: ran all pure-WM assertions"
 `
