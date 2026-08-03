@@ -837,6 +837,45 @@ globalThis.__wasmboxSnap = function (dir) {
   return true;
 };
 
+// `__wasmboxAltTab(cmd)` -- TEST HOOK. Drives the REAL Alt-Tab switcher
+// transitions (compositor/15_alttab.rb) via the bus, because a synthetic
+// metaKey/Alt+Tab chord is unreliable headless. cmd is one of "open" /
+// "advance" / "advance_reverse" / "commit" / "cancel"; the Ruby bus listener
+// (06_core.rb) routes it to alttab_probe, the same code the keyboard uses.
+globalThis.__wasmboxAltTab = function (cmd) {
+  const detail = String(cmd == null ? "open" : cmd);
+  function dispatch() {
+    const bus = fakeDocument.getElementById("__wasmbox_bus");
+    if (!bus) { setTimeout(dispatch, 16); return; }
+    bus.dispatchEvent(new CustomEvent("wasmbox-alttab", { detail: detail }));
+  }
+  dispatch();
+  return true;
+};
+
+// `wasmboxPublishAltTab(...)` -- called by the Ruby compositor once per frame
+// (draw_alttab, 15_alttab.rb) to publish the switcher's live overlay geometry +
+// selection. active is 0/1; count is the candidate tile count; index is the
+// selected tile; (px,py,pw,ph) is the centered panel rect; (sx,sy,sw,sh) is the
+// SELECTED window's body rect (so a probe can confirm a commit focuses exactly
+// that window against __wasmboxFocusedRect). The probe reads the stash via
+// __wasmboxAltTabState().
+globalThis.__wasmboxAltTabData = { active: 0 };
+globalThis.wasmboxPublishAltTab = function (active, count, index, px, py, pw, ph, sx, sy, sw, sh) {
+  globalThis.__wasmboxAltTabData = {
+    active: active | 0,
+    count: count | 0,
+    index: index | 0,
+    panel_x: px | 0, panel_y: py | 0, panel_w: pw | 0, panel_h: ph | 0,
+    sel_x: sx | 0, sel_y: sy | 0, sel_w: sw | 0, sel_h: sh | 0,
+  };
+};
+// `__wasmboxAltTabState()` -- TEST HOOK. Returns the last-published switcher
+// state (or { active: 0 } before the first frame).
+globalThis.__wasmboxAltTabState = function () {
+  return globalThis.__wasmboxAltTabData;
+};
+
 // `wasmboxClock()` -- wall-clock + calendar math for the clock/calendar applets
 // (compositor/14_applets.rb reads the fields off the returned object). Kept on
 // the JS side so the Ruby applet render never does Gregorian date arithmetic.
