@@ -126,17 +126,42 @@ module RootMenu
 
   # Compose the apps + workspaces + themes + frames submenus and the
   # top-level menu.
-  def self.build(wm)
-    Menu.new([
+  #
+  # `applets` is the Compositor's AppletBoard (14_applets.rb) or nil. When
+  # non-nil an "Applets" submenu is inserted (after "Frame") so the user can
+  # toggle each desktop applet on/off; when nil (the default — and the shape
+  # cmd/rbtest asserts) the entry is omitted entirely, so the menu is byte-for-
+  # byte what it was before applets landed and the feature stays flag-gated.
+  def self.build(wm, applets = nil)
+    rows = [
       { label: "Applications", submenu: build_apps(wm) },
       { label: "Workspaces",   submenu: build_workspaces(wm) },
       { label: "Theme",        submenu: build_themes(wm) },
       { label: "Frame",        submenu: build_frames },
+    ]
+    rows << { label: "Applets", submenu: build_applets(applets) } unless applets.nil?
+    rows.concat([
       { separator: true },
       { label: "About wasmbox", action: [:noop, "about"] },
       { label: "Reload",        action: [:noop, "reload"] },
       { label: "Exit",          action: [:noop, "exit"] },
     ])
+    Menu.new(rows)
+  end
+
+  # Build the Applets submenu from the AppletBoard: one entry per Applet::KINDS,
+  # in menu order, labelled with its friendly name and prefixed with "* " when
+  # that applet is currently shown (mirrors the Theme / Frame active marker).
+  # Click action is [:applet, "<kind>"] — dispatch_menu_action toggles the tile
+  # on the desktop + persists the new shown-set.
+  def self.build_applets(board)
+    rows = []
+    Applet::KINDS.each do |kind|
+      shown = !board.nil? && board.shown?(kind)
+      label = shown ? "* #{Applet.label(kind)}" : Applet.label(kind)
+      rows << { label: label, action: [:applet, kind] }
+    end
+    Menu.new(rows)
   end
 
   # Build the Applications submenu from the LAUNCHABLE registry. The order

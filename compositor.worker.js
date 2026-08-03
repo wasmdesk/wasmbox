@@ -719,6 +719,69 @@ globalThis.__wasmboxTrayRemove = function (id) {
   return true;
 };
 
+// `__wasmboxAppletToggle(kind)` / `__wasmboxAppletPlace(kind, x, y)` /
+// `__wasmboxAppletRemove(kind)` -- TEST HOOKS. Drive the desktop applets
+// (compositor/14_applets.rb) without the root menu, by dispatching on the Ruby
+// event bus like the tray hooks. Toggle flips a tile on/off; Place ensures a tile
+// is shown and moves it to (x, y) (a deterministic position for test/probe-
+// applets.mjs); Remove hides it. The compositor owns applets (no client), so the
+// bus handlers call the applet helpers directly. Inert when Compositor::APPLETS
+// is off.
+globalThis.__wasmboxAppletToggle = function (kind) {
+  const detail = String(kind);
+  function dispatch() {
+    const bus = fakeDocument.getElementById("__wasmbox_bus");
+    if (!bus) { setTimeout(dispatch, 16); return; }
+    bus.dispatchEvent(new CustomEvent("wasmbox-applet-toggle", { detail: detail }));
+  }
+  dispatch();
+  return true;
+};
+
+globalThis.__wasmboxAppletPlace = function (kind, x, y) {
+  const detail = { kind: String(kind), x: x | 0, y: y | 0 };
+  function dispatch() {
+    const bus = fakeDocument.getElementById("__wasmbox_bus");
+    if (!bus) { setTimeout(dispatch, 16); return; }
+    bus.dispatchEvent(new CustomEvent("wasmbox-applet-place", { detail: detail }));
+  }
+  dispatch();
+  return true;
+};
+
+globalThis.__wasmboxAppletRemove = function (kind) {
+  const detail = String(kind);
+  function dispatch() {
+    const bus = fakeDocument.getElementById("__wasmbox_bus");
+    if (!bus) { setTimeout(dispatch, 16); return; }
+    bus.dispatchEvent(new CustomEvent("wasmbox-applet-remove", { detail: detail }));
+  }
+  dispatch();
+  return true;
+};
+
+// `wasmboxClock()` -- wall-clock + calendar math for the clock/calendar applets
+// (compositor/14_applets.rb reads the fields off the returned object). Kept on
+// the JS side so the Ruby applet render never does Gregorian date arithmetic.
+// dow / first_dow are 0=Sunday; month is 1-12; days_in_month is the last day of
+// the current month.
+globalThis.wasmboxClock = function () {
+  const d = new Date();
+  const y = d.getFullYear();
+  const mo = d.getMonth();
+  return {
+    h: d.getHours(),
+    m: d.getMinutes(),
+    s: d.getSeconds(),
+    year: y,
+    month: mo + 1,
+    day: d.getDate(),
+    dow: d.getDay(),
+    first_dow: new Date(y, mo, 1).getDay(),
+    days_in_month: new Date(y, mo + 1, 0).getDate(),
+  };
+};
+
 // `wasmboxSpawnExternalOCI(ref)` -- OCI twin of wasmboxSpawnExternal. Dispatches
 // a `wasmbox-spawn-external-oci` CustomEvent on the bus; compositor.rb listens
 // for it and runs spawn_external_oci(ref), which then calls
