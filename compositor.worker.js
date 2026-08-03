@@ -876,6 +876,50 @@ globalThis.__wasmboxAltTabState = function () {
   return globalThis.__wasmboxAltTabData;
 };
 
+// `__wasmboxSpotlight(cmd)` -- TEST HOOK. Drives the REAL Spotlight launcher
+// transitions (compositor/16_spotlight.rb) via the bus, because a synthetic
+// ⌘/Ctrl+Space chord + per-key typing is unreliable headless. cmd is one of
+// "open" / "query:<text>" / "type:<chars>" / "backspace" / "down" / "up" /
+// "commit" / "cancel"; the Ruby bus listener (06_core.rb) routes it to
+// spotlight_probe, the same code the keyboard uses.
+globalThis.__wasmboxSpotlight = function (cmd) {
+  const detail = String(cmd == null ? "open" : cmd);
+  function dispatch() {
+    const bus = fakeDocument.getElementById("__wasmbox_bus");
+    if (!bus) { setTimeout(dispatch, 16); return; }
+    bus.dispatchEvent(new CustomEvent("wasmbox-spotlight", { detail: detail }));
+  }
+  dispatch();
+  return true;
+};
+
+// `wasmboxPublishSpotlight(...)` -- called by the Ruby compositor once per frame
+// (draw_spotlight, 16_spotlight.rb) to publish the launcher's live overlay
+// geometry + query + selection. active is 0/1; count is the filtered result
+// count; index is the highlighted row; (px,py,pw,ph) is the centered panel rect;
+// query is the live search text; selLabel is the highlighted app's label;
+// launched is the last-launched app id and launchSeq a monotonic launch counter
+// (so a probe can confirm Enter launched the highlighted app and Escape did
+// not). The probe reads the stash via __wasmboxSpotlightState().
+globalThis.__wasmboxSpotlightData = { active: 0 };
+globalThis.wasmboxPublishSpotlight = function (active, count, index, px, py, pw, ph, query, selLabel, launched, launchSeq) {
+  globalThis.__wasmboxSpotlightData = {
+    active: active | 0,
+    count: count | 0,
+    index: index | 0,
+    panel_x: px | 0, panel_y: py | 0, panel_w: pw | 0, panel_h: ph | 0,
+    query: String(query == null ? "" : query),
+    sel_label: String(selLabel == null ? "" : selLabel),
+    launched: String(launched == null ? "" : launched),
+    launch_seq: launchSeq | 0,
+  };
+};
+// `__wasmboxSpotlightState()` -- TEST HOOK. Returns the last-published launcher
+// state (or { active: 0 } before the first frame).
+globalThis.__wasmboxSpotlightState = function () {
+  return globalThis.__wasmboxSpotlightData;
+};
+
 // `wasmboxClock()` -- wall-clock + calendar math for the clock/calendar applets
 // (compositor/14_applets.rb reads the fields off the returned object). Kept on
 // the JS side so the Ruby applet render never does Gregorian date arithmetic.

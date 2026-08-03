@@ -192,6 +192,16 @@ class Compositor
     @bus.on("wasmbox-alttab") do |e|
       alttab_probe(e.get("detail"))
     end
+    # Spotlight test hook: __wasmboxSpotlight(cmd) (compositor.worker.js)
+    # dispatches a spotlight command ("open"/"query:term"/"type:x"/"backspace"/
+    # "down"/"up"/"commit"/"cancel") here so test/probe-spotlight.mjs can drive
+    # the launcher without a real ⌘/Ctrl+Space chord (unreliable headless).
+    # Routed to the SAME transitions the keyboard uses (16_spotlight.rb#
+    # spotlight_probe). Inert when Compositor::SPOTLIGHT is off (spotlight_probe
+    # no-ops), so registering it unconditionally keeps main shippable.
+    @bus.on("wasmbox-spotlight") do |e|
+      spotlight_probe(e.get("detail"))
+    end
     @worker_seq = 0
     @workers_by_id = {}
   end
@@ -930,6 +940,23 @@ class Compositor
       end
       return
     end
+    # Spotlight launcher keyboard grab (16_spotlight.rb): while the palette is up
+    # it owns the keyboard. Typing a printable character filters, Up/Down move the
+    # highlight, Enter launches, Escape cancels, and every other key is swallowed
+    # so nothing leaks to a client mid-search. Self-gated on Compositor::SPOTLIGHT.
+    if SPOTLIGHT && spotlight_active?
+      spotlight_key(key, e)
+      e.call("preventDefault")
+      return
+    end
+    # Spotlight OPEN chord: ⌘/Ctrl+Space raises the palette (16_spotlight.rb).
+    # Checked before the switcher + `case key` so the chord never falls through
+    # to a client as a literal space. Self-gated on Compositor::SPOTLIGHT.
+    if SPOTLIGHT && spotlight_open_chord?(key, e)
+      e.call("preventDefault")
+      spotlight_open
+      return
+    end
     # Alt-Tab switcher keyboard grab (15_alttab.rb): while the overlay is up it
     # owns the keyboard. Tab advances the selection (Shift reverses), Enter
     # commits, Escape cancels, and every other key is swallowed so it never leaks
@@ -1328,6 +1355,11 @@ class Compositor
     # Self-gates on Compositor::ALTTAB + an open switcher (else it only publishes
     # the "inactive" probe state).
     draw_alttab if ALTTAB
+    # Spotlight launcher (16_spotlight.rb): a centered search palette painted OVER
+    # everything while ⌘/Ctrl+Space is held. Drawn last (after the switcher) so it
+    # reads as the top-most modal. Self-gates on Compositor::SPOTLIGHT + an open
+    # palette (else it only publishes the "inactive" probe state).
+    draw_spotlight if SPOTLIGHT
     # Publish the focused window's live geometry + the work-area metrics for the
     # snapping probe (test/probe-snapping.mjs reads globalThis.__wasmboxFocusedRect).
     # One cheap JS call per frame, self-gated on SNAPPING so main is unaffected.

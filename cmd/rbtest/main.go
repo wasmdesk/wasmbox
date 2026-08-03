@@ -1653,5 +1653,135 @@ sw4 = AltTab.new
 assert(sw4.open([]).nil?, "open over an empty ring returns nil")
 assert(!sw4.active?, "switcher stays closed on an empty open")
 
+# ---- Spotlight: fuzzy_match? (subsequence, case-insensitive) --------------
+assert(Spotlight.fuzzy_match?("terminal", ""), "empty query matches anything")
+assert(Spotlight.fuzzy_match?("terminal", "term"), "prefix substring matches")
+assert(Spotlight.fuzzy_match?("terminal", "trml"), "non-contiguous subsequence matches")
+assert(Spotlight.fuzzy_match?("terminal", "terminal"), "full-string matches")
+assert(!Spotlight.fuzzy_match?("terminal", "xyz"), "absent chars do not match")
+assert(!Spotlight.fuzzy_match?("terminal", "mret"), "out-of-order chars do not match")
+assert(!Spotlight.fuzzy_match?("cat", "cats"), "query longer than text does not match")
+
+# ---- Spotlight.app_list: built from LAUNCHABLE + labels + hidden ----------
+sl_apps = Spotlight.app_list(WindowManager::LAUNCHABLE, RootMenu::APP_LABELS, RootMenu::HIDDEN)
+# Every entry is a { id:, label: } Hash whose id is genuinely launchable.
+wsl = WindowManager.new
+sl_apps.each do |app|
+  assert(app.has_key?(:id) && app.has_key?(:label), "app entry has id + label")
+  assert(wsl.launchable?(app[:id]), "every Spotlight app id is in LAUNCHABLE")
+end
+sl_labels = sl_apps.map { |a| a[:label] }
+sl_ids    = sl_apps.map { |a| a[:id] }
+assert(sl_labels.include?("Terminal"), "Spotlight lists Terminal")
+assert(sl_labels.include?("Calculator"), "Spotlight lists Calculator")
+assert(sl_ids.include?("terminal"), "Spotlight carries the terminal id")
+# Hidden ids (hello-oci) are omitted, exactly like the Applications menu.
+assert(!sl_labels.include?("Hello (OCI)"), "Spotlight hides the probe-only hello-oci")
+expected_sl = 0
+WindowManager::LAUNCHABLE.each do |id, _d|
+  expected_sl += 1 unless RootMenu::HIDDEN.include?(id)
+end
+assert_eq(sl_apps.length, expected_sl, "Spotlight lists one entry per non-hidden LAUNCHABLE id")
+# Labelled ids sort first (APP_LABELS order): Terminal is entry 0.
+assert_eq(sl_apps[0][:label], "Terminal", "Spotlight order follows APP_LABELS (Terminal first)")
+
+# app_list with a nil hidden arg + a synthetic UNLABELLED id -> capitalized
+# fallback appended after the labelled ids (covers the leftover-id branch).
+synth_launch = { "terminal" => "clients/terminal/worker.js", "widget" => "clients/widget/worker.js" }
+synth_labels = { "terminal" => "Terminal" }
+synth = Spotlight.app_list(synth_launch, synth_labels, nil)
+assert_eq(synth.length, 2, "synthetic app_list has both ids")
+assert_eq(synth[0][:label], "Terminal", "labelled id first")
+assert_eq(synth[1][:id], "widget", "unlabelled id appended")
+assert_eq(synth[1][:label], "Widget", "unlabelled id falls back to capitalized")
+
+# ---- Spotlight: closed-state transitions are all inert --------------------
+sp0 = Spotlight.new
+assert(!sp0.active?, "fresh palette is closed")
+assert_eq(sp0.count, 0, "closed palette has no results")
+assert(sp0.selected.nil?, "closed palette selects nothing")
+assert(sp0.type("x").nil?, "type on a closed palette is a no-op")
+assert(sp0.backspace.nil?, "backspace on a closed palette is a no-op")
+assert(sp0.set_query("x").nil?, "set_query on a closed palette is a no-op")
+assert(sp0.move(1).nil?, "move on a closed palette is a no-op")
+assert(sp0.commit.nil?, "commit on a closed palette returns nil")
+# Open over an empty list is refused (stays closed).
+assert(sp0.open([]).nil?, "open over an empty app list returns nil")
+assert(!sp0.active?, "palette stays closed on an empty open")
+assert(sp0.open(nil).nil?, "open over nil is refused")
+
+# ---- Spotlight: open + fuzzy filter + selection + launch resolution -------
+sp = Spotlight.new
+assert(!sp.open(sl_apps).nil?, "open over a non-empty list returns self")
+assert(sp.active?, "palette is up after open")
+assert_eq(sp.query, "", "open starts with an empty query")
+assert_eq(sp.count, sl_apps.length, "empty query matches every app")
+assert_eq(sp.index, 0, "open parks the selection on the first result")
+assert(sp.selected.equal?(sl_apps[0]), "index 0 selects the first app")
+# Re-opening while up keeps the walk in progress (no reset).
+sp.set_query("cal")
+assert(sp.open(sl_apps).equal?(sp), "re-open while active returns self without resetting")
+assert_eq(sp.query, "cal", "re-open kept the live query")
+# Fuzzy-filter to Terminal.
+sp.set_query("term")
+assert_eq(sp.count, 1, "query 'term' fuzzy-filters to exactly one app")
+assert_eq(sp.selected[:id], "terminal", "the sole 'term' match is Terminal")
+assert(wsl.launchable?(sp.selected[:id]), "the resolved Spotlight id is launchable")
+# Backspace widens the match again.
+sp.backspace # "ter"
+assert(sp.count >= 1, "backspace re-widens the result set")
+assert_eq(sp.query, "ter", "backspace trimmed the last query char")
+# type() appends a char and re-parks the selection on the first result.
+sp.set_query("")
+sp.type("c"); sp.type("a"); sp.type("l")
+assert_eq(sp.query, "cal", "type() appended each character")
+cal_labels = sp.results.map { |a| a[:label] }
+assert(cal_labels.include?("Calculator"), "query 'cal' includes Calculator")
+assert_eq(sp.index, 0, "type() re-parks the selection at the top")
+
+# ---- Spotlight: move wraps within the filtered result set -----------------
+sp.set_query("") # all apps visible
+n = sp.count
+assert(n >= 3, "the full app list has several results to walk")
+assert_eq(sp.move(1), 1, "move(1) -> index 1")
+assert_eq(sp.move(1), 2, "move(1) -> index 2")
+assert_eq(sp.move(-1), 1, "move(-1) -> index 1")
+# Wrap at the start.
+sp.set_query("")
+assert_eq(sp.move(-1), n - 1, "move(-1) from 0 wraps to the last result")
+# Wrap at the end: step to the last, then one more wraps to 0.
+sp.set_query("")
+(n - 1).times { sp.move(1) }
+assert_eq(sp.index, n - 1, "walked to the last result")
+assert_eq(sp.move(1), 0, "move(1) from the last wraps back to 0")
+
+# ---- Spotlight: no-match query yields an empty, inert result set ----------
+spx = Spotlight.new
+spx.open(sl_apps)
+spx.set_query("zzzq")
+assert_eq(spx.count, 0, "an unmatched query has no results")
+assert(spx.selected.nil?, "no selection when nothing matches")
+assert(spx.move(1).nil?, "move over an empty result set is a no-op")
+
+# ---- Spotlight: commit returns the selected app + closes; cancel closes ----
+spc = Spotlight.new
+spc.open(sl_apps)
+spc.set_query("term")
+picked = spc.commit
+assert(!picked.nil?, "commit returns the selected app")
+assert_eq(picked[:id], "terminal", "commit returns the Terminal entry")
+assert(!spc.active?, "palette is closed after commit")
+assert_eq(spc.count, 0, "closed palette holds no results after commit")
+assert(spc.commit.nil?, "a second commit after close returns nil")
+# Cancel closes without choosing.
+spk = Spotlight.new
+spk.open(sl_apps)
+spk.type("t")
+assert(spk.active?, "palette up before cancel")
+assert(spk.cancel.nil?, "cancel returns nil (chose nothing)")
+assert(!spk.active?, "palette closed after cancel")
+assert_eq(spk.query, "", "cancel cleared the query")
+
+puts "rbtest: ran all Spotlight model assertions"
 puts "rbtest: ran all pure-WM assertions"
 `

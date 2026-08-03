@@ -208,6 +208,10 @@ jobs:
         working-directory: test
         run: node probe-alttab.mjs
 
+      - name: Run headless Spotlight launcher probe (⌘/Ctrl+Space centered palette + fuzzy filter + Enter launch + Escape cancel)
+        working-directory: test
+        run: node probe-spotlight.mjs
+
       - name: Run headless desktop-background probe (widgets Backdrop fill + grid, cached, z-order)
         working-directory: test
         run: node probe-desktop.mjs
