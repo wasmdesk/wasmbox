@@ -9,7 +9,8 @@ JS.log("rbgo compositor: frame=#{frame_name}")
 
 wm = WindowManager.new
 comp = Compositor.new(wm)
-comp.restore_layout # localStorage -> wm.saved_layout, before the spawns apply it
+comp.restore_layout    # localStorage -> wm.saved_layout, before the spawns apply it
+comp.restore_wallpaper # localStorage -> Wallpaper.current, before the first paint
 
 wm.spawn("xterm")
 wm.spawn("editor", 300, 190)

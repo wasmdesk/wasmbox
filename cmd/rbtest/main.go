@@ -739,20 +739,22 @@ assert_eq(labels[0], "Applications", "top-level[0] = Applications")
 assert_eq(labels[1], "Workspaces",   "top-level[1] = Workspaces")
 assert_eq(labels[2], "Theme",        "top-level[2] = Theme")
 assert_eq(labels[3], "Frame",        "top-level[3] = Frame")
-# Top-level row 4 is the separator (no label).
-assert_eq(root.entries[4][:separator], true, "top-level[4] is a separator")
-assert_eq(labels[5], "About wasmbox", "top-level[5] = About wasmbox")
-assert_eq(labels[6], "Reload",        "top-level[6] = Reload")
-assert_eq(labels[7], "Exit",          "top-level[7] = Exit")
-# Applications + Workspaces + Theme + Frame each carry a submenu.
+assert_eq(labels[4], "Wallpaper",    "top-level[4] = Wallpaper")
+# Top-level row 5 is the separator (no label).
+assert_eq(root.entries[5][:separator], true, "top-level[5] is a separator")
+assert_eq(labels[6], "About wasmbox", "top-level[6] = About wasmbox")
+assert_eq(labels[7], "Reload",        "top-level[7] = Reload")
+assert_eq(labels[8], "Exit",          "top-level[8] = Exit")
+# Applications + Workspaces + Theme + Frame + Wallpaper each carry a submenu.
 assert(root.entries[0][:submenu].is_a?(Menu), "Applications carries a submenu")
 assert(root.entries[1][:submenu].is_a?(Menu), "Workspaces carries a submenu")
 assert(root.entries[2][:submenu].is_a?(Menu), "Theme carries a submenu")
 assert(root.entries[3][:submenu].is_a?(Menu), "Frame carries a submenu")
+assert(root.entries[4][:submenu].is_a?(Menu), "Wallpaper carries a submenu")
 # About/Reload/Exit each carry a :noop action (dismiss-only in v0).
-assert_eq(root.entries[5][:action][0], :noop, "About is a :noop action")
-assert_eq(root.entries[6][:action][0], :noop, "Reload is a :noop action")
-assert_eq(root.entries[7][:action][0], :noop, "Exit is a :noop action")
+assert_eq(root.entries[6][:action][0], :noop, "About is a :noop action")
+assert_eq(root.entries[7][:action][0], :noop, "Reload is a :noop action")
+assert_eq(root.entries[8][:action][0], :noop, "Exit is a :noop action")
 
 # ---- RootMenu.build: Applications submenu lists LAUNCHABLE -----------
 apps = root.entries[0][:submenu]
@@ -1041,6 +1043,67 @@ res = wmf2.handle_client_message({ type: "set_frame" })
 assert_eq(res, :ignored, "set_frame with missing name is :ignored")
 # Reset to openbox so downstream state is stable.
 FrameRegistry.select("openbox")
+
+# ---- Wallpaper registry (05_menu.rb, Batch-3 desktop layer) -----------------
+# The pure selectable-background registry: names, descriptor kinds, and the
+# select() state machine (mirrors set_theme). The JS-side render in
+# 10_desktop_widgets.rb reads Wallpaper.current, so pinning it here guards the
+# root menu + the set_wallpaper wire path against a registry drift.
+Wallpaper.reset!
+assert_eq(Wallpaper.current_name, "Grid", "Wallpaper default is Grid")
+assert_eq(Wallpaper.names[0], "Grid", "Wallpaper names[0] = Grid (the default/fallback)")
+assert(Wallpaper.names.include?("Photo"), "Wallpaper registry lists the bundled Photo image")
+# Every preset descriptor is well-formed: a :grid, a :gradient (with top+bottom
+# hex) or an :image (with a mode).
+Wallpaper::PRESETS.each do |p|
+  assert(p.has_key?(:name), "every preset carries a name")
+  k = p[:kind]
+  assert(k == :grid || k == :gradient || k == :image, "preset kind is grid/gradient/image")
+  if k == :gradient
+    assert(p[:top].is_a?(String) && p[:top].start_with?("#"), "gradient preset has a top hex")
+    assert(p[:bottom].is_a?(String) && p[:bottom].start_with?("#"), "gradient preset has a bottom hex")
+  elsif k == :image
+    assert(p[:mode].is_a?(String), "image preset carries a scale mode")
+  end
+end
+# descriptor(): known name resolves, unknown is nil.
+assert_eq(Wallpaper.descriptor("Midnight")[:kind], :gradient, "descriptor(Midnight) is a gradient")
+assert(Wallpaper.descriptor("no-such").nil?, "descriptor(unknown) is nil")
+assert(Wallpaper.known?("Aurora"), "known?(Aurora) true")
+assert(!Wallpaper.known?("no-such"), "known?(unknown) false")
+# select(): unknown -> nil, already-active -> nil, real switch -> the new name.
+assert(Wallpaper.select("no-such").nil?, "select(unknown) -> nil")
+assert(Wallpaper.select("Grid").nil?, "select(already-active) -> nil")
+assert_eq(Wallpaper.select("Aurora"), "Aurora", "select(new) -> the new name")
+assert_eq(Wallpaper.current_name, "Aurora", "select updated current_name")
+assert_eq(Wallpaper.current[:kind], :gradient, "current descriptor follows select")
+
+# ---- RootMenu.build_wallpapers: shape + active marker -----------------------
+wp_sub = RootMenu.build_wallpapers
+assert_eq(wp_sub.entries.length, Wallpaper.names.length,
+          "Wallpaper submenu has one entry per preset")
+wp_sub.entries.each do |e|
+  assert_eq(e[:action][0], :wallpaper, "Wallpaper entry action[0] = :wallpaper")
+  assert(Wallpaper.known?(e[:action][1]), "Wallpaper action id is a known preset")
+end
+wp_labels = wp_sub.entries.map { |e| e[:label] }
+assert(wp_labels.include?("* Aurora"), "active Wallpaper entry marked with '* '")
+assert(wp_labels.include?("Grid"), "inactive Wallpaper entry has no '* '")
+
+# ---- handle_client_message :set_wallpaper arm -------------------------------
+wmw = WindowManager.new
+Wallpaper.reset!
+res = wmw.handle_client_message({ type: "set_wallpaper", name: "Midnight" })
+assert_eq(res, :wallpaper_changed, "set_wallpaper to a new valid name -> :wallpaper_changed")
+assert_eq(Wallpaper.current_name, "Midnight", "set_wallpaper swapped Wallpaper.current_name")
+res = wmw.handle_client_message({ type: "set_wallpaper", name: "Midnight" })
+assert_eq(res, :ignored, "set_wallpaper to already-active name is :ignored")
+res = wmw.handle_client_message({ type: "set_wallpaper", name: "no-such" })
+assert_eq(res, :ignored, "set_wallpaper with unknown name is :ignored")
+res = wmw.handle_client_message({ type: "set_wallpaper" })
+assert_eq(res, :ignored, "set_wallpaper with missing name is :ignored")
+# Reset so downstream state is deterministic.
+Wallpaper.reset!
 
 # ---- Frame#decoration_spec (widgets paint path, 11_frame_widgets.rb) --------
 # decoration_spec re-expresses the same colours + geometry as #paint /

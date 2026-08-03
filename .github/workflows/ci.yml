@@ -200,6 +200,10 @@ jobs:
         working-directory: test
         run: node probe-desktop.mjs
 
+      - name: Run headless wallpaper probe (gradient + bundled image select, cached, fallback, z-order)
+        working-directory: test
+        run: node probe-wallpaper.mjs
+
       - name: Run headless frame-decoration probe (widgets WindowDecoration titlebar + buttons + body z-order)
         working-directory: test
         run: node probe-frame-widgets.mjs
