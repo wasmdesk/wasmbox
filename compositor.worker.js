@@ -691,6 +691,34 @@ globalThis.__wasmboxPostNotification = function (opts) {
   return true;
 };
 
+// `__wasmboxTrayAdd(opts)` / `__wasmboxTrayRemove(id)` -- TEST HOOKS. Inject a
+// `tray_add` / `tray_remove` protocol message into the running compositor (as if
+// a client posted it) by dispatching it on the compositor's Ruby event bus,
+// exactly like __wasmboxPostNotification. Used by test/probe-tray.mjs to populate
+// + clear the status strip without spawning a client. `opts` carries the tray
+// fields (id/glyph/icon/w/h/tooltip); the `type` is stamped on for the caller.
+globalThis.__wasmboxTrayAdd = function (opts) {
+  const detail = Object.assign({ type: "tray_add" }, opts || {});
+  function dispatch() {
+    const bus = fakeDocument.getElementById("__wasmbox_bus");
+    if (!bus) { setTimeout(dispatch, 16); return; }
+    bus.dispatchEvent(new CustomEvent("wasmbox-tray-add", { detail: detail }));
+  }
+  dispatch();
+  return true;
+};
+
+globalThis.__wasmboxTrayRemove = function (id) {
+  const detail = { type: "tray_remove", id: id };
+  function dispatch() {
+    const bus = fakeDocument.getElementById("__wasmbox_bus");
+    if (!bus) { setTimeout(dispatch, 16); return; }
+    bus.dispatchEvent(new CustomEvent("wasmbox-tray-remove", { detail: detail }));
+  }
+  dispatch();
+  return true;
+};
+
 // `wasmboxSpawnExternalOCI(ref)` -- OCI twin of wasmboxSpawnExternal. Dispatches
 // a `wasmbox-spawn-external-oci` CustomEvent on the bus; compositor.rb listens
 // for it and runs spawn_external_oci(ref), which then calls

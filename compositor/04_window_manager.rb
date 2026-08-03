@@ -922,6 +922,22 @@ class WindowManager
       title = msg[:title].to_s
       body  = msg[:body].to_s
       (title.empty? && body.empty?) ? :ignored : :notify
+    when "tray_add"
+      # A client (or the tray test hook) registers a status icon. Trust-free
+      # half: we only validate that an id is present (an item is addressed by
+      # its caller-chosen id); the strip + its render live Compositor-side
+      # (13_tray.rb), which route_worker_message drives on the :tray_add result.
+      # A tray item is a desktop-global overlay, not a window — none is created
+      # or focused here. A post with no id is dropped as :ignored.
+      msg[:id].to_s.empty? ? :ignored : :tray_add
+    when "tray_remove"
+      # A client removes one of its status icons by id. Same validation shape as
+      # tray_add; the Compositor drops it from the strip on :tray_remove.
+      msg[:id].to_s.empty? ? :ignored : :tray_remove
+    when "tray_update"
+      # A client mutates a live status icon (new glyph/image/tooltip) by id. The
+      # Compositor applies the partial update on :tray_update.
+      msg[:id].to_s.empty? ? :ignored : :tray_update
     else
       :ignored
     end

@@ -17,6 +17,15 @@ const client = new WasmboxClient({ title: "Settings", w: 640, h: 460 });
 self.wasmboxClient = client;
 
 client.start().then(async () => {
+  // DE-spine demo: publish a system-tray status icon for Settings. A left-click
+  // fires a "tray_clicked" onInput event; a right-click fires "tray_menu". The
+  // compositor drops it automatically when this window closes.
+  client.trayAdd({ id: "settings.app", glyph: "settings", tooltip: "Settings" });
+  client.onInput((ev) => {
+    if (ev && (ev.kind === "tray_clicked" || ev.kind === "tray_menu")) {
+      console.log("settings: tray event", ev.kind, ev.tray_id);
+    }
+  });
   const assets = isOCI
     ? await WasmboxClient.bootFromOCIAssets({ fallbackMs: 2000 })
     : null;
