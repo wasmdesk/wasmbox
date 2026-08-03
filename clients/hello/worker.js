@@ -38,8 +38,23 @@ self.wasmboxClient = client;
 // and grab-dismisses it on a click outside; the `closed` that arrives then
 // clears our handle, so the next click opens a fresh one.
 let demoPopup = null;
+let notifiedOnce = false;
 client.onInput((ev) => {
   if (ev.kind !== "mousedown" || demoPopup) return;
+  // Desktop-notification demo: the FIRST click on the hello window posts a real
+  // notification through the SDK (client.notify -> {type:"notify"} -> the
+  // compositor's top-right toast, wasmbox/compositor/12_notifications.rb).
+  // Gesture-triggered (not on boot) so the default desktop stays quiet; proves
+  // the notify protocol end-to-end from a real client.
+  if (!notifiedOnce) {
+    notifiedOnce = true;
+    client.notify({
+      title: "hello (wasm)",
+      body: "wasmbox desktop notifications are live",
+      kind: "success",
+      timeout: 5,
+    });
+  }
   const p = client.openPopup({ title: "hello menu", w: 132, h: 96, rel_x: ev.x | 0, rel_y: ev.y | 0 });
   demoPopup = p;
   p.onClosed(() => { if (demoPopup === p) demoPopup = null; });

@@ -912,6 +912,16 @@ class WindowManager
       @last_closed_by_peer = { worker: w_ref, window_id: win.id, external: ext }
       close(win)
       :closed_by_peer
+    when "notify"
+      # A client (or the notify test hook) posts a desktop notification. This is
+      # the trust-free half — we only validate + record it; the toast stack and
+      # its render live Compositor-side (12_notifications.rb), which
+      # route_worker_message drives on the :notify result. A notification is a
+      # desktop-global overlay, not a window, so no window is created or focused
+      # here. A post carrying neither a title nor a body is dropped as :ignored.
+      title = msg[:title].to_s
+      body  = msg[:body].to_s
+      (title.empty? && body.empty?) ? :ignored : :notify
     else
       :ignored
     end

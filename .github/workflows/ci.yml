@@ -188,6 +188,10 @@ jobs:
         working-directory: test
         run: node probe-hud.mjs
 
+      - name: Run headless notifications probe (toast render + stack + auto-expire)
+        working-directory: test
+        run: node probe-notifications.mjs
+
       - name: Run headless desktop-background probe (widgets Backdrop fill + grid, cached, z-order)
         working-directory: test
         run: node probe-desktop.mjs
