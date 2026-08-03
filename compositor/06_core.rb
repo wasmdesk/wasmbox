@@ -182,6 +182,16 @@ class Compositor
       @wm.spawn(e.get("detail").to_s)
       notify_windows_changed
     end
+    # Alt-Tab test hook: __wasmboxAltTab(cmd) (compositor.worker.js) dispatches an
+    # `alttab` command ("open"/"advance"/"advance_reverse"/"commit"/"cancel")
+    # here so test/probe-alttab.mjs can drive the switcher without a real
+    # metaKey/Alt chord (unreliable headless). Routed to the SAME transitions the
+    # keyboard uses (15_alttab.rb#alttab_probe). Inert when Compositor::ALTTAB is
+    # off (alttab_probe no-ops), so registering it unconditionally keeps main
+    # shippable.
+    @bus.on("wasmbox-alttab") do |e|
+      alttab_probe(e.get("detail"))
+    end
     @worker_seq = 0
     @workers_by_id = {}
   end
@@ -644,6 +654,15 @@ class Compositor
   end
 
   def on_keyup(e)
+    # Releasing the Alt-Tab chord modifier commits the switcher: focus + raise
+    # the highlighted window (15_alttab.rb). While the switcher is up it holds the
+    # keyboard grab, so any other key-up is swallowed here. Self-gated on
+    # Compositor::ALTTAB + an open switcher.
+    if ALTTAB && alttab_active?
+      k = e.get("key")
+      alttab_commit if k == "Alt" || k == "Meta" || k == "Control"
+      return
+    end
     # Mirror on_keydown's routing: a key-up while a popup is open goes to that
     # popup (the keyboard grab), otherwise to the focused window.
     target = @wm.key_target
@@ -911,11 +930,32 @@ class Compositor
       end
       return
     end
+    # Alt-Tab switcher keyboard grab (15_alttab.rb): while the overlay is up it
+    # owns the keyboard. Tab advances the selection (Shift reverses), Enter
+    # commits, Escape cancels, and every other key is swallowed so it never leaks
+    # to a client mid-switch. Self-gated on Compositor::ALTTAB. The OPENING press
+    # is handled in the `case key` "Tab" arm below (the switcher is not up yet).
+    if ALTTAB && alttab_active?
+      case key
+      when "Tab"             then alttab_advance(e[:shiftKey] ? true : false)
+      when "Enter", "Return" then alttab_commit
+      when "Escape"          then alttab_cancel
+      end
+      e.call("preventDefault")
+      return
+    end
     case key
     when "Tab"
-      # Shift+Tab cycles windows (Openbox/Alt-Tab equivalent). Plain Tab
-      # forwards to the focused window so the terminal can use it for
-      # autocompletion (and any text-editor client can use it for indent).
+      # Alt/⌘+Tab (or Ctrl+Tab, an equivalent the headless env can always drive)
+      # opens the visual window switcher (15_alttab.rb) and advances it; each
+      # further Tab is caught by the grab block above. Plain Shift+Tab (no Alt)
+      # keeps the instant quick-cycle. Bare Tab forwards to the focused window so
+      # the terminal can use it for autocompletion (and an editor for indent).
+      if ALTTAB && alttab_modifier?(e)
+        e.call("preventDefault")
+        alttab_key(e[:shiftKey] ? true : false)
+        return
+      end
       if e[:shiftKey]
         e.call("preventDefault")
         @wm.cycle
@@ -950,6 +990,15 @@ class Compositor
   def snap_modifier?(e)
     return true if e[:metaKey]
     e[:ctrlKey] && e[:altKey] ? true : false
+  end
+
+  # The Alt-Tab chord modifier (15_alttab.rb). The primary binding is Alt/Option
+  # (altKey), matching Windows/GNOME. Meta/⌘ is accepted too (some setups deliver
+  # it), and Ctrl is accepted as an equivalent the probe (and users whose OS eats
+  # Alt+Tab) can always drive. Reads the same bracket-access idiom as the snap
+  # chord; an absent modifier property is nil (falsy), so a bare Tab never counts.
+  def alttab_modifier?(e)
+    e[:altKey] || e[:metaKey] || e[:ctrlKey] ? true : false
   end
 
   # Reserved strips for the work area a snapped window lives in. The bottom strip
@@ -1273,6 +1322,12 @@ class Compositor
     # column — see 05_tray.rb). Self-gate on Compositor::TRAY / ::NOTIFICATIONS.
     draw_tray
     draw_notifications
+    # Alt-Tab window switcher (15_alttab.rb): a centered strip of window
+    # thumbnails painted OVER everything while the Alt+Tab chord is held. Drawn
+    # last so it reads as a modal switcher above the windows, menu, tray + HUD.
+    # Self-gates on Compositor::ALTTAB + an open switcher (else it only publishes
+    # the "inactive" probe state).
+    draw_alttab if ALTTAB
     # Publish the focused window's live geometry + the work-area metrics for the
     # snapping probe (test/probe-snapping.mjs reads globalThis.__wasmboxFocusedRect).
     # One cheap JS call per frame, self-gated on SNAPPING so main is unaffected.

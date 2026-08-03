@@ -204,6 +204,10 @@ jobs:
         working-directory: test
         run: node probe-snapping.mjs
 
+      - name: Run headless Alt-Tab switcher probe (centered thumbnail strip + advance highlight + commit focus + cancel)
+        working-directory: test
+        run: node probe-alttab.mjs
+
       - name: Run headless desktop-background probe (widgets Backdrop fill + grid, cached, z-order)
         working-directory: test
         run: node probe-desktop.mjs

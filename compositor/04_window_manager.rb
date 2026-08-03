@@ -768,6 +768,16 @@ class WindowManager
     focus(next_win)         # then raise+focus the next normal window down
   end
 
+  # The Alt-Tab candidate ring: the SAME pool #cycle walks — normal, non-
+  # minimized windows on the ACTIVE workspace (panels, minimized windows and
+  # off-workspace windows excluded) — but ordered MOST-RECENTLY-FOCUSED FIRST.
+  # @stack is bottom-to-top, so the focused window is last; reversing puts it at
+  # the head, which is where the Alt-Tab switcher (05_alttab.rb / 15_alttab.rb)
+  # opens its cursor. Pure WM policy (no JS), so rbtest covers the ordering.
+  def cycle_candidates
+    normal_windows.reject(&:minimized?).select { |w| w.workspace == @active_workspace }.reverse
+  end
+
   # -------------------------------------------------------------------------
   # External-client side: register a freshly-created ExternalWindow and
   # dispatch protocol messages. None of this touches the JS bridge; the wiring

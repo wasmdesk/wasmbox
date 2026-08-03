@@ -1566,5 +1566,92 @@ assert(wsnap.snap_left(nil, SW, SH, RT, RB).nil?, "snap on nil window is a no-op
 tiny = wsnap.spawn("tiny-area")
 assert(wsnap.snap(tiny, :max, 10, 10, 20, 20).nil?, "snap into a non-positive work area is a no-op")
 
+# ---- Alt-Tab switcher: candidate ring ordering (WindowManager) ------------
+# cycle_candidates returns the SAME pool #cycle walks — normal, non-minimized
+# windows on the ACTIVE workspace — but MOST-RECENTLY-FOCUSED FIRST (the head is
+# where the switcher opens its cursor).
+watr = WindowManager.new
+at1 = watr.spawn("at-1")
+at2 = watr.spawn("at-2")
+at3 = watr.spawn("at-3") # spawned last -> focused -> head of the ring
+cands = watr.cycle_candidates
+assert_eq(cands.length, 3, "cycle_candidates lists all 3 normal windows")
+assert(cands[0].equal?(at3), "cycle_candidates[0] is the focused (most-recent) window")
+assert(cands[1].equal?(at2), "cycle_candidates[1] is the next-most-recent")
+assert(cands[2].equal?(at1), "cycle_candidates[2] is the least-recent")
+# Minimized windows are excluded.
+watr.minimize(at2)
+cmin = watr.cycle_candidates
+assert_eq(cmin.length, 2, "cycle_candidates skips a minimized window")
+assert(cmin.none? { |w| w.equal?(at2) }, "the minimized window is not a candidate")
+watr.restore_window(at2)
+# Panels are excluded.
+watr.register_external("dock-at", 480, 28, "panel")
+assert_eq(watr.cycle_candidates.length, 3, "cycle_candidates excludes the panel")
+# Off-workspace windows are excluded.
+watr.set_workspace(2)
+assert_eq(watr.cycle_candidates.length, 0, "cycle_candidates is empty on a fresh workspace")
+watr.set_workspace(1)
+assert_eq(watr.cycle_candidates.length, 3, "cycle_candidates back to 3 on the original workspace")
+
+# ---- AltTab cursor: open / advance / wrap / reverse / select --------------
+# Drive the pure state machine with a real candidate ring from a FRESH WM (the
+# ring above was reordered by the minimize/restore/workspace focus traffic).
+watr2 = WindowManager.new
+bt1 = watr2.spawn("bt-1")
+bt2 = watr2.spawn("bt-2")
+bt3 = watr2.spawn("bt-3") # focused -> head of the ring [bt3, bt2, bt1]
+sw_at = AltTab.new
+assert(!sw_at.active?, "fresh switcher is closed")
+assert_eq(sw_at.count, 0, "closed switcher has no candidates")
+assert(sw_at.selected.nil?, "closed switcher selects nothing")
+assert(sw_at.advance.nil?, "advance on a closed switcher is a no-op")
+# Open parks the cursor on the FIRST (focused) candidate without moving.
+ring = watr2.cycle_candidates # [bt3, bt2, bt1]
+assert(!sw_at.open(ring).nil?, "open over a non-empty ring returns self")
+assert(sw_at.active?, "switcher is up after open")
+assert_eq(sw_at.count, 3, "switcher count = candidate count")
+assert_eq(sw_at.index, 0, "open parks the cursor on the focused window (index 0)")
+assert(sw_at.selected.equal?(bt3), "index 0 selects the focused window")
+# Re-opening while up must NOT reset a walk in progress.
+sw_at.advance
+assert_eq(sw_at.index, 1, "advance moves the cursor forward one step")
+sw_at.open(ring)
+assert_eq(sw_at.index, 1, "re-open while active keeps the current cursor")
+# Advance forward wraps at the end.
+assert_eq(sw_at.advance, 2, "advance -> 2")
+assert(sw_at.selected.equal?(bt1), "index 2 selects the last candidate")
+assert_eq(sw_at.advance, 0, "advance from the last wraps back to 0")
+# Reverse advance wraps at the start.
+assert_eq(sw_at.advance(true), 2, "reverse advance from 0 wraps to the last")
+assert_eq(sw_at.advance(true), 1, "reverse advance -> 1")
+
+# ---- AltTab: commit + cancel ----------------------------------------------
+# Commit returns the selected candidate and closes; a second commit is inert.
+picked = sw_at.commit
+assert(picked.equal?(bt2), "commit returns the selected candidate")
+assert(!sw_at.active?, "switcher is closed after commit")
+assert_eq(sw_at.count, 0, "closed switcher holds no candidates after commit")
+assert(sw_at.commit.nil?, "a second commit after close returns nil")
+# Cancel closes without choosing.
+sw2 = AltTab.new
+sw2.open(watr.cycle_candidates)
+sw2.advance
+assert(sw2.active?, "second switcher is up")
+assert(sw2.cancel.nil?, "cancel returns nil (chose nothing)")
+assert(!sw2.active?, "switcher is closed after cancel")
+# A single-window ring is degenerate but safe: open + advance stay on index 0.
+solo = WindowManager.new
+only = solo.spawn("solo")
+sw3 = AltTab.new
+sw3.open(solo.cycle_candidates)
+assert_eq(sw3.count, 1, "single-window ring has one candidate")
+assert_eq(sw3.advance, 0, "advance on a single-window ring stays on 0 (wraps to self)")
+assert(sw3.commit.equal?(only), "commit on a single-window ring returns that window")
+# Open over an empty ring is refused (stays closed).
+sw4 = AltTab.new
+assert(sw4.open([]).nil?, "open over an empty ring returns nil")
+assert(!sw4.active?, "switcher stays closed on an empty open")
+
 puts "rbtest: ran all pure-WM assertions"
 `
