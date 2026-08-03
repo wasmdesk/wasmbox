@@ -34,22 +34,33 @@ import (
 // position is (VIEW_W - w)/2 + x, (VIEW_H - h) + y (the dock is bottom-center
 // anchored). Cheap; only called when the window set changes.
 func exposeGeometry(state *scene.State) {
-	wins := state.Windows
-	buttons := make([]interface{}, 0, len(wins))
-	for i := range wins {
-		x, y, w, h := state.WindowButtonRect(i)
+	// Read the LAID-OUT rects (magnified when the cursor hovers) so a probe
+	// clicks the button where it is actually painted, magnification included.
+	wr := state.WindowRects()
+	buttons := make([]interface{}, 0, len(wr))
+	for i, r := range wr {
+		w := state.Windows[i]
 		buttons = append(buttons, map[string]interface{}{
-			"id":        wins[i].Id,
-			"title":     wins[i].Title,
-			"minimized": wins[i].Minimized,
-			"focused":   wins[i].Focused,
-			"x":         x, "y": y, "w": w, "h": h,
+			"id":        w.Id,
+			"title":     w.Title,
+			"minimized": w.Minimized,
+			"focused":   w.Focused,
+			"x":         r[0], "y": r[1], "w": r[2], "h": r[3],
+		})
+	}
+	lr := state.LauncherRects()
+	launchers := make([]interface{}, 0, len(lr))
+	for i, r := range lr {
+		launchers = append(launchers, map[string]interface{}{
+			"id": state.Apps[i].Id,
+			"x":  r[0], "y": r[1], "w": r[2], "h": r[3],
 		})
 	}
 	js.Global().Set("__wasmdockGeometry", js.ValueOf(map[string]interface{}{
-		"w":       state.W,
-		"h":       state.H,
-		"buttons": buttons,
+		"w":         state.W,
+		"h":         state.H,
+		"buttons":   buttons,
+		"launchers": launchers,
 	}))
 }
 
@@ -112,15 +123,6 @@ func main() {
 		client.Call("focus", id)
 	}
 
-	// closeWin asks the compositor to close a window the user right-clicked
-	// on its iconbar button. Same effect as clicking the window's title-bar
-	// close box. Fire-and-forget; the compositor drops the message for an
-	// unknown or panel id.
-	closeWin := func(id int) {
-		println("wasmdock: close", id)
-		client.Call("closeWindow", id)
-	}
-
 	// setWorkspace asks the compositor to switch the active workspace to
 	// `index` (1..workspaceCount). Travels over the SDK's MessagePort just
 	// like `launch`; the compositor's WindowManager.handle_client_message
@@ -132,8 +134,10 @@ func main() {
 		client.Call("setWorkspace", index)
 	}
 
-	// Initial paint so the compositor has something to blit immediately.
+	// Initial paint so the compositor has something to blit immediately, plus a
+	// first geometry publish so a probe can read the resting layout.
 	render()
+	exposeGeometry(state)
 
 	cb := js.FuncOf(func(_ js.Value, args []js.Value) any {
 		if len(args) == 0 {
@@ -146,12 +150,25 @@ func main() {
 			x := ev.Get("x").Int()
 			y := ev.Get("y").Int()
 			state.SetCursor(x, y, true)
-			// No hover paint in v0; SetCursor is recorded for a future
-			// highlight pass. Avoid an unconditional re-render on every
-			// mousemove so the worker stays idle while the cursor wanders.
+			// Repaint so the hover magnification follows the cursor. Skipped
+			// when the effect is off so a flat dock stays idle.
+			if state.Magnify.On {
+				render()
+				exposeGeometry(state)
+			}
+		case "mouseleave", "mouseout":
+			// Pointer left the panel — drop magnification back to flat.
+			state.SetCursor(state.CursorX, state.CursorY, false)
+			if state.Magnify.On {
+				render()
+				exposeGeometry(state)
+			}
 		case "mousedown":
 			x := ev.Get("x").Int()
 			y := ev.Get("y").Int()
+			// Keep the cursor recorded so hit-testing reads the SAME magnified
+			// geometry the user is clicking on.
+			state.SetCursor(x, y, true)
 			// Mouse button: 0 = left, 2 = right (matches the W3C DOM
 			// MouseEvent.button). The compositor forwards the raw value via
 			// forward_mouse_to_client; missing field falls back to 0.
@@ -169,18 +186,21 @@ func main() {
 				break
 			}
 			if i := state.HitTest(x, y); i >= 0 {
-				launch(state.Apps[i].Id)
+				if button == 2 {
+					openMenu(client, state.BuildLauncherMenu(i), x)
+				} else {
+					launch(state.Apps[i].Id)
+				}
 				break
 			}
 			if i := state.HitTestWindow(x, y); i >= 0 {
-				id := state.Windows[i].Id
 				if button == 2 {
-					// Right-click on a window button: close the window.
-					closeWin(id)
+					// Right-click on a window button: application context menu.
+					openMenu(client, state.BuildWindowMenu(i), x)
 				} else {
 					// Left-click (or any non-right button): focus + raise
 					// (restoring first if minimized).
-					focusWin(id)
+					focusWin(state.Windows[i].Id)
 				}
 			}
 		case "wheel":
@@ -277,4 +297,141 @@ func main() {
 
 	// Park forever so the Go runtime keeps the FuncOf callback alive.
 	select {}
+}
+
+// hasMethod reports whether the JS value exposes a callable method `name`, so
+// optional SDK methods (beginFrame / openPopup / requestClose) are
+// feature-detected before use — a missing one degrades gracefully.
+func hasMethod(v js.Value, name string) bool {
+	return v.Get(name).Type() == js.TypeFunction
+}
+
+// openMenu opens the dock's right-click application context menu in a child
+// popup surface anchored above the clicked entry, paints it via the pure
+// scene.DockMenu renderer, and routes a click inside it back to a launch /
+// focus / close wire message. The 28px bar is far too short to draw a menu
+// in-surface, so this uses the compositor's existing "popup" role (no
+// compositor change): the compositor grab-dismisses the popup on an outside
+// click, and a selection requests its close. A no-op when the menu is empty or
+// the SDK has no openPopup, so the dock never throws.
+func openMenu(client js.Value, menu scene.DockMenu, anchorX int) {
+	if len(menu.Entries) == 0 || !hasMethod(client, "openPopup") {
+		return
+	}
+	// Anchor the menu above the bar (rel_y negative pops it upward), centred
+	// under the click and clamped to the parent's left edge.
+	relX := anchorX - menu.W/2
+	if relX < 0 {
+		relX = 0
+	}
+	opts := js.Global().Call("Object")
+	opts.Set("title", "dock menu")
+	opts.Set("w", menu.W)
+	opts.Set("h", menu.H)
+	opts.Set("rel_x", relX)
+	opts.Set("rel_y", -menu.H)
+	popup := client.Call("openPopup", opts)
+
+	hover := -1
+	var buf []byte
+	var pw, ph int
+	var pixels js.Value
+
+	paint := func() {
+		if buf == nil {
+			return
+		}
+		menu.MenuRender(buf, pw, ph, hover)
+		if hasMethod(popup, "beginFrame") {
+			popup.Call("beginFrame")
+		}
+		js.CopyBytesToJS(pixels, buf)
+		popup.Call("commit", js.Undefined())
+	}
+
+	var inputCb js.Func
+	popup.Call("onWelcome", js.FuncOf(func(_ js.Value, _ []js.Value) any {
+		pw = popup.Get("w").Int()
+		ph = popup.Get("h").Int()
+		pixels = popup.Get("pixels")
+		buf = make([]byte, 4*pw*ph)
+		paint()
+		exposeMenu(menu, relX, -menu.H) // test hook: publish clickable menu rows
+		return nil
+	}))
+	inputCb = js.FuncOf(func(_ js.Value, args []js.Value) any {
+		if len(args) == 0 {
+			return nil
+		}
+		ev := args[0]
+		switch ev.Get("kind").String() {
+		case "mousemove":
+			if hv := menu.MenuHover(ev.Get("y").Int()); hv != hover {
+				hover = hv
+				paint()
+			}
+		case "mousedown":
+			if idx := menu.MenuHitTest(ev.Get("y").Int()); idx >= 0 {
+				dispatchMenu(client, menu.Entries[idx])
+			}
+			// Dismiss the menu after a click (a selection or a gap click).
+			if hasMethod(popup, "requestClose") {
+				popup.Call("requestClose")
+			}
+		}
+		return nil
+	})
+	popup.Call("onInput", inputCb)
+	popup.Call("onClosed", js.FuncOf(func(js.Value, []js.Value) any {
+		inputCb.Release()
+		js.Global().Set("__wasmdockMenu", js.Null()) // menu gone
+		return nil
+	}))
+}
+
+// exposeMenu publishes the open context menu's clickable rows on a worker
+// global for headless probes: the popup is anchored inside the dock body at
+// (relX, relY), so a probe maps a row to screen the same way it maps a dock
+// button rect, then clicks (x + w/2, y + cy) for a given row label. Cleared to
+// null when the menu closes.
+func exposeMenu(menu scene.DockMenu, relX, relY int) {
+	centers := menu.RowCenters()
+	rows := make([]interface{}, 0, len(menu.Entries))
+	for i, e := range menu.Entries {
+		if e.Separator {
+			continue
+		}
+		rows = append(rows, map[string]interface{}{
+			"label": e.Label, "action": actionName(e.Action), "cy": centers[i],
+		})
+	}
+	js.Global().Set("__wasmdockMenu", js.ValueOf(map[string]interface{}{
+		"rel_x": relX, "rel_y": relY, "w": menu.W, "h": menu.H, "rows": rows,
+	}))
+}
+
+// actionName is the wire-message name a menu action maps to (for the probe hook).
+func actionName(a scene.MenuAction) string {
+	switch a {
+	case scene.ActLaunch:
+		return "launch"
+	case scene.ActFocus:
+		return "focus"
+	case scene.ActClose:
+		return "close"
+	default:
+		return "none"
+	}
+}
+
+// dispatchMenu sends the wire message a chosen menu entry maps to.
+func dispatchMenu(client js.Value, e scene.MenuEntry) {
+	switch e.Action {
+	case scene.ActLaunch:
+		client.Call("launch", e.App)
+	case scene.ActFocus:
+		client.Call("focus", e.Win)
+	case scene.ActClose:
+		client.Call("closeWindow", e.Win)
+	}
 }

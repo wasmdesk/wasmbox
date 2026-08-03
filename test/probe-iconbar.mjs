@@ -10,7 +10,8 @@
 //   1. >=2 window buttons; exactly one is `focused`; the focused button's
 //      top-stroke pixels differ from an unfocused one's (focus is visible).
 //   2. Left-clicking a non-focused window's button makes it the focused one.
-//   3. Right-clicking a window's button removes it (the window closes).
+//   3. Right-clicking a window's button opens its application context menu (a
+//      popup surface); clicking the menu's "Close" row removes the window.
 //
 // Run: node test/probe-iconbar.mjs   (self-serves; bundled chromium)
 
@@ -60,6 +61,22 @@ async function dockGeometry(page) {
     } catch (_) { /* not the dock worker */ }
   }
   return null;
+}
+// Read the dock's open context-menu geometry (null when no menu is open).
+async function dockMenu(page) {
+  for (const worker of page.workers()) {
+    try {
+      const m = await worker.evaluate(() => globalThis.__wasmdockMenu || null);
+      if (m && Array.isArray(m.rows)) return m;
+    } catch (_) { /* not the dock worker */ }
+  }
+  return null;
+}
+// Screen coords of a menu row: the popup is anchored inside the dock body at
+// (menu.rel_x, menu.rel_y), so map it the same way as a dock button rect.
+function menuRowScreen(geo, menu, row) {
+  const dockX = Math.floor((VIEW_W - geo.w) / 2), dockY = VIEW_H - geo.h;
+  return { cx: dockX + menu.rel_x + Math.floor(menu.w / 2), cy: dockY + menu.rel_y + row.cy };
 }
 // Screen coords for a button (dock is bottom-center anchored).
 function btnScreen(geo, btn) {
@@ -132,21 +149,41 @@ try {
     else fail(`expected 1 focused button after the click, got ${nf}`);
   }
 
-  // --- Phase 2: right-click a window's button -> it closes -----------------
+  // --- Phase 2: right-click a window -> context menu -> "Close" closes it ---
   geo = await dockGeometry(page);
   if (geo && geo.buttons.length >= 2) {
     const before = geo.buttons.length;
     const toClose = geo.buttons.find((b) => !b.focused) || geo.buttons[0];
     const s = btnScreen(geo, toClose);
-    console.log(`info right-clicking "${toClose.title}" @(${s.cx},${s.cy}) to close it`);
+    console.log(`info right-clicking "${toClose.title}" @(${s.cx},${s.cy}) to open its context menu`);
     await page.mouse.click(s.cx, s.cy, { button: "right" });
-    await page.waitForTimeout(1200);
-    const g3 = await dockGeometry(page);
-    const stillThere = g3 && g3.buttons.find((b) => b.id === toClose.id);
-    if (g3 && g3.buttons.length === before - 1 && !stillThere) {
-      ok(`right-click closed "${toClose.title}" (${before} -> ${g3.buttons.length} window buttons)`);
+    // Wait for the context-menu popup to open + publish its rows.
+    await page.waitForFunction(
+      () => globalThis.__wasmdockMenu && Array.isArray(globalThis.__wasmdockMenu.rows) && globalThis.__wasmdockMenu.rows.length > 0,
+      { timeout: 4000 },
+    ).catch(() => {});
+    const menu = await dockMenu(page);
+    if (!menu) {
+      fail("right-click did not open a context menu (no __wasmdockMenu)");
     } else {
-      fail(`right-click did not close "${toClose.title}" (${before} -> ${g3 ? g3.buttons.length : "?"}, present=${!!stillThere})`);
+      ok(`right-click opened a context menu with ${menu.rows.length} rows`);
+      const closeRow = menu.rows.find((r) => r.action === "close");
+      if (!closeRow) {
+        fail(`context menu has no Close row (rows: ${menu.rows.map((r) => r.label).join(", ")})`);
+      } else {
+        const geoNow = await dockGeometry(page) || geo;
+        const rs = menuRowScreen(geoNow, menu, closeRow);
+        console.log(`info clicking menu "Close" @(${rs.cx},${rs.cy})`);
+        await page.mouse.click(rs.cx, rs.cy);
+        await page.waitForTimeout(1200);
+        const g3 = await dockGeometry(page);
+        const stillThere = g3 && g3.buttons.find((b) => b.id === toClose.id);
+        if (g3 && g3.buttons.length === before - 1 && !stillThere) {
+          ok(`menu Close closed "${toClose.title}" (${before} -> ${g3.buttons.length} window buttons)`);
+        } else {
+          fail(`menu Close did not close "${toClose.title}" (${before} -> ${g3 ? g3.buttons.length : "?"}, present=${!!stillThere})`);
+        }
+      }
     }
   } else {
     fail("not enough window buttons to test close");
