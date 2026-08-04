@@ -190,6 +190,16 @@ class Compositor
       mark_dirty
       remove_applet(e.get("detail").to_s)
     end
+    # Calendar-nav test hook: __wasmboxCalendarNav("prev"/"next")
+    # (compositor.worker.js) dispatches here so test/probe-applets.mjs can step
+    # the calendar applet's month without pixel-hunting the widget's header
+    # arrows. Drives the SAME calendar_nav (14_applets.rb) the header-arrow click
+    # path does. Inert when Compositor::APPLETS is off or no calendar tile is
+    # shown, so registering it unconditionally keeps main shippable.
+    @bus.on("wasmbox-calendar-nav") do |e|
+      mark_dirty
+      calendar_nav(e.get("detail").to_s)
+    end
     # Wallpaper test hook: __wasmboxSetWallpaper(name) (compositor.worker.js)
     # dispatches a `set_wallpaper` message here so a probe can switch the desktop
     # background without a client. Routed through the FULL decode -> handle ->
@@ -597,15 +607,19 @@ class Compositor
     # popup placement (without them a popup hello would land at (0,0)).
     # `lock_aspect` rides on `hello` (optional intrinsic ratio); `ratio` rides
     # on `set_lock_aspect` (post-handshake declaration).
-    # `body`/`kind`/`icon`/`timeout`/`action_label`/`action` ride on `notify`
-    # (a desktop notification: headline + detail line, severity, optional base64
-    # icon, seconds-until-dismiss, and a single click-to-act button). Fields NOT
-    # listed here arrive nil, so a new notify field must be added to this list.
+    # `body`/`kind`/`icon`/`icon_w`/`icon_h`/`timeout`/`action_label`/`action`/
+    # `actions` ride on `notify` (a desktop notification: headline + detail line,
+    # severity, an optional leading icon — a stock glyph NAME, or base64 RGBA
+    # pixels at `icon_w`x`icon_h` — seconds-until-dismiss, a legacy single
+    # click-to-act button, and `actions`: a compact "Label|cb;Label2|cb2" scalar
+    # for several buttons). Fields NOT listed here arrive nil, so a new notify
+    # field MUST be added to this list (the go-widgets v0.86 icon/multiline/
+    # multi-action refinements added `icon_w`/`icon_h`/`actions`).
     # `id`/`glyph`/`tooltip` ride on `tray_add`/`tray_remove`/`tray_update` (a
     # status icon: its caller-chosen id, a stock glyph name OR a base64 RGBA
     # `icon` at `w`x`h`, and the hover tooltip).
     %w[window_id w h stride title role app index workspace name parent rel_x rel_y lock_aspect ratio
-       body kind icon timeout action_label action id glyph tooltip].each do |k|
+       body kind icon icon_w icon_h timeout action_label action actions id glyph tooltip].each do |k|
       v = data.get(k)
       h[k.to_sym] = v unless v.nil?
     end

@@ -1189,6 +1189,62 @@ assert(!nstick.expired?(999999), "sticky never expires")
 nact = Notification.new(5, { title: "x", action_label: "Undo", action: "undo" }, 0)
 assert(nact.has_action?, "action label -> has_action")
 
+# ---- Notification v0.86 refinements: icon slot, multi-line body, multi-action -
+# Icon: a stock glyph name (no dims) vs. base64 pixel data (positive dims) vs.
+# none. glyph_icon? recognizes the ten stock names; image_icon? needs a size.
+assert(Notification.glyph_icon?("open"), "'open' is a stock glyph name")
+assert(Notification.glyph_icon?("settings"), "'settings' is a stock glyph name")
+assert(!Notification.glyph_icon?("nope"), "unknown icon name is not a glyph")
+assert(!Notification.glyph_icon?(""), "empty icon name is not a glyph")
+nicon_g = Notification.new(10, { title: "t", icon: "open" }, 0)
+assert(nicon_g.has_icon?, "a glyph-name icon counts as an icon")
+assert(!nicon_g.image_icon?, "a glyph-name icon (no dims) is not an image icon")
+assert_eq(nicon_g.icon, "open", "glyph icon name stored")
+assert_eq(nicon_g.icon_w, 0, "glyph icon has zero width")
+nicon_p = Notification.new(11, { title: "t", icon: "QUJD", icon_w: 2, icon_h: 3 }, 0)
+assert(nicon_p.has_icon?, "a pixel icon counts as an icon")
+assert(nicon_p.image_icon?, "a pixel icon (positive dims) is an image icon")
+assert_eq(nicon_p.icon_w, 2, "pixel icon width stored")
+assert_eq(nicon_p.icon_h, 3, "pixel icon height stored")
+nicon_n = Notification.new(12, { title: "t" }, 0)
+assert(!nicon_n.has_icon?, "no icon field -> no icon")
+assert(!nicon_n.image_icon?, "no icon field -> not an image icon")
+
+# Multi-line body: title + body -> two lines; a single half -> one line.
+nlines = Notification.new(13, { title: "Build done", body: "3 warnings" }, 0)
+assert_eq(nlines.lines, ["Build done", "3 warnings"], "title over body -> two lines")
+assert_eq(Notification.new(14, { title: "only" }, 0).lines, ["only"], "title-only -> one line")
+assert_eq(Notification.new(15, { body: "hey" }, 0).lines, ["hey"], "body-only -> one line")
+
+# Multi-action parsing: "Label|cb;Label2|cb2" scalar -> ordered [{label, action}].
+acts = Notification.parse_actions("Open|do_open;Dismiss|do_dismiss")
+assert_eq(acts.length, 2, "two actions parsed from the scalar")
+assert_eq(acts[0][:label], "Open", "action 0 label")
+assert_eq(acts[0][:action], "do_open", "action 0 callback")
+assert_eq(acts[1][:label], "Dismiss", "action 1 label")
+assert_eq(acts[1][:action], "do_dismiss", "action 1 callback")
+# A field with no "|callback" carries an empty action; a blank label is skipped.
+acts2 = Notification.parse_actions("Solo;|orphan;Two|cb")
+assert_eq(acts2.length, 2, "blank-label field skipped")
+assert_eq(acts2[0][:label], "Solo", "label-only field kept")
+assert_eq(acts2[0][:action], "", "label-only field has an empty callback")
+assert_eq(acts2[1][:label], "Two", "trailing field parsed after the skipped one")
+assert_eq(Notification.parse_actions(nil), [], "nil actions -> []")
+assert_eq(Notification.parse_actions(""), [], "empty actions -> []")
+# The #actions accessor: parsed list wins; else the legacy single action folds in;
+# else [].
+nmulti = Notification.new(16, { title: "t", actions: "A|a;B|b" }, 0)
+assert_eq(nmulti.actions.length, 2, "parsed actions surface via #actions")
+nlegacy = Notification.new(17, { title: "t", action_label: "Undo", action: "undo" }, 0)
+assert_eq(nlegacy.actions.length, 1, "legacy single action folds into #actions")
+assert_eq(nlegacy.actions[0][:label], "Undo", "folded legacy action label")
+assert_eq(nlegacy.actions[0][:action], "undo", "folded legacy action callback")
+assert_eq(Notification.new(18, { title: "t" }, 0).actions, [], "no actions -> []")
+# A multi-action post supersedes the legacy pair when both are present.
+nboth = Notification.new(19, { title: "t", action_label: "Old", action: "old", actions: "New|new" }, 0)
+assert_eq(nboth.actions.length, 1, "multi-action list supersedes the legacy pair")
+assert_eq(nboth.actions[0][:label], "New", "multi-action wins over the legacy label")
+
 # NotificationStack: post + stack order + top-right placement.
 ns = NotificationStack.new
 assert(ns.empty?, "fresh stack is empty")
@@ -1201,7 +1257,7 @@ assert_eq(lay[0][:notif].id, a.id, "first posted is the top row")
 assert_eq(lay[1][:notif].id, b.id, "second posted stacks below the first")
 assert_eq(lay[0][:x], 1000 - 300 - 16, "toast x is top-right (screen_w - w - margin)")
 assert_eq(lay[0][:y], 16, "row 0 y == margin")
-assert_eq(lay[1][:y], 16 + 44 + 10, "row 1 y == margin + h + gap")
+assert_eq(lay[1][:y], 16 + NotificationStack::TOAST_H + 10, "row 1 y == margin + h + gap")
 
 # Expiry drops A (deadline 1000); B survives and reflows up to row 0.
 dropped = ns.tick(1000)
@@ -1237,7 +1293,7 @@ assert(nh.at(1000 - 316 + 5, 16 + 5, 1000).equal?(t1), "click inside a toast hit
 assert_eq(nh.at(10, 10, 1000), nil, "click far from any toast misses")
 assert_eq(nh.at(1000 - 316 + 5, 400, 1000), nil, "click below the column misses")
 t2 = nh.post({ title: "hit2", timeout_ms: 9999 }, 0)
-assert(nh.at(1000 - 316 + 5, 16 + 44 + 10 + 5, 1000).equal?(t2), "click in row 1 hits the second toast")
+assert(nh.at(1000 - 316 + 5, 16 + NotificationStack::TOAST_H + 10 + 5, 1000).equal?(t2), "click in row 1 hits the second toast")
 
 # WindowManager notify wire arm: a title OR a body yields :notify; empty drops.
 wmn = WindowManager.new
@@ -1461,6 +1517,62 @@ assert(ab7.empty?, "parse(nil) yields an empty board")
 ab8 = AppletBoard.new
 ab8.parse("clock:99999,99999", 1280, 800)
 assert_eq(ab8.find("clock").x, 1280 - Applet::SIZE["clock"][0], "parse clamps a saved x onto the desktop")
+
+# ---- CalendarView: the calendar applet's month-nav mirror (05_applets.rb) --
+# Construction clamps the month into 1..12 and the day into the month's range.
+cv = CalendarView.new(2026, 8, 15)
+assert_eq(cv.year, 2026, "calendar view year")
+assert_eq(cv.month, 8, "calendar view month")
+assert_eq(cv.selected, 15, "calendar view selected day")
+assert_eq(cv.sig, "2026-8-15", "sig encodes year-month-selected")
+assert_eq(CalendarView.new(2026, 0, 1).month, 1, "month clamped up to 1")
+assert_eq(CalendarView.new(2026, 13, 1).month, 12, "month clamped down to 12")
+assert_eq(CalendarView.new(2026, 1, 0).selected, 1, "selected clamped up to 1")
+assert_eq(CalendarView.new(2026, 1, 99).selected, 31, "selected clamped to days_in_month (Jan=31)")
+
+# days_in_month incl. leap February.
+assert_eq(CalendarView.new(2026, 2, 1).days_in_month, 28, "Feb 2026 has 28 days")
+assert_eq(CalendarView.new(2024, 2, 1).days_in_month, 29, "Feb 2024 (leap) has 29 days")
+assert_eq(CalendarView.new(2000, 2, 1).days_in_month, 29, "Feb 2000 (div-400 leap) has 29 days")
+assert_eq(CalendarView.new(1900, 2, 1).days_in_month, 28, "Feb 1900 (div-100 non-leap) has 28 days")
+assert(CalendarView.leap?(2024), "2024 is leap")
+assert(!CalendarView.leap?(2026), "2026 is not leap")
+assert(!CalendarView.leap?(1900), "1900 is not leap (century, not div-400)")
+assert(CalendarView.leap?(2000), "2000 is leap (div-400)")
+
+# next_month advances, wraps December -> next January, and re-clamps the day.
+cvn = CalendarView.new(2026, 11, 30)
+cvn.next_month
+assert_eq(cvn.month, 12, "next_month Nov -> Dec")
+assert_eq(cvn.year, 2026, "next_month within the year keeps the year")
+cvn.next_month
+assert_eq(cvn.month, 1, "next_month Dec wraps to Jan")
+assert_eq(cvn.year, 2027, "next_month Dec bumps the year")
+# Day re-clamp on a shrink: 31 Jan -> Feb clamps to 28 (2027 non-leap).
+cvc = CalendarView.new(2027, 1, 31)
+cvc.next_month
+assert_eq(cvc.month, 2, "next_month Jan -> Feb")
+assert_eq(cvc.selected, 28, "selected 31 re-clamped to 28 in Feb 2027")
+
+# prev_month steps back, wraps January -> previous December.
+cvp = CalendarView.new(2026, 2, 15)
+cvp.prev_month
+assert_eq(cvp.month, 1, "prev_month Feb -> Jan")
+assert_eq(cvp.year, 2026, "prev_month within the year keeps the year")
+cvp.prev_month
+assert_eq(cvp.month, 12, "prev_month Jan wraps to Dec")
+assert_eq(cvp.year, 2025, "prev_month Jan drops the year")
+
+# set_selected clamps into the current month.
+cvs = CalendarView.new(2026, 4, 10) # April = 30 days
+assert_eq(cvs.set_selected(31).selected, 30, "set_selected clamps 31 -> 30 in April")
+assert_eq(cvs.set_selected(-5).selected, 1, "set_selected clamps below 1 -> 1")
+assert_eq(cvs.set_selected(12).selected, 12, "in-range set_selected keeps the day")
+# A month navigation moves the sig (drives the applet dirty-gate) — and only then.
+cvsig = CalendarView.new(2026, 6, 5)
+before = cvsig.sig
+cvsig.next_month
+assert(cvsig.sig != before, "sig changes after a month navigation")
 
 # ---- RootMenu Applets submenu (05_menu.rb) --------------------------------
 # build_applets: one entry per kind, in KINDS order, active marker on shown.
@@ -1773,6 +1885,18 @@ assert_eq(picked[:id], "terminal", "commit returns the Terminal entry")
 assert(!spc.active?, "palette is closed after commit")
 assert_eq(spc.count, 0, "closed palette holds no results after commit")
 assert(spc.commit.nil?, "a second commit after close returns nil")
+# Command routing: the moved selection is exactly what commit resolves + launches.
+# (16_spotlight.rb drives the bound command_palette, but the pure model pins the
+# open -> filter -> move -> commit contract the launcher routes on.)
+spr = Spotlight.new
+spr.open(sl_apps)
+routed0 = spr.selected
+spr.move(1) # step to the second result
+routed1 = spr.selected
+assert(!routed1.equal?(routed0), "move changes the routed selection")
+picked_routed = spr.commit
+assert(picked_routed.equal?(routed1), "commit routes to the moved selection")
+assert(wsl.launchable?(picked_routed[:id]), "the routed commit id is launchable")
 # Cancel closes without choosing.
 spk = Spotlight.new
 spk.open(sl_apps)

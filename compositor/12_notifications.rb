@@ -64,6 +64,9 @@ class Compositor
       body:         body,
       kind:         msg[:kind],
       icon:         msg[:icon],
+      icon_w:       msg[:icon_w],
+      icon_h:       msg[:icon_h],
+      actions:      msg[:actions],
       action_label: msg[:action_label].to_s,
       action:       msg[:action],
       worker:       worker,
@@ -116,14 +119,36 @@ class Compositor
     end
   end
 
-  # Build one toast's RGBA buffer (base64) via the go-widgets DE overlay set. The
-  # Toast paints only when Visible, so we flip it on before Render; Render sizes
-  # the widget to the whole (w, h) buffer, so the Kind-coloured pill fills it. The
-  # action label (when present) is passed so the widget paints its button; the
-  # click/fire is handled Ruby-side (see dismiss_notification), so the widget's
-  # own action callback is left empty.
+  # Build one toast's RGBA buffer (base64) via the go-widgets v0.86 DE overlay
+  # set. The Toast paints only when Visible, so we flip it on before Render;
+  # Render sizes the widget to the whole (w, h) buffer, so the Kind-coloured pill
+  # fills it. Beyond the base pill we layer the v0.86 refinements:
+  #   * set_toast_icon — a leading stock glyph (icon_w/icon_h zero) or a base64
+  #     RGBA image (positive icon_w x icon_h), drawn left of the text.
+  #   * set_toast_lines — a bold-reading title line over the body line when the
+  #     post carries both (a single line is left as the plain Text so a
+  #     title-only / body-only pill is byte-unchanged from the legacy look).
+  #   * set_toast_actions — one button per parsed action (or the folded-in legacy
+  #     single action) along the pill's right edge.
+  # The buttons' own widget callbacks are left to fire nothing here: a click on a
+  # toast is hit-tested + dispatched Ruby-side (dismiss_notification), so the
+  # compositor stays the authority on the toast lifecycle.
   def render_toast(n, w, h)
-    handle = Widgets.toast(n.text, n.kind, n.action_label, "")
+    handle = Widgets.toast(n.text, n.kind, "", "")
+    if n.has_icon?
+      if n.image_icon?
+        Widgets.set_toast_icon(handle, n.icon, n.icon_w, n.icon_h)
+      else
+        Widgets.set_toast_icon(handle, n.icon.to_s, 0, 0)
+      end
+    end
+    ls = n.lines
+    Widgets.set_toast_lines(handle, ls) if ls.length > 1
+    acts = n.actions
+    unless acts.empty?
+      Widgets.set_toast_actions(handle,
+        acts.map { |a| { "label" => a[:label].to_s, "callback" => a[:action].to_s } })
+    end
     Widgets.set_visible(handle, true)
     img = Widgets.render(handle, w, h)
     Base64.strict_encode64(img["pixels"])
@@ -164,14 +189,19 @@ class Compositor
 end
 
 # ---------------------------------------------------------------------------
-# go-ruby-widgets gaps hit while wiring this (for the toolkit backlog):
-#   * Toast has no ICON slot — a `notify` icon (base64 RGBA) is accepted on the
-#     wire + stored on the model but cannot be painted into the pill yet. Add an
-#     optional leading icon to toolkit.Toast (like Badge's fill) to render it.
-#   * Toast is SINGLE-LINE — title + body are joined into one "title — body"
-#     line. A two-line pill (bold title over a dimmer body) would read as a
-#     proper desktop notification; the toolkit Toast draws one Text run only.
-#   * Multi-ACTION is not modelled — toolkit.Toast carries one ActionLabel/Action
-#     pair, so the wire exposes a single action_label/action (the SDK folds
-#     opts.actions[0] into it). A future notification center wants N actions.
+# go-ruby-widgets v0.86 CLOSED the three gaps this file used to carry — the
+# Toast now paints a leading icon, a multi-line body and several action buttons,
+# all wired above:
+#   * ICON slot   — Widgets.set_toast_icon(handle, glyphOrPixels, w, h): a stock
+#                   glyph (new/open/save/cut/copy/paste/undo/redo/search/settings)
+#                   or a base64 RGBA image drawn left of the text.
+#   * MULTI-LINE  — Widgets.set_toast_lines(handle, [title, body]): the title
+#                   over the body instead of one joined "title — body" run.
+#   * MULTI-ACTION— Widgets.set_toast_actions(handle, [{label,callback}, ...]):
+#                   N right-edge buttons, superseding the single ActionLabel.
+# Remaining gap (a future notification center): a click on a multi-action pill is
+# still dismiss-only compositor-side (dismiss_notification fires the legacy first
+# action back to the client); per-BUTTON click routing would need the toolkit to
+# expose each button's rect (or a host HitTest) so on_mousedown can fire exactly
+# the button the pointer hit rather than the first.
 # ---------------------------------------------------------------------------
