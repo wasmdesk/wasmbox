@@ -188,7 +188,7 @@ tasks:
       - bridge.go
       - compositor/*.rb
     cmds:
-      - go build -o wasmbox.wasm .
+      - go build -trimpath -ldflags '-s -w' -o wasmbox.wasm .
       - cp "$(go env GOROOT)/lib/wasm/wasm_exec.js" ./wasm_exec.js 2>/dev/null || cp "$(go env GOROOT)/misc/wasm/wasm_exec.js" ./wasm_exec.js
     generates:
       - wasmbox.wasm

@@ -3,7 +3,7 @@ module github.com/wasmdesk/wasmbox
 go 1.26.4
 
 require (
-	github.com/go-embedded-ruby/ruby v0.0.0-20260803223653-55becae43cca
+	github.com/go-embedded-ruby/ruby v0.0.0-20260804104746-be7db35276eb
 	github.com/go-opentype/fonts v0.4.2
 	github.com/go-ruby-parser/parser v0.1.3
 	github.com/go-widgets/painter v0.2.0
