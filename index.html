@@ -37,6 +37,31 @@
   #legend li { margin: .12rem 0; }
   #legend .foot { margin-top: .5rem; color: #5b6072; }
   #legend a { color: #ef4444; }
+  /* Boot splash: a determinate progress overlay shown from the very first
+     paint (inline markup, no external fetch to render) until the compositor
+     has presented its first frame. It is a SEPARATE element from #status --
+     #status stays the error surface + render-test sentinel; the splash is
+     physically removed from the DOM on ready. Same palette/typography as the
+     rest of the page so it reads as one product. */
+  #boot-splash { position: fixed; inset: 0; z-index: 100; display: grid;
+    place-items: center; background: #0b0d12; color: #e6e7ee;
+    transition: opacity .25s ease; }
+  #boot-splash .box { width: min(22rem, 78vw); text-align: center; }
+  #boot-splash h1 { font-size: 1rem; margin: 0 0 1.15rem; color: #ef4444;
+    letter-spacing: .02em; font-weight: 600; }
+  #boot-splash .track { position: relative; height: 8px; border-radius: 999px;
+    background: #1d1f29; border: 1px solid #3a3d4a; overflow: hidden; }
+  #boot-splash .fill { height: 100%; width: 0%; border-radius: 999px;
+    background: linear-gradient(90deg, #ef4444, #f87171);
+    transition: width .18s ease; }
+  /* Indeterminate fallback (no Content-Length): a CSS-animated sliver. Pure
+     CSS so nothing keeps a JS timer/rAF alive; when the splash node is removed
+     on ready the animation stops with it. */
+  #boot-splash.indeterminate .fill { width: 38% !important;
+    animation: bootslide 1.15s ease-in-out infinite; }
+  @keyframes bootslide { 0% { margin-left: -38%; } 100% { margin-left: 100%; } }
+  #boot-splash .label { margin-top: .85rem; color: #9aa0b4; font-size: .82rem;
+    min-height: 1.2em; }
 </style>
 </head>
 <body>
@@ -61,7 +86,27 @@
     directly via postMessage + SharedArrayBuffer.</div>
 </aside>
 
-<div id="status"><div>Loading the WebAssembly compositor worker…</div></div>
+<!-- Error surface + headless-render sentinel. Hidden during a normal boot
+     (the boot splash below is what the user sees); fail() unhides it to show
+     a Ruby/OffscreenCanvas error. Kept as a distinct element so removing the
+     splash on ready does not disturb it. -->
+<div id="status" hidden><div>Loading the WebAssembly compositor worker…</div></div>
+
+<!-- Determinate boot splash. Rendered inline so it is visible on the very
+     first paint (no external fetch needed). The worker streams staged boot
+     progress; the script below drives the bar + label, then fades and REMOVES
+     this node once the first compositor frame has been presented. -->
+<div id="boot-splash">
+  <div class="box">
+    <h1>rbgo compositor</h1>
+    <div class="track" id="boot-bar" role="progressbar"
+         aria-label="Loading the desktop"
+         aria-valuemin="0" aria-valuemax="100" aria-valuenow="0">
+      <div class="fill" id="boot-fill"></div>
+    </div>
+    <div class="label" id="boot-label">Téléchargement…</div>
+  </div>
+</div>
 
 <script src="bridge.js"></script>
 <script src="boot-config.js"></script>
@@ -84,6 +129,100 @@ function fail(msg) {
   statusEl.innerHTML = '<div class="err">' + msg + '</div>';
   statusEl.hidden = false;
   globalThis.wasmboxError = msg;
+}
+
+// --- boot splash ----------------------------------------------------------
+// A determinate progress overlay driven by staged {type:"boot"} messages the
+// compositor worker posts as it downloads + instantiates the wasm, boots the
+// Ruby runtime, and presents its first frame. The bar maps:
+//   download    -> 0..70 % (bytes-downloaded / Content-Length)
+//   instantiate -> 80 %
+//   runtime     -> 92 %
+//   ready        -> 100 %, then fade over ~250ms and remove the node.
+// globalThis.wasmboxReady is intentionally set only once the splash has been
+// removed, so every reader (render.mjs et al.) observes a clean desktop.
+const splashEl    = document.getElementById("boot-splash");
+const splashBar   = document.getElementById("boot-bar");
+const splashFill  = document.getElementById("boot-fill");
+const splashLabel = document.getElementById("boot-label");
+
+const BOOT_LABELS = {
+  download:    "Téléchargement…",
+  instantiate: "Initialisation…",
+  runtime:     "Démarrage du bureau…",
+  ready:       "Prêt",
+};
+
+// Test-observable boot state, read at DOM precision by test/probe-boot-splash.
+// Mutated in place -- no per-frame allocation.
+const bootState = { value: 0, stage: "download", stages: [], done: false };
+globalThis.__wasmboxBoot = bootState;
+
+let bootFinished = false;
+let bootFallbackTimer = 0;
+
+function bootSetValue(pct) {
+  pct = Math.max(0, Math.min(100, pct));
+  if (pct < bootState.value) return;               // bar never regresses
+  bootState.value = pct;
+  if (splashFill) splashFill.style.width = pct + "%";
+  if (splashBar)  splashBar.setAttribute("aria-valuenow", String(Math.round(pct)));
+}
+
+function bootStage(stage, m) {
+  if (!splashEl || bootFinished) return;
+  if (bootState.stages[bootState.stages.length - 1] !== stage) {
+    bootState.stages.push(stage);                   // ordered, de-duplicated
+  }
+  bootState.stage = stage;
+  if (BOOT_LABELS[stage] && splashLabel) splashLabel.textContent = BOOT_LABELS[stage];
+  switch (stage) {
+    case "download": {
+      const total = (m && m.total | 0) || 0;
+      if (total > 0) {
+        splashEl.classList.remove("indeterminate");
+        bootSetValue(((m.loaded | 0) / total) * 70);
+      } else {
+        // Content-Length unknown -> indeterminate animated bar; the staged
+        // labels + the final ready->fade still run.
+        splashEl.classList.add("indeterminate");
+      }
+      return;
+    }
+    case "instantiate":
+      splashEl.classList.remove("indeterminate");
+      bootSetValue(80);
+      return;
+    case "runtime":
+      splashEl.classList.remove("indeterminate");
+      bootSetValue(92);
+      return;
+    case "ready":
+      splashEl.classList.remove("indeterminate");
+      bootSetValue(100);
+      bootFinish();
+      return;
+  }
+}
+
+// Fade the splash out over ~250ms then remove it. The single one-shot timeout
+// is the only thing scheduled -- no rAF, no interval; the node (and its CSS
+// animation, if any) is gone afterwards, so there is no post-boot CPU cost.
+function bootFinish() {
+  if (bootFinished) return;
+  bootFinished = true;
+  if (bootFallbackTimer) { clearTimeout(bootFallbackTimer); bootFallbackTimer = 0; }
+  if (splashEl && splashEl.parentNode) {
+    splashEl.style.opacity = "0";
+    setTimeout(() => {
+      if (splashEl.parentNode) splashEl.parentNode.removeChild(splashEl);
+      bootState.done = true;
+      globalThis.wasmboxReady = true;
+    }, 260);
+  } else {
+    bootState.done = true;
+    globalThis.wasmboxReady = true;
+  }
 }
 
 // Match the canvas backing store to the viewport BEFORE transferControlToOff-
@@ -136,9 +275,20 @@ worker.addEventListener("message", (ev) => {
   const m = ev.data;
   if (!m || typeof m.type !== "string") return;
   switch (m.type) {
+    case "boot":
+      // Staged boot progress (download / instantiate / runtime / ready) posted
+      // by compositor.worker.js. Drives the splash bar + label.
+      bootStage(m.stage, m);
+      return;
     case B.C2M_READY:
+      // The Ruby runtime is live. The splash is torn down on the first PRESENTED
+      // frame (the worker's {stage:"ready"} message), not here -- but arm a
+      // safety net so a missing first-frame signal can never wedge the splash
+      // over the desktop. wasmboxReady is set from bootFinish() once removed.
       statusEl.hidden = true;
-      globalThis.wasmboxReady = true;
+      if (!bootFinished && !bootFallbackTimer) {
+        bootFallbackTimer = setTimeout(bootFinish, 4000);
+      }
       return;
     case B.C2M_ERROR:
       fail("Ruby error while starting the compositor:<br><pre>" + m.message + "</pre>");

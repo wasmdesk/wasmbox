@@ -102,7 +102,13 @@ func TestWorkerLoadsCompositorWasm(t *testing.T) {
 	for _, want := range []string{
 		"wasm_exec.js",
 		"wasmbox.wasm",
-		"WebAssembly.instantiateStreaming",
+		// The worker loads wasm through a progress-reporting streamed fetch
+		// (Content-Length + ReadableStream) so the boot splash can show a
+		// determinate bar, then compiles via WebAssembly.instantiate. This
+		// replaced instantiateStreaming, which gives no byte-level progress.
+		"WebAssembly.instantiate",
+		"getReader",
+		"Content-Length",
 		"new Go(",
 	} {
 		if !strings.Contains(worker, want) {

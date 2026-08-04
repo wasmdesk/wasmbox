@@ -365,6 +365,12 @@ globalThis.__wasmboxFrameStats = function (reset) {
   return snap;
 };
 
+// Set once the first compositor render callback has run to completion -- i.e.
+// the first frame has actually been blitted onto the (transferred) Offscreen
+// canvas. We detect "first presented frame" entirely worker-side here so the
+// splash can hit 100% on a real present, not merely on go.run returning.
+let firstFramePresented = false;
+
 globalThis.requestAnimationFrame = function (cb) {
   const t = performance.now();
   return setTimeout(() => {
@@ -375,6 +381,11 @@ globalThis.requestAnimationFrame = function (cb) {
     s.frames++;
     s.frameMsSum += dt;
     if (dt > s.frameMsMax) s.frameMsMax = dt;
+    if (!firstFramePresented) {
+      firstFramePresented = true;
+      // Boot stage 5/5: the desktop is on screen. Main fades + removes splash.
+      self.postMessage({ type: "boot", stage: "ready" });
+    }
   }, 16);
 };
 globalThis.cancelAnimationFrame = function (id) { clearTimeout(id); };
@@ -1410,6 +1421,44 @@ function dispatchDomEvent(m) {
 // sidecar and the main thread relays dom_event messages that drive it.
 const canvasBus = new FakeEventTarget();
 
+// Fetch `url` while reporting byte-level download progress to the main thread,
+// then compile + instantiate it. Posts:
+//   {type:"boot", stage:"download", loaded, total}  as bytes stream in
+//   {type:"boot", stage:"instantiate"}              before WebAssembly.instantiate
+// If Content-Length is absent (total=0) the main thread shows an indeterminate
+// bar; we still stream + report loaded so the labels/animation advance. Falls
+// back to a buffered arrayBuffer() read when the body is not a ReadableStream.
+async function instantiateWithProgress(url, importObject) {
+  const resp = await fetch(url);
+  if (!resp.ok) throw new Error("fetch " + url + " -> HTTP " + resp.status);
+  const total = parseInt(resp.headers.get("Content-Length") || "0", 10) || 0;
+
+  let bytes;
+  if (resp.body && typeof resp.body.getReader === "function") {
+    const reader = resp.body.getReader();
+    const chunks = [];
+    let loaded = 0;
+    for (;;) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      chunks.push(value);
+      loaded += value.length;
+      self.postMessage({ type: "boot", stage: "download", loaded: loaded, total: total });
+    }
+    bytes = new Uint8Array(loaded);
+    let off = 0;
+    for (const c of chunks) { bytes.set(c, off); off += c.length; }
+  } else {
+    // No streaming body available -- one buffered read, single progress tick.
+    bytes = new Uint8Array(await resp.arrayBuffer());
+    self.postMessage({ type: "boot", stage: "download", loaded: bytes.length, total: total || bytes.length });
+  }
+
+  // Boot stage 3/5: bytes are in, compiling + instantiating the module.
+  self.postMessage({ type: "boot", stage: "instantiate" });
+  return WebAssembly.instantiate(bytes, importObject);
+}
+
 async function bootWasm() {
   if (!offscreenScreen) {
     self.postMessage({ type: B.C2M_ERROR, message: "boot without OffscreenCanvas" });
@@ -1423,11 +1472,18 @@ async function bootWasm() {
   };
   try {
     const go = new Go();
-    const wasm = await WebAssembly.instantiateStreaming(
-      fetch("./wasmbox.wasm"), go.importObject);
+    // Stream the wasm so the boot splash shows real download progress. We read
+    // Content-Length + the ReadableStream to compute bytes-downloaded / total
+    // and post staged {type:"boot"} messages to the main thread. This replaces
+    // instantiateStreaming (which gives no byte-level progress).
+    const wasm = await instantiateWithProgress("./wasmbox.wasm", go.importObject);
+    // Boot stage 4/5: the Ruby runtime + compositor are about to boot inside
+    // main(). Posted BEFORE go.run because go.run runs main() synchronously.
+    self.postMessage({ type: "boot", stage: "runtime" });
     go.run(wasm.instance);
     // Compositor.attach_to_canvas + comp.start ran synchronously inside main()
-    // before we get here; signal main that the worker is live.
+    // before we get here; signal main that the worker is live. (The splash is
+    // torn down on the first PRESENTED frame -- see the rAF wrapper above.)
     self.postMessage({ type: B.C2M_READY });
     // Auto-spawn the same demo clients as the old index.html did, so a page
     // load still ends with a populated desktop.
