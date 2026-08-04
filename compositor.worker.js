@@ -946,6 +946,24 @@ globalThis.__wasmboxAppletRemove = function (kind) {
   return true;
 };
 
+// `__wasmboxCalendarNav(dir)` -- TEST HOOK. Steps the desktop CALENDAR applet
+// one month back ("prev") or forward ("next") by dispatching on the Ruby event
+// bus, exactly like the other applet hooks. Drives the SAME calendar_nav
+// (compositor/14_applets.rb) the tile's header-arrow click path uses, so
+// test/probe-applets.mjs can assert the grid changes on navigation without
+// pixel-hunting the widget's own header arrows. Inert when Compositor::APPLETS
+// is off or no calendar tile is shown.
+globalThis.__wasmboxCalendarNav = function (dir) {
+  const detail = String(dir);
+  function dispatch() {
+    const bus = fakeDocument.getElementById("__wasmbox_bus");
+    if (!bus) { setTimeout(dispatch, 16); return; }
+    bus.dispatchEvent(new CustomEvent("wasmbox-calendar-nav", { detail: detail }));
+  }
+  dispatch();
+  return true;
+};
+
 // --- window snapping (test/probe-snapping.mjs) ----------------------------
 
 // `wasmboxPublishFocusedRect(...)` -- called by the Ruby compositor once per

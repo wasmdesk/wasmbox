@@ -43,7 +43,7 @@ const VIEW_H = 800;
 // / TOAST_MARGIN (compositor/05_notifications.rb). Row 0 is the top-right pill;
 // row 1 stacks TOAST_H + TOAST_GAP below it.
 const TW = 300;
-const TH = 44;
+const TH = 64; // MUST match NotificationStack::TOAST_H (bumped for icon/2-line/buttons)
 const GAP = 10;
 const MARGIN = 16;
 const ROW_X = VIEW_W - TW - MARGIN;
@@ -124,6 +124,76 @@ function brightCount(png, floor) {
     if (png.data[i] + png.data[i + 1] + png.data[i + 2] > floor) n++;
   }
   return n;
+}
+
+// --- structural helpers for the v0.86 rich-toast assertions ------------------
+// The pill body is a solid Kind colour; the icon, the two text lines and the
+// action-button dividers all DIFFER from that fill. So we sample the fill once
+// (a content-free corner) and count "ink" as any pixel far from it — which lets
+// us measure the text's vertical extent, the full-height button dividers, and
+// the leading icon precisely, without knowing the exact theme colour.
+
+const px = (png, x, y) => {
+  const i = (y * png.width + x) * 4;
+  return [png.data[i], png.data[i + 1], png.data[i + 2]];
+};
+const dist = (a, b) => Math.abs(a[0] - b[0]) + Math.abs(a[1] - b[1]) + Math.abs(a[2] - b[2]);
+const isInk = (png, x, y, bg, tol) => dist(px(png, x, y), bg) > tol;
+
+// A 16x16 solid-red RGBA image, base64-encoded, for the leading image icon.
+function redIconB64() {
+  const buf = Buffer.alloc(16 * 16 * 4);
+  for (let i = 0; i < buf.length; i += 4) { buf[i] = 220; buf[i + 1] = 20; buf[i + 2] = 20; buf[i + 3] = 255; }
+  return buf.toString("base64");
+}
+// Count strongly-red pixels (the image icon) in a region — the accent-blue pill
+// never matches, so this isolates the icon.
+function redCount(png) {
+  let n = 0;
+  for (let i = 0; i < png.data.length; i += 4) {
+    if (png.data[i] > 150 && png.data[i + 1] < 90 && png.data[i + 2] < 90) n++;
+  }
+  return n;
+}
+// Vertical extent (last inked row - first inked row + 1) of TEXT ink over the
+// column band [x0, x1), i.e. how tall the message block is. One line spans ~one
+// cap height; two lines span ~twice that plus the inter-line gap. Full-height
+// columns (an action-button divider that happens to fall in the band) are
+// skipped so a divider can never inflate the extent to the whole pill height.
+function textVExtent(png, bg, tol, x0, x1) {
+  const need = Math.floor(png.height * 0.75);
+  const textCol = [];
+  for (let x = x0; x < x1; x++) {
+    let rows = 0;
+    for (let y = 0; y < png.height; y++) if (isInk(png, x, y, bg, tol)) rows++;
+    textCol[x] = rows > 0 && rows < need; // inked but not a full-height divider
+  }
+  // Skip the pill's 1px top/bottom border rows (a horizontal line inked across
+  // every column) so the border never pins the extent to the full pill height.
+  let first = -1, last = -1;
+  for (let y = 3; y < png.height - 3; y++) {
+    let inked = false;
+    for (let x = x0; x < x1; x++) { if (textCol[x] && isInk(png, x, y, bg, tol)) { inked = true; break; } }
+    if (inked) { if (first < 0) first = y; last = y; }
+  }
+  return first < 0 ? 0 : last - first + 1;
+}
+// Count full-height "divider" columns (a 1px column inked over ~the whole pill
+// height) among the interior columns — the toolkit draws exactly one such
+// divider before each action button, so this counts the buttons. Text/icon ink
+// never spans the full height, and the pill's own 1px border is excluded by the
+// interior margin.
+function dividerRuns(png, bg, tol) {
+  const need = Math.floor(png.height * 0.75);
+  let runs = 0, inRun = false;
+  for (let x = 3; x < png.width - 3; x++) {
+    let rows = 0;
+    for (let y = 0; y < png.height; y++) if (isInk(png, x, y, bg, tol)) rows++;
+    const full = rows >= need;
+    if (full && !inRun) runs++;
+    inRun = full;
+  }
+  return runs;
 }
 
 // Post a notify via the test hook (a real `notify` wire message injected on the
@@ -224,6 +294,94 @@ try {
     fail(`auto-dismiss: rows not clear after timeout (row0=${e0Bright}, row1=${e1Bright})`);
   } else {
     ok(`toasts auto-dismissed after their timeout (row0=${e0Bright}, row1=${e1Bright})`);
+  }
+
+  // === v0.86 rich toasts: leading icon, multi-line body, multi-action buttons ==
+  // Post a CONTROL single-line, icon-less, action-less pill (row 0) alongside a
+  // RICH pill (row 1) carrying a red image icon, a title-over-body two-line body
+  // and two action buttons. Sample the pill fill from the control's content-free
+  // right edge (same "info" kind, so the same colour), then assert structurally.
+  const RICH_TIMEOUT_S = 4;
+  await postNotification(cw, { title: "Solo", kind: "info", timeout: RICH_TIMEOUT_S });
+  await postNotification(cw, {
+    title: "Deploy ready", body: "3 files changed", kind: "info",
+    icon: redIconB64(), icon_w: 16, icon_h: 16,
+    actions: "Open|op;Later|la", timeout: RICH_TIMEOUT_S,
+  });
+  await page.waitForTimeout(600);
+
+  const ctrlPng = await grab(cw, ROW_X, ROW0_Y, TW, TH); // control, row 0
+  const richPng = await grab(cw, ROW_X, ROW1_Y, TW, TH); // rich, row 1
+  if (!ctrlPng || !richPng) { fail("could not grab the rich-toast rows"); throw new Error("grab rich"); }
+  // Pill fill reference: control's far right edge, vertically centred (no icon,
+  // no buttons, short left-aligned label -> bare pill there).
+  const BG = px(ctrlPng, TW - 8, Math.floor(TH / 2));
+  const TOL = 90;
+
+  // (7) ICON: strong red pixels in the rich pill's leading icon slot (a ~gh
+  // square at the left), and NONE in the control pill's matching slot.
+  const ICON = { x0: 4, x1: 26 };
+  const richIcon = new PNG({ width: ICON.x1 - ICON.x0, height: TH });
+  const ctrlIcon = new PNG({ width: ICON.x1 - ICON.x0, height: TH });
+  for (let y = 0; y < TH; y++) for (let x = ICON.x0; x < ICON.x1; x++) {
+    for (const [src, dst] of [[richPng, richIcon], [ctrlPng, ctrlIcon]]) {
+      const si = (y * src.width + x) * 4, di = (y * dst.width + (x - ICON.x0)) * 4;
+      dst.data[di] = src.data[si]; dst.data[di + 1] = src.data[si + 1];
+      dst.data[di + 2] = src.data[si + 2]; dst.data[di + 3] = 255;
+    }
+  }
+  const richRed = redCount(richIcon), ctrlRed = redCount(ctrlIcon);
+  if (richRed < 60) {
+    fail(`icon: only ${richRed} red icon pixels in the rich pill's left slot (expected the 16x16 image icon)`);
+  } else if (ctrlRed > 10) {
+    fail(`icon: control pill has ${ctrlRed} red pixels in its left slot (should have no icon)`);
+  } else {
+    ok(`leading image icon present (rich ${richRed} red px, control ${ctrlRed})`);
+  }
+
+  // (8) MULTI-LINE: the rich pill's text block (right of the icon, left of the
+  // buttons) spans markedly taller than the control's single line.
+  const TX0 = 30, TX1 = TW - 12; // right of the icon slot; dividers auto-skipped
+  const ctrlExtent = textVExtent(ctrlPng, BG, TOL, 12, TW - 12);
+  const richExtent = textVExtent(richPng, BG, TOL, TX0, TX1);
+  if (richExtent < Math.floor(ctrlExtent * 1.6)) {
+    fail(`multi-line: rich text extent ${richExtent}px is not clearly taller than the single line ${ctrlExtent}px`);
+  } else {
+    ok(`multi-line body: two rows span ${richExtent}px vs one row ${ctrlExtent}px`);
+  }
+
+  // (9) MULTI-ACTION: exactly two full-height button dividers in the rich pill,
+  // and none in the action-less control pill.
+  const richDiv = dividerRuns(richPng, BG, TOL);
+  const ctrlDiv = dividerRuns(ctrlPng, px(ctrlPng, 4, 3), TOL);
+  if (richDiv !== 2) {
+    fail(`multi-action: expected 2 button dividers in the rich pill, found ${richDiv}`);
+  } else if (ctrlDiv !== 0) {
+    fail(`multi-action: action-less control pill has ${ctrlDiv} dividers (expected 0)`);
+  } else {
+    ok(`two action buttons rendered (rich ${richDiv} dividers, control ${ctrlDiv})`);
+  }
+
+  // (10) BOUNDS: the rich pill paints nothing below its own bottom edge (no
+  // bleed past the toast rectangle).
+  const belowPng = await grab(cw, ROW_X, ROW1_Y + TH + 1, TW, GAP - 2);
+  const belowBright = belowPng ? brightCount(belowPng, BRIGHT) : 999999;
+  if (belowBright > EMPTY) {
+    fail(`bounds: ${belowBright} bright pixels just below the rich pill — it bled past its rect`);
+  } else {
+    ok(`rich pill stays within its bounds (${belowBright} bright px just below)`);
+  }
+
+  // (11) AUTO-DISMISS still fires for the rich pills.
+  await page.waitForTimeout(RICH_TIMEOUT_S * 1000 + 1200);
+  const r0 = await grab(cw, ROW_X, ROW0_Y, TW, TH);
+  const r1 = await grab(cw, ROW_X, ROW1_Y, TW, TH);
+  const r0b = r0 ? brightCount(r0, BRIGHT) : 999999;
+  const r1b = r1 ? brightCount(r1, BRIGHT) : 999999;
+  if (r0b > EMPTY || r1b > EMPTY) {
+    fail(`rich auto-dismiss: rows not clear after timeout (row0=${r0b}, row1=${r1b})`);
+  } else {
+    ok(`rich toasts auto-dismissed after their timeout (row0=${r0b}, row1=${r1b})`);
   }
 
   if (pageErrors.length) {

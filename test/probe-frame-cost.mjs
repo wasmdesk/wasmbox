@@ -50,6 +50,17 @@ function startServer() {
   });
 }
 
+function fail(msg) { console.error(`FAIL: ${msg}`); process.exitCode = 1; }
+function ok(msg)   { console.log(`ok  ${msg}`); }
+// Sum the per-frame DECODE rate over blit keys matching `pred` — DECODES are the
+// expensive real renders (a cheap cached PRESENT does not count), so this is the
+// idle cost the #88 dirty-gate must keep near zero.
+function decodePerFrame(stats, pred) {
+  let total = 0;
+  for (const [k, v] of Object.entries(stats.decodeKeys)) if (pred(k)) total += v;
+  return total / (stats.frames || 1);
+}
+
 async function compositorWorker(page) {
   for (const w of page.workers()) {
     try {
@@ -111,8 +122,37 @@ try {
   await page.waitForTimeout(1500);
   await measure(page, cw, "D: + tray item");
 
-  if (workerErrors.length) { console.log("\nERRORS:"); for (const e of workerErrors.slice(0, 20)) console.log("  " + e); }
+  // E: a Calendar applet (v0.86 bound widget). Placed but not navigated, it must
+  // NOT re-DECODE per frame — its dirty signature only moves on a month change,
+  // so the #88 idle gate keeps its render cost ~0 (only cheap PRESENTs).
+  await cw.evaluate(() => globalThis.__wasmboxAppletPlace && globalThis.__wasmboxAppletPlace("calendar", 700, 420));
+  await page.waitForTimeout(800);
+  const sE = await measure(page, cw, "E: + calendar applet (idle)");
+  const calDec = decodePerFrame(sE, (k) => k === "applet#calendar");
+  if (calDec > 0.05) {
+    fail(`calendar applet re-DECODES ${calDec.toFixed(3)}/frame when idle (must be ~0; #88 dirty-gate)`);
+  } else {
+    ok(`calendar applet idle: ${calDec.toFixed(4)} decode/frame (~0)`);
+  }
+
+  // F: a toast shown then EXPIRED. After it auto-dismisses, no notif buffer may
+  // re-DECODE per frame (the expiry mark_dirty paints the clearing frame once,
+  // then the stack is empty and idle).
+  await cw.evaluate(() => globalThis.__wasmboxPostNotification &&
+    globalThis.__wasmboxPostNotification({ title: "cost", body: "probe", timeout: 2 }));
+  await page.waitForTimeout(3500); // outlive the 2s toast so the measure window is post-expiry
+  const sF = await measure(page, cw, "F: after toast shown+expired (idle)");
+  const notifDec = decodePerFrame(sF, (k) => k.startsWith("notif#"));
+  if (notifDec > 0.05) {
+    fail(`an expired toast still re-DECODES ${notifDec.toFixed(3)}/frame (must be ~0)`);
+  } else {
+    ok(`toast expired -> notif idle: ${notifDec.toFixed(4)} decode/frame (~0)`);
+  }
+
+  if (workerErrors.length) { console.log("\nERRORS:"); for (const e of workerErrors.slice(0, 20)) console.log("  " + e); fail(`${workerErrors.length} worker/page error(s)`); }
 } finally {
   await browser.close();
   server.close();
 }
+
+console.log(process.exitCode ? "\nRESULT: FAIL" : "\nRESULT: PASS");
