@@ -240,6 +240,10 @@ jobs:
         working-directory: test
         run: node probe-loading-progress.mjs
 
+      - name: Run headless boot-splash probe (determinate progress overlay + staged download/instantiate/runtime/ready + splash removal + no leaked timer)
+        working-directory: test
+        run: node probe-boot-splash.mjs
+
       - name: Run headless Terminal probe
         working-directory: test
         run: node probe-terminal.mjs
