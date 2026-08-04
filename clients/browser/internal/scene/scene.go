@@ -1,13 +1,20 @@
 // SPDX-License-Identifier: BSD-3-Clause
 //
 // Package scene renders the wasmdesk web browser in the WhiteSur / Safari
-// style: a #ebebeb toolbar (back / forward buttons + a rounded address bar +
-// a new-tab button) above a content area. The page runs under
-// COEP:require-corp, so live cross-origin sites cannot load inside the wasmbox
-// sandbox; the browser therefore shows a Safari-style "Favourites" start page
-// of bookmark tiles that navigate to local placeholder pages. It validates a
-// toolbar + address-bar + tile-grid composition and a back/forward history
-// model.
+// style: a #ebebeb toolbar (back / forward buttons + an editable rounded
+// address bar + a new-tab button) above a content area. The browser is a thin
+// front-end for the go-webengine **browserproxy**: it does not fetch or render
+// pages itself. The proxy renders each page server-side and streams frames (as
+// RGBA byte buffers) which this scene blits into the content area; the scene
+// forwards the user's navigation (address-bar Enter, favourite-tile clicks,
+// back/forward), content clicks, wheel scrolls and keys back to the proxy as
+// intents. Because rendering is server-side, ANY site works — including pages
+// that forbid framing — and the wasmbox page can stay under COEP:require-corp
+// (a WebSocket is exempt from COEP/CORS).
+//
+// The scene knows nothing about WebSockets: the client's main.go opens the
+// socket and wires the On* intent callbacks + the Set* frame/state sinks, so
+// the whole scene is unit-testable in pure Go with fakes.
 //
 // Layout is built from the toolkit's box-layout container model (Dock + Box +
 // Card containers) rather than hand-computed toolkit.Rect placement. The whole
@@ -18,20 +25,19 @@
 //	│  └─ (centre row, height btnH)      row  HBox
 //	│     [ pad · back · gap · fwd · gap · addr(flex) · gap · add · pad ]
 //	└─ (body / Centre)  content  Container(CardLayout)
-//	   ├─ card 0  startCard — "Favourites" heading + tile grid (VBox of HBox)
-//	   └─ card 1  siteCard  — the local placeholder page
+//	   ├─ card 0  startCard  — "Favourites" heading + tile grid (VBox of HBox)
+//	   └─ card 1  streamCard — the streamed page frame, or an offline/loading panel
 //
 // The toolbar row's fixed pixel widths become AddFixed extents and its uneven
 // gaps become invisible fixed spacers, so every control lands at exactly the
 // rect the old hand-placed code produced (proven by the golden-rect test). A
 // single root.SetBounds lays the whole tree out, root.Draw paints it, and
-// root.OnEvent routes clicks into child-local space — no per-widget rect
-// arithmetic and no manual hit-testing. The start/site view switch is a
-// CardLayout Active toggle rather than an onSite branch in the renderer.
+// root.OnEvent routes clicks into child-local space.
 
 package scene
 
 import (
+	"strings"
 	"sync"
 
 	"github.com/go-widgets/painter"
@@ -39,57 +45,69 @@ import (
 )
 
 // aaOnce flips the toolkit's active font to anti-aliased, shaped OpenType text
-// exactly once for this client process. It is package-scoped because SetFont is
-// a process-global; a single opt-in matches the toolkit's "flip it once at
-// start-up" contract.
+// exactly once for this client process.
 var aaOnce sync.Once
 
-// enableAAText installs the toolkit's bundled AA/shaped OpenType face (Atkinson
-// Hyperlegible @16px, toolkit v0.77.0), so the toolbar controls, address bar,
-// favourites heading, tile labels and placeholder page render as the shaped
-// vector face. The bundled face never fails to parse (the error is documented as
-// never-returned); on the impossible error path the toolkit leaves the still-
-// working bitmap default active, so a swallowed error degrades to legible bitmap
-// text, never to none. All chrome text is placed with toolkit.TextWidth /
-// toolkit.GlyphHeight, so the taller face re-centres itself and no rect moves.
+// enableAAText installs the toolkit's bundled AA/shaped OpenType face so the
+// toolbar controls, address bar, favourites heading, tile labels and panels
+// render as the shaped vector face. On the documented never-returned parse
+// error the toolkit leaves the working bitmap default active.
 func enableAAText() { aaOnce.Do(func() { _ = toolkit.UseOpenTypeText() }) }
 
-// link is one favourite: a display name + the URL shown in the address bar.
+// link is one favourite: a display name + the host shown/opened.
 type link struct {
 	name string
 	url  string
 }
 
-// State holds the widget tree, the favourites, and the navigation model.
+// State holds the widget tree, the favourites, the connection/page model and
+// the intent callbacks the client wires to the proxy WebSocket.
 type State struct {
 	W, H  int
 	theme *toolkit.Theme
 	favs  []link
 
-	// Navigation is one level deep: onSite=false shows the Favourites start
-	// page; onSite=true shows the placeholder page for favs[cur]. visited is
-	// set once any site has been opened, so Forward can re-open the last one
-	// after Back returns to the start page (Safari-style).
-	onSite  bool
-	cur     int
-	visited bool
+	// Page/connection model, updated by the Set* sinks from server messages.
+	url       string // current page URL (address bar shows it when not editing)
+	title     string // current page title
+	loading   bool   // a navigation is in flight
+	canBack   bool   // server reports back history
+	canFwd    bool   // server reports forward history
+	connected bool   // the proxy WebSocket is open
+	status    string // offline / error message for the content panel
+
+	// Streamed frame (RGBA), blitted into the content area by streamCard.
+	frameW, frameH int
+	hasFrame       bool
+
+	// Address-bar editing.
+	addrFocused bool
+	addrText    string // the text being edited (only meaningful while focused)
+
+	// Intent callbacks — wired by main.go, all nil-safe.
+	OnNavigate     func(url string) // address Enter or favourite tile
+	OnBack         func()
+	OnForward      func()
+	OnContentClick func(x, y int) // content-area pixel coords (0,0 = frame top-left)
+	OnScroll       func(dy int)   // wheel delta
+	OnContentKey   func(key string)
 
 	// Widget tree.
 	root      *toolkit.Dock
 	content   *toolkit.Container
 	card      *toolkit.CardLayout
 	startCard *startCard
-	siteCard  *siteCard
+	streamCrd *streamCard
 	grid      *toolkit.VBox
 	backBtn   *iconButton
 	fwdBtn    *iconButton
 	addBtn    *iconButton
 	addr      *addrBar
 	tiles     []*tile
+	frameImg  *toolkit.Image
 
-	// dirty is set by a control's OnClick when a press mutates the model, so
-	// HandleMouse can report to the render loop whether a click did anything
-	// (the container routing itself has no hit/miss return value).
+	// dirty is set by a control's OnClick when a press did something, so
+	// HandleMouse can tell the render loop whether to repaint.
 	dirty bool
 }
 
@@ -100,7 +118,7 @@ const (
 	btnH     = 28
 	btnLeft  = 12
 	btnGap   = 6
-	addrGap  = 14 // gap between the fwd button / addr pill / add button
+	addrGap  = 14
 	addrH    = 28
 	tileCols = 4
 	tileW    = 150
@@ -110,25 +128,18 @@ const (
 	gridTop  = toolbarH + 56
 	gridLeft = 40
 
-	// btnY is the toolbar control's top inset, vertically centring the btnH
-	// row within the toolbarH band ((46-28)/2 = 9, symmetric top/bottom).
-	btnY = (toolbarH - btnH) / 2
-	// headingOffset is the "Favourites" heading's baseline offset below the
-	// toolbar (matches the old toolbarH+28 placement).
+	btnY          = (toolbarH - btnH) / 2
 	headingOffset = 28
-	// gridTopInset is the tile grid's top within the content body (the body
-	// starts at toolbarH, the grid at gridTop).
-	gridTopInset = gridTop - toolbarH
-	// gridW is the tile grid's fixed width: tileCols tiles + inter-tile gaps.
-	gridW = tileCols*tileW + (tileCols-1)*tileGapX
-	// zeroGap sets a box Spacing to zero (Spacing==0 means "default 4px"; a
-	// negative value clamps to 0 at layout time — see toolkit boxSpacing).
-	zeroGap = -1
+	gridTopInset  = gridTop - toolbarH
+	gridW         = tileCols*tileW + (tileCols-1)*tileGapX
+	zeroGap       = -1
 )
 
-// New builds the browser sized W×H and lays out its widget tree.
+// New builds the browser sized W×H and lays out its widget tree. The client
+// starts disconnected (the offline panel shows) until main.go opens the proxy
+// WebSocket and calls SetConnected(true).
 func New(w, h int) *State {
-	enableAAText() // chrome + page text render with the AA/shaped OpenType face.
+	enableAAText()
 	s := &State{W: w, H: h, theme: toolkit.WhiteSurLight()}
 	s.favs = []link{
 		{"weft", "weft.dev"},
@@ -141,32 +152,24 @@ func New(w, h int) *State {
 		{"Wiki", "wiki.wasmdesk.org"},
 	}
 
-	// Toolbar controls. Each control reads live state through a closure so a
-	// single persistent widget tree reflects the navigation model at Draw
-	// time (back/forward ink enable, address text) without a rebuild.
+	// Toolbar controls read live state through closures so one persistent tree
+	// reflects the model at Draw time without a rebuild.
 	s.backBtn = &iconButton{label: "<", ink: func() toolkit.RGBA {
-		if s.onSite {
+		if s.canBack {
 			return s.theme.OnSurface
 		}
 		return dim(s.theme)
-	}, onClick: func() { s.dirty = s.back() }}
+	}, onClick: func() { s.dirty = s.goBack() }}
 	s.fwdBtn = &iconButton{label: ">", ink: func() toolkit.RGBA {
-		if !s.onSite && s.visited {
+		if s.canFwd {
 			return s.theme.OnSurface
 		}
 		return dim(s.theme)
-	}, onClick: func() { s.dirty = s.forward() }}
+	}, onClick: func() { s.dirty = s.goForward() }}
 	// The new-tab "+" button is drawn but inert (as in the original shell).
 	s.addBtn = &iconButton{label: "+", ink: func() toolkit.RGBA { return s.theme.OnSurface }, onClick: func() {}}
-	s.addr = &addrBar{text: func() (string, toolkit.RGBA) {
-		if s.onSite {
-			return s.addressText(), s.theme.OnSurface
-		}
-		return s.addressText(), dim(s.theme)
-	}}
+	s.addr = &addrBar{s: s, onClick: func() { s.focusAddr(); s.dirty = true }}
 
-	// Toolbar row: fixed-width controls with invisible fixed spacers carrying
-	// the exact (uneven) gaps, so each control lands at its historical rect.
 	row := toolkit.NewHBox()
 	row.Spacing = zeroGap
 	row.AddFixed(spacer(), btnLeft)
@@ -179,64 +182,108 @@ func New(w, h int) *State {
 	row.AddFixed(s.addBtn, btnW)
 	row.AddFixed(spacer(), btnLeft)
 
-	// Toolbar band: vertically centre the btnH row within the toolbarH band.
 	band := toolkit.NewVBox()
 	band.Spacing = zeroGap
 	band.AddFixed(spacer(), btnY)
 	band.AddFixed(row, btnH)
 	band.AddFixed(spacer(), toolbarH-btnH-btnY)
 
-	// Tile grid: a column of fixed-height rows, each a row of fixed-width
-	// tiles with tileGapX/tileGapY gutters — reproduces the 150×98 tiles + 22/26
-	// gaps declaratively instead of one toolkit.Rect per tile.
+	// Favourites tile grid.
 	s.grid = toolkit.NewVBox()
 	s.grid.Spacing = tileGapY
 	s.tiles = make([]*tile, len(s.favs))
 	var rowBox *toolkit.HBox
 	for i := range s.favs {
-		if i%tileCols == 0 { // start a new row every tileCols tiles
+		if i%tileCols == 0 {
 			rowBox = toolkit.NewHBox()
 			rowBox.Spacing = tileGapX
 			s.grid.AddFixed(rowBox, tileH)
 		}
-		idx := i
-		t := &tile{fav: s.favs[i], onClick: func() {
-			s.navigate(idx)
-			s.dirty = true
-		}}
+		fav := s.favs[i]
+		t := &tile{fav: fav, onClick: func() { s.dirty = s.startNavigate(fav.url) }}
 		s.tiles[i] = t
 		rowBox.AddFixed(t, tileW)
 	}
 
-	// Content: the start page and the site page as two cards; the active one
-	// fills the body, the other collapses to an empty rect (not drawn, not
-	// hit-tested) — the Card layout replaces the old onSite render branch.
+	// Content cards: favourites start page + streamed-frame / panel card.
+	s.frameImg = toolkit.NewImage(nil, 0, 0) // pixels/dims filled by SetFrame
 	s.startCard = &startCard{s: s, grid: s.grid}
-	s.siteCard = &siteCard{s: s}
+	s.streamCrd = &streamCard{s: s}
 	s.card = &toolkit.CardLayout{Active: 0}
 	s.content = toolkit.NewContainer(s.card)
 	s.content.AddWidget(s.startCard) // card 0
-	s.content.AddWidget(s.siteCard)  // card 1
+	s.content.AddWidget(s.streamCrd) // card 1
 
-	// Shell: dock the toolbar band to the top; the content body fills the rest.
 	s.root = toolkit.NewDock(s.content)
 	s.root.Dock(band, toolkit.DockTop, toolbarH)
 	s.root.SetBounds(toolkit.Rect{X: 0, Y: 0, W: w, H: h})
+	s.syncCard()
 	return s
 }
 
 // spacer is an invisible, inert box cell used to carry a fixed gap.
 func spacer() toolkit.Widget { return toolkit.NewContainer(nil) }
 
-// addressText is what the address bar shows for the current view.
-func (s *State) addressText() string {
-	if s.onSite {
-		return s.favs[s.cur].url
+// --- state sinks (called by main.go from server messages) -----------------
+
+// SetConnected records whether the proxy WebSocket is open. Losing the
+// connection shows the offline panel.
+func (s *State) SetConnected(connected bool) {
+	s.connected = connected
+	if !connected {
+		s.status = "Browser proxy not connected"
+	} else if s.status == "Browser proxy not connected" {
+		s.status = ""
 	}
-	return "Search or enter website name"
+	s.syncCard()
 }
 
-// Render paints the browser: the background bands first, then the widget tree.
+// SetState applies a server {state} message: the current URL, title and history
+// availability. While the user is editing the address bar its text is left
+// untouched.
+func (s *State) SetState(url, title string, loading, canBack, canForward bool) {
+	s.url, s.title = url, title
+	s.loading, s.canBack, s.canFwd = loading, canBack, canForward
+	if !s.addrFocused {
+		s.addrText = url
+	}
+	s.syncCard()
+}
+
+// SetFrame applies a server {frame} message: pixels is the RGBA byte buffer of a
+// w×h page slice to blit into the content area.
+func (s *State) SetFrame(pixels []byte, w, h int) {
+	if w <= 0 || h <= 0 || len(pixels) < w*h*4 {
+		return
+	}
+	s.frameImg.Pixels, s.frameImg.W, s.frameImg.H = pixels, w, h
+	s.frameW, s.frameH = w, h
+	s.hasFrame = true
+	s.loading = false
+	s.connected = true
+	s.status = ""
+	s.syncCard()
+}
+
+// SetError applies a server {error} message, shown in the content panel until
+// the next successful frame.
+func (s *State) SetError(msg string) {
+	s.status = msg
+	s.loading = false
+	s.syncCard()
+}
+
+// Title returns the current page title (for the window/tab chrome).
+func (s *State) Title() string { return s.title }
+
+// ContentSize returns the pixel size of the content area below the toolbar — the
+// viewport the client should ask the proxy to render, and the space a streamed
+// frame is blitted into.
+func (s *State) ContentSize() (w, h int) { return s.W, s.H - toolbarH }
+
+// --- rendering ------------------------------------------------------------
+
+// Render paints the browser: background bands first, then the widget tree.
 func Render(s *State, buf []byte) {
 	p := painter.NewPixelPainter(buf, s.W, s.H)
 	th := s.theme
@@ -245,9 +292,9 @@ func Render(s *State, buf []byte) {
 		headerBG = th.Background
 	}
 
-	// Content ground first (start page = window grey, a site = white).
+	// Content ground: white when a page is shown, window grey otherwise.
 	contentBG := th.Background
-	if s.onSite {
+	if s.hasFrame {
 		contentBG = th.Surface
 	}
 	p.FillRect(toolkit.Rect{X: 0, Y: toolbarH, W: s.W, H: s.H - toolbarH}, contentBG)
@@ -256,14 +303,13 @@ func Render(s *State, buf []byte) {
 	p.FillRect(toolkit.Rect{X: 0, Y: 0, W: s.W, H: toolbarH}, headerBG)
 	p.FillRect(toolkit.Rect{X: 0, Y: toolbarH - 1, W: s.W, H: 1}, th.Border)
 
-	// Controls + content, laid out and routed by the container tree.
 	s.root.Draw(p, th)
 }
 
-// HandleMouse routes a click at surface coordinates (x, y) through the
-// container tree (translated into the root's local space); the control whose
-// bounds contain the point fires its OnClick, which sets dirty. Returns true
-// when a click triggered an action (the scene should re-render).
+// --- input ----------------------------------------------------------------
+
+// HandleMouse routes a click at surface coordinates through the widget tree.
+// Returns true when a click triggered an action (the scene should re-render).
 func (s *State) HandleMouse(x, y int) bool {
 	s.dirty = false
 	rb := s.root.Bounds()
@@ -271,38 +317,107 @@ func (s *State) HandleMouse(x, y int) bool {
 	return s.dirty
 }
 
-// navigate opens favourite i and switches to the site card.
-func (s *State) navigate(i int) {
-	s.onSite = true
-	s.visited = true
-	s.cur = i
+// HandleWheel forwards a wheel delta to the proxy as a scroll intent when a page
+// is shown. Returns true if the intent was sent.
+func (s *State) HandleWheel(dy int) bool {
+	if !s.hasFrame || s.OnScroll == nil || dy == 0 {
+		return false
+	}
+	s.OnScroll(dy)
+	return true
+}
+
+// HandleKey routes a key. While the address bar is focused it edits the address
+// (Enter navigates, Escape cancels, Backspace deletes, printable keys append).
+// Otherwise, when a page is shown, the key is forwarded to the proxy (for
+// server-side scrolling). Returns true if the key was consumed.
+func (s *State) HandleKey(key string) bool {
+	if s.addrFocused {
+		switch key {
+		case "Enter":
+			s.addrFocused = false
+			return s.startNavigate(s.addrText)
+		case "Escape":
+			s.addrFocused = false
+			s.addrText = s.url
+			return true
+		case "Backspace":
+			s.addrText = trimLastRune(s.addrText)
+			return true
+		default:
+			if isPrintable(key) {
+				s.addrText += key
+				return true
+			}
+			return false
+		}
+	}
+	if s.hasFrame && s.OnContentKey != nil {
+		s.OnContentKey(key)
+		return true
+	}
+	return false
+}
+
+// --- model helpers --------------------------------------------------------
+
+// focusAddr begins editing the address bar, seeding it with the current URL.
+func (s *State) focusAddr() {
+	s.addrFocused = true
+	s.addrText = s.url
+}
+
+// startNavigate normalises url and emits a navigate intent, entering the
+// loading state. It reports whether a navigation was started.
+func (s *State) startNavigate(url string) bool {
+	u := normalizeURL(url)
+	if u == "" {
+		return false
+	}
+	s.addrFocused = false
+	s.loading = true
+	s.status = ""
 	s.syncCard()
-}
-
-// back returns from a site page to the start page.
-func (s *State) back() bool {
-	if s.onSite {
-		s.onSite = false
-		s.syncCard()
-		return true
+	if s.OnNavigate != nil {
+		s.OnNavigate(u)
 	}
-	return false
+	return true
 }
 
-// forward re-opens the last visited site from the start page.
-func (s *State) forward() bool {
-	if !s.onSite && s.visited {
-		s.onSite = true
-		s.syncCard()
-		return true
+func (s *State) goBack() bool {
+	if !s.canBack {
+		return false
 	}
-	return false
+	s.loading = true
+	s.syncCard()
+	if s.OnBack != nil {
+		s.OnBack()
+	}
+	return true
 }
 
-// syncCard points the CardLayout at the active view and re-arranges the
+func (s *State) goForward() bool {
+	if !s.canFwd {
+		return false
+	}
+	s.loading = true
+	s.syncCard()
+	if s.OnForward != nil {
+		s.OnForward()
+	}
+	return true
+}
+
+// streaming reports whether the content area shows the stream card (a frame or
+// an offline/loading/error panel) rather than the favourites start page.
+func (s *State) streaming() bool {
+	return s.hasFrame || !s.connected || s.loading || s.status != ""
+}
+
+// syncCard points the CardLayout at the active content view and re-lays the
 // content container so the shown card fills the body and the other collapses.
 func (s *State) syncCard() {
-	if s.onSite {
+	if s.streaming() {
 		s.card.Active = 1
 	} else {
 		s.card.Active = 0
@@ -310,12 +425,15 @@ func (s *State) syncCard() {
 	s.content.SetBounds(s.content.Bounds())
 }
 
-// HandleKey: Backspace / Escape acts as Back.
-func (s *State) HandleKey(code string) bool {
-	if code == "Backspace" || code == "Escape" {
-		return s.back()
+// addressText is what the address bar shows and whether it is placeholder text.
+func (s *State) addressText() (string, bool) {
+	if s.addrFocused {
+		return s.addrText, false
 	}
-	return false
+	if s.url != "" {
+		return s.url, false
+	}
+	return "Search or enter website name", true
 }
 
 // --- leaf widgets ---------------------------------------------------------
@@ -342,23 +460,45 @@ func (b *iconButton) OnEvent(ev toolkit.Event) {
 	}
 }
 
-// addrBar is the rounded white address pill. It is drawn but not interactive
-// (the shell has no in-place editing), so it keeps Base's no-op OnEvent.
+// addrBar is the rounded white address pill. It is now interactive: a click
+// focuses it (main.go's keydowns then edit the text), and it draws a caret
+// while focused.
 type addrBar struct {
 	toolkit.Base
-	text func() (string, toolkit.RGBA)
+	s       *State
+	onClick func()
 }
 
 func (a *addrBar) Draw(p painter.Painter, th *toolkit.Theme) {
 	r := a.Bounds()
 	p.FillRoundRect(r, addrH/2, th.Surface)
-	p.StrokeRoundRect(r, addrH/2, th.Border, 1)
-	txt, ink := a.text()
-	toolkit.DrawText(p, r.X+12, r.Y+(r.H-toolkit.GlyphHeight())/2, txt, ink)
+	stroke := th.Border
+	if a.s.addrFocused {
+		stroke = th.Accent
+	}
+	p.StrokeRoundRect(r, addrH/2, stroke, 1)
+	txt, placeholder := a.s.addressText()
+	ink := th.OnSurface
+	if placeholder {
+		ink = dim(th)
+	}
+	tx := r.X + 12
+	ty := r.Y + (r.H-toolkit.GlyphHeight())/2
+	toolkit.DrawText(p, tx, ty, txt, ink)
+	if a.s.addrFocused {
+		// A thin caret after the edited text.
+		caretX := tx + toolkit.TextWidth(txt)
+		p.FillRect(toolkit.Rect{X: caretX + 1, Y: ty, W: 1, H: toolkit.GlyphHeight()}, th.OnSurface)
+	}
 }
 
-// tile is one Favourites bookmark: a rounded card with an accent icon square
-// (the site's initial) and a label; a click navigates to the site.
+func (a *addrBar) OnEvent(ev toolkit.Event) {
+	if ev.Kind == toolkit.EventClick && a.onClick != nil {
+		a.onClick()
+	}
+}
+
+// tile is one Favourites bookmark: a click navigates to the site via the proxy.
 type tile struct {
 	toolkit.Base
 	fav     link
@@ -367,10 +507,8 @@ type tile struct {
 
 func (t *tile) Draw(p painter.Painter, th *toolkit.Theme) {
 	r := t.Bounds()
-	// Card body + border (rounded).
 	p.FillRoundRect(r, 10, th.Surface)
 	p.StrokeRoundRect(r, 10, th.Border, 1)
-	// Icon block: rounded accent square with the site's first letter.
 	onAccent := th.Extra["accent_fg_color"]
 	if onAccent == (toolkit.RGBA{}) {
 		onAccent = toolkit.RGB(0xff, 0xff, 0xff)
@@ -381,7 +519,6 @@ func (t *tile) Draw(p painter.Painter, th *toolkit.Theme) {
 	p.FillRoundRect(toolkit.Rect{X: ix, Y: iy, W: iconSz, H: iconSz}, 10, th.Accent)
 	initial := string(upper(t.fav.name[0]))
 	toolkit.DrawText(p, ix+(iconSz-toolkit.TextWidth(initial))/2, iy+(iconSz-toolkit.GlyphHeight())/2, initial, onAccent)
-	// Label under the icon.
 	lw := toolkit.TextWidth(t.fav.name)
 	toolkit.DrawText(p, r.X+(r.W-lw)/2, r.Y+r.H-16, t.fav.name, th.OnSurface)
 }
@@ -392,8 +529,7 @@ func (t *tile) OnEvent(ev toolkit.Event) {
 	}
 }
 
-// startCard is the Favourites start page: it draws the heading and hosts the
-// tile grid at its historical inset within the content body.
+// startCard is the Favourites start page: heading + tile grid at their inset.
 type startCard struct {
 	toolkit.Base
 	s    *State
@@ -421,7 +557,6 @@ func (c *startCard) Draw(p painter.Painter, th *toolkit.Theme) {
 }
 
 func (c *startCard) OnEvent(ev toolkit.Event) {
-	// ev is startCard-local; forward to the grid in its own local space.
 	pr := c.Bounds()
 	sx, sy := ev.X+pr.X, ev.Y+pr.Y
 	gb := c.grid.Bounds()
@@ -432,32 +567,95 @@ func (c *startCard) OnEvent(ev toolkit.Event) {
 	}
 }
 
-// siteCard is the local placeholder page for the current favourite.
-type siteCard struct {
+// streamCard shows the streamed page frame, or — when there is no frame — an
+// offline / loading / error panel.
+type streamCard struct {
 	toolkit.Base
 	s *State
 }
 
-func (c *siteCard) Draw(p painter.Painter, th *toolkit.Theme) {
+func (c *streamCard) SetBounds(r toolkit.Rect) {
+	c.Base.SetBounds(r)
+	c.s.frameImg.SetBounds(r)
+}
+
+func (c *streamCard) Draw(p painter.Painter, th *toolkit.Theme) {
 	r := c.Bounds()
-	f := c.s.favs[c.s.cur]
-	x := r.X + gridLeft
-	// The body starts at y=toolbarH, so r.Y+k reproduces the old toolbarH+k.
-	toolkit.DrawText(p, x, r.Y+50, f.name, th.OnSurface)
-	toolkit.DrawText(p, x, r.Y+50+toolkit.GlyphHeight()+10, "https://"+f.url, dim(th))
-	msg := []string{
-		"This is a local placeholder page.",
-		"wasmbox runs under COEP:require-corp, so a live",
-		"cross-origin site cannot be embedded in the sandbox.",
-		"",
-		"Click < (Back) to return to Favourites.",
+	if r.W == 0 || r.H == 0 {
+		return
 	}
-	for i, line := range msg {
-		toolkit.DrawText(p, x, r.Y+96+i*(toolkit.GlyphHeight()+8), line, th.OnSurface)
+	if c.s.hasFrame {
+		c.s.frameImg.Draw(p, th)
+		return
+	}
+	// No frame: draw a centred panel with a headline + detail lines. The stream
+	// card is only active (drawn) when a page is loading, the proxy is
+	// disconnected, or an error is pending — so one of these cases always holds.
+	var head string
+	var detail []string
+	switch {
+	case !c.s.connected:
+		head = "Browser proxy not connected"
+		detail = []string{
+			"The wasmdesk browser streams pages from a local",
+			"go-webengine browserproxy. Start it with:",
+			"    go run ./cmd/browserproxy -addr :8090",
+			"then reload this window.",
+		}
+	case c.s.loading:
+		head = "Loading…"
+	default: // c.s.status != ""
+		head = "Could not load the page"
+		detail = []string{c.s.status}
+	}
+	x := r.X + gridLeft
+	y := r.Y + 50
+	toolkit.DrawText(p, x, y, head, th.OnSurface)
+	for i, line := range detail {
+		toolkit.DrawText(p, x, y+30+i*(toolkit.GlyphHeight()+8), line, dim(th))
 	}
 }
 
+func (c *streamCard) OnEvent(ev toolkit.Event) {
+	// ev is streamCard-local, so its origin is the content-area top-left, which
+	// maps 1:1 onto the streamed frame's (0,0). Forward content clicks only when
+	// a frame is shown.
+	if ev.Kind != toolkit.EventClick || !c.s.hasFrame || c.s.OnContentClick == nil {
+		return
+	}
+	c.s.OnContentClick(ev.X, ev.Y)
+	c.s.dirty = true
+}
+
 // --- helpers --------------------------------------------------------------
+
+// normalizeURL trims s and, when it has no scheme, assumes https. An empty
+// string stays empty.
+func normalizeURL(s string) string {
+	s = strings.TrimSpace(s)
+	if s == "" {
+		return ""
+	}
+	if !strings.Contains(s, "://") {
+		s = "https://" + s
+	}
+	return s
+}
+
+// isPrintable reports whether a KeyboardEvent.key names a single printable
+// character (so named keys like "Shift" or "ArrowDown" are not typed).
+func isPrintable(key string) bool {
+	return len([]rune(key)) == 1
+}
+
+// trimLastRune drops the final rune of s (Backspace).
+func trimLastRune(s string) string {
+	r := []rune(s)
+	if len(r) == 0 {
+		return s
+	}
+	return string(r[:len(r)-1])
+}
 
 // dim returns a muted ink for placeholder / disabled text.
 func dim(*toolkit.Theme) toolkit.RGBA { return toolkit.RGB(0x80, 0x80, 0x88) }
