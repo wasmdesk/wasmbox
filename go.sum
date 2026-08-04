@@ -182,8 +182,8 @@ github.com/go-composites/time v0.0.0-20260727203506-b0e9511265ce h1:s6sem+/vqY6c
 github.com/go-composites/time v0.0.0-20260727203506-b0e9511265ce/go.mod h1:1VK0+gCw8h5qSeMcDt0pKujvEBR99f3j+xtfJ8KQSG4=
 github.com/go-datetime/dates v0.1.0 h1:Uj8TaTZ09DXdq75EGQ/teFdrXpfVAC3ZDHAPQvPTnaA=
 github.com/go-datetime/dates v0.1.0/go.mod h1:KeZ1wUeMScJD6HOvj3hINwbsB+GCSFjJLWcJhrBlwIo=
-github.com/go-embedded-ruby/ruby v0.0.0-20260803223653-55becae43cca h1:zONRXFRioSoot30wOszD53247o7pTnUNv9WGeKCxCck=
-github.com/go-embedded-ruby/ruby v0.0.0-20260803223653-55becae43cca/go.mod h1:sEyTY919fHdul9eYPfk9QoUVr+S338bZ1Rbzf7b+inI=
+github.com/go-embedded-ruby/ruby v0.0.0-20260804104746-be7db35276eb h1:k4QlQsO4a2+jkBBzfK/5cM5bebRZSLizfZO2izr7mVA=
+github.com/go-embedded-ruby/ruby v0.0.0-20260804104746-be7db35276eb/go.mod h1:sEyTY919fHdul9eYPfk9QoUVr+S338bZ1Rbzf7b+inI=
 github.com/go-facter/facter v0.0.0-20260708052836-752b1a3edee0 h1:1PUT8X4gKZsXEVdoMS//ceD4X2jiK9fEJinyU2iuIpI=
 github.com/go-facter/facter v0.0.0-20260708052836-752b1a3edee0/go.mod h1:ghuoOHWXdq5dE3GLPDiz3Uy0ORrvK+1hB7QC997ez2U=
 github.com/go-fft/fft v0.0.0-20260620110530-0e3ca1747acb h1:kDAxBx5Tvd3PfDIqCgV3J4cpXejsJOOsiKGYQiDTJB4=
