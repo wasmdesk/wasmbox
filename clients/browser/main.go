@@ -63,6 +63,11 @@ func main() {
 	local := make([]byte, 4*w*h)
 	state := scene.New(w, h)
 
+	// scheduleAnim drives the loading-skeleton shimmer. It is nil until wired
+	// below; render calls it after every paint so any repaint that leaves the
+	// browser in the loading state (re)starts the animation loop.
+	var scheduleAnim func()
+
 	render := func() {
 		scene.Render(state, local)
 		client.Call("beginFrame") // open the seqlock window before the bulk copy (tear-free)
@@ -73,6 +78,36 @@ func main() {
 		damage.Set("w", w)
 		damage.Set("h", h)
 		client.Call("commit", damage)
+		if scheduleAnim != nil {
+			scheduleAnim()
+		}
+	}
+
+	// Loading-skeleton animation loop. While the scene reports Loading() (a
+	// navigation or the initial connect is awaiting its first frame), a
+	// self-rescheduling setTimeout advances the shimmer phase from a wall clock
+	// and repaints. The moment a frame arrives (or an error/idle), Loading() goes
+	// false and the loop stops — so an idle browser never burns CPU repainting,
+	// matching the compositor's don't-paint-when-idle discipline.
+	dateNow := js.Global().Get("Date")
+	animPending := false
+	var tick js.Func
+	tick = js.FuncOf(func(js.Value, []js.Value) any {
+		animPending = false
+		if !state.Loading() {
+			return nil
+		}
+		now := dateNow.Call("now").Float()
+		state.SetPhase(now / 1000.0 / scene.SkelCycleSeconds)
+		render() // render re-arms the loop via scheduleAnim while still loading
+		return nil
+	})
+	scheduleAnim = func() {
+		if animPending || !state.Loading() {
+			return
+		}
+		animPending = true
+		js.Global().Call("setTimeout", tick, 33) // ~30fps shimmer
 	}
 
 	conn := newConn(proxyURL(client), state, render)
@@ -152,9 +187,11 @@ func (c *conn) open() {
 	c.ws.Call("addEventListener", "open", js.FuncOf(func(js.Value, []js.Value) any {
 		c.open_ = true
 		c.state.SetConnected(true)
-		// Ask the proxy to render at our content-area size.
+		// Ask the proxy to render at our content-area size, and show the loading
+		// skeleton until that first streamed frame arrives.
 		cw, ch := c.state.ContentSize()
 		c.send(map[string]any{"kind": "resize", "w": cw, "h": ch})
+		c.state.BeginLoad()
 		c.render()
 		return nil
 	}))

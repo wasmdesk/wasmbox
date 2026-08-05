@@ -7,12 +7,17 @@
 // browserproxy: it opens a WebSocket, blits streamed PNG frames into its
 // content-area SAB canvas, and forwards navigation/clicks/keys back. This probe
 // stands up a MINIMAL mock browserproxy WebSocket server (no external deps —
-// raw RFC6455 over node:http + node:crypto) that streams a solid RED frame on
-// connect/resize and a solid GREEN frame after a navigate. It then:
+// raw RFC6455 over node:http + node:crypto) that HOLDS its solid RED frame for a
+// beat after the client's resize (so the loading skeleton is observable), then
+// streams RED, and a solid GREEN frame after a navigate. It then:
 //
+//   0. asserts that, before the first frame, the content area shows the loading
+//      skeleton — grey placeholder bars, bounds-contained below the toolbar,
+//      distinct from both blank white and the eventual streamed frame;
 //   1. boots the compositor, spawns the Browser window, and asserts the RED
 //      frame blitted into the content area (the streaming blit path works, and
-//      a WebSocket escaped COEP:require-corp exactly as designed);
+//      a WebSocket escaped COEP:require-corp exactly as designed) and that the
+//      skeleton is gone from that area once the frame arrives;
 //   2. clicks the address bar, types a URL and presses Enter, and asserts the
 //      content turns GREEN — proving the address bar accepts input and drives a
 //      {navigate} that streams a fresh frame back into the canvas.
@@ -34,6 +39,16 @@ const FRAME_W = 760;
 const FRAME_H = 454; // 760x500 window − 46px toolbar
 const RED = [220, 40, 40];
 const GREEN = [40, 190, 90];
+// SKELETON is scene.skeletonGrey (#d6d6da): the loading-placeholder bar tone the
+// client paints while it awaits a frame. It is deliberately distinct from blank
+// white (#fff), the window/header greys (#f5f5f5 / #ebebeb) and every streamed
+// frame, so a small tolerance isolates it from the compositor chrome.
+const SKELETON = [0xd6, 0xd6, 0xda];
+// The mock holds back its first frame this long after the client's resize, so
+// the loading skeleton is on screen long enough for the probe to observe it. The
+// delay is anchored to the (post-connect) resize, so boot latency cannot close
+// the window early.
+const SKELETON_HOLD_MS = 3500;
 const TOOLBAR_H = 46;
 
 const MIME = {
@@ -103,8 +118,12 @@ function startWS(port, redB64, greenB64) {
         if (f.close) { socket.end(); continue; }
         let m; try { m = JSON.parse(f.text); } catch { continue; }
         if (m.kind === "resize") {
-          send({ kind: "frame", frame: redB64, w: FRAME_W, h: FRAME_H, offsetY: 0 });
-          send({ kind: "state", url: "", title: "Connected", loading: false, canBack: false, canForward: false });
+          // Hold the first frame so the client shows its loading skeleton first,
+          // then stream the solid RED page.
+          setTimeout(() => {
+            send({ kind: "frame", frame: redB64, w: FRAME_W, h: FRAME_H, offsetY: 0 });
+            send({ kind: "state", url: "", title: "Connected", loading: false, canBack: false, canForward: false });
+          }, SKELETON_HOLD_MS);
         } else if (m.kind === "navigate") {
           send({ kind: "frame", frame: greenB64, w: FRAME_W, h: FRAME_H, offsetY: 0 });
           send({ kind: "state", url: m.url, title: "Navigated", loading: false, canBack: true, canForward: false });
@@ -152,6 +171,23 @@ const isColor = (png, x, y, c, tol) => {
   return Math.abs(png.data[i] - c[0]) <= tol && Math.abs(png.data[i + 1] - c[1]) <= tol && Math.abs(png.data[i + 2] - c[2]) <= tol;
 };
 
+// countColorInBox counts pixels of colour c inside rectangle box only.
+const countColorInBox = (png, box, c, tol = 16) => {
+  let n = 0;
+  for (let y = box.y; y < box.y + box.h; y++)
+    for (let x = box.x; x < box.x + box.w; x++)
+      if (isColor(png, x, y, c, tol)) n++;
+  return n;
+};
+
+// contains reports whether inner sits inside outer expanded by pad px on every
+// side — used to prove the skeleton painted within the content area (below the
+// toolbar chrome), never bleeding into the window frame or toolbar.
+const contains = (outer, inner, pad = 2) =>
+  inner.x >= outer.x - pad && inner.y >= outer.y - pad &&
+  inner.x + inner.w <= outer.x + outer.w + pad &&
+  inner.y + inner.h <= outer.y + outer.h + pad;
+
 // denseBox locates the solid content-frame rectangle of colour c by keeping only
 // rows/columns that are mostly that colour, so stray matching pixels elsewhere
 // (window-chrome accents, AA fringes) do not inflate the box.
@@ -194,22 +230,34 @@ try {
   }, { timeout: 15000 });
   await page.evaluate(() => globalThis.wasmboxSpawnExternal("clients/browser/worker.js"));
 
-  // Poll for a screenshot whose content area is mostly `colour` (a streamed
-  // frame blitted), up to ~20s — robust on slow CI runners without fixed sleeps.
-  const waitForFrame = async (colour, min = 100000) => {
+  // Poll for a screenshot with more than `min` pixels of `colour` (within tol),
+  // up to ~20s — robust on slow CI runners without fixed sleeps.
+  const waitForColor = async (colour, min, tol = 24) => {
     for (let i = 0; i < 40; i++) {
       const shot = PNG.sync.read(await page.screenshot({ type: "png" }));
-      if (countColor(shot, colour) > min) return shot;
-      await page.waitForTimeout(500);
+      if (countColor(shot, colour, tol) > min) return shot;
+      await page.waitForTimeout(300);
     }
     return PNG.sync.read(await page.screenshot({ type: "png" }));
   };
 
-  // 1) The RED streamed frame must have blitted into the content area.
-  let png = await waitForFrame(RED);
+  // 0) BEFORE the first frame, the loading skeleton must paint into the content
+  //    area: the mock holds its RED frame for SKELETON_HOLD_MS, so during that
+  //    window the content shows skeleton-grey placeholder bars (distinct from
+  //    both blank white and the eventual RED frame).
+  let png = await waitForColor(SKELETON, 40000, 8);
+  out.skelPixels = countColor(png, SKELETON, 8);
+  out.skelBox = denseBox(png, SKELETON, 8);
+  out.redDuringSkeleton = countColor(png, RED); // must be ~0: no frame yet
+
+  // 1) The RED streamed frame must then have blitted into the content area, and
+  //    the skeleton must be gone from that area.
+  png = await waitForColor(RED, 100000);
   const red = denseBox(png, RED);
   out.redBox = red;
   out.redPixels = countColor(png, RED);
+  if (red) out.skelAfterFrame = countColorInBox(png, red, SKELETON, 8);
+  out.skelContained = red && out.skelBox ? contains(red, out.skelBox) : false;
 
   if (red) {
     // The address bar sits in the toolbar just above the content frame.
@@ -222,7 +270,7 @@ try {
   }
 
   // 2) The typed navigation must stream a fresh GREEN frame into the canvas.
-  png = await waitForFrame(GREEN);
+  png = await waitForColor(GREEN, 100000);
   out.greenPixels = countColor(png, GREEN);
   await writeFile(SHOT, PNG.sync.write(png));
   out.pageerrors = errs;
@@ -233,14 +281,24 @@ try {
 }
 
 console.log(JSON.stringify(out, null, 2));
+// Skeleton shown while loading: substantial grey placeholder bars, no frame yet,
+// and the skeleton contained within the content area (below the toolbar chrome).
+const skelOK = out.skelBox && out.skelPixels > 40000 && out.redDuringSkeleton < 20000 && out.skelContained;
+// Skeleton replaced by the frame: the content area holds ~no skeleton grey once
+// RED arrives.
+const swapOK = out.skelAfterFrame !== undefined && out.skelAfterFrame < 5000;
 const blitOK = out.redBox && out.redPixels > 100000;          // RED frame filled the content area
 const navOK = out.greenPixels > 100000;                       // typed URL → navigate → GREEN frame
 const clean = (out.pageerrors || []).length === 0;
+console.log(skelOK ? "ok  loading skeleton painted into the content area before the first frame (grey placeholders, bounds-contained)"
+                   : "FAIL ❌ no loading skeleton before the first frame");
+console.log(swapOK ? "ok  skeleton cleared once the streamed frame arrived"
+                   : "FAIL ❌ skeleton did not clear after the frame");
 console.log(blitOK ? "ok  RED frame blitted into the SAB canvas (streaming + COEP-escaping WS work)"
                    : "FAIL ❌ no streamed frame in the content area");
 console.log(navOK ? "ok  address bar input drove a navigate → GREEN frame streamed + blitted"
                   : "FAIL ❌ navigation did not stream a new frame");
-const pass = blitOK && navOK && clean;
-console.log(pass ? "\nPASS ✅ streaming browser client: frame blit + interactive address bar"
+const pass = skelOK && swapOK && blitOK && navOK && clean;
+console.log(pass ? "\nPASS ✅ streaming browser client: loading skeleton + frame blit + interactive address bar"
                  : "\nFAIL ❌");
 process.exit(pass ? 0 : 1);

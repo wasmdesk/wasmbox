@@ -136,7 +136,7 @@ func TestRenderContentModes(t *testing.T) {
 	// Favourites start page (connected, no frame) — heading + tiles + upper().
 	Render(connected(), newSurface())
 
-	// Loading panel.
+	// Loading skeleton (a navigation in flight).
 	s := connected()
 	_ = s.startNavigate("example.com")
 	Render(s, newSurface())
@@ -459,6 +459,184 @@ func TestHelpers(t *testing.T) {
 	}
 	if upper('a') != 'A' || upper('Z') != 'Z' {
 		t.Error("upper wrong")
+	}
+}
+
+// --- loading skeleton -----------------------------------------------------
+
+// pixAt reads the RGBA at (x,y) in a tightly-packed surfaceW-wide buffer.
+func pixAt(buf []byte, x, y int) toolkit.RGBA {
+	o := (y*surfaceW + x) * 4
+	return toolkit.RGBA{R: buf[o], G: buf[o+1], B: buf[o+2], A: buf[o+3]}
+}
+
+// Absolute rects of the two solid SkeletonRect placeholders in NewPageSkeleton
+// (pad=12, gap=16, barH=24, paraH=42, imageH=90), offset by the content origin
+// (0, toolbarH). These must stay in sync with toolkit.NewPageSkeleton's layout.
+var (
+	skelInnerW   = surfaceW - 2*12
+	skelBarRect  = toolkit.Rect{X: 12, Y: toolbarH + 12, W: skelInnerW, H: 24}
+	skelImg1Rect = toolkit.Rect{X: 12, Y: toolbarH + 12 + 24 + 16 + 42 + 16, W: skelInnerW, H: 90}
+)
+
+// loadingState returns a connected browser put into the loading (skeleton)
+// state via BeginLoad, with the shimmer parked (phase 0 → flat grey bars).
+func loadingState() *State {
+	s := connected()
+	s.BeginLoad()
+	s.SetPhase(0)
+	return s
+}
+
+// TestLoadingLifecycle exercises the load/skeleton state machine: BeginLoad and
+// a navigation both enter it; a frame and an error both leave it; a disconnected
+// or errored browser never shows the skeleton.
+func TestLoadingLifecycle(t *testing.T) {
+	s := connected()
+	if s.Loading() {
+		t.Fatal("a freshly connected, idle browser is not loading")
+	}
+	s.BeginLoad()
+	if !s.Loading() || !s.streaming() {
+		t.Fatal("BeginLoad should enter the loading (streaming) state")
+	}
+	cw, ch := s.ContentSize()
+	s.SetFrame(framePixels(cw, ch), cw, ch)
+	if s.Loading() {
+		t.Fatal("the first frame should stop the skeleton")
+	}
+	// A navigation re-enters loading even though a stale frame exists.
+	if !s.startNavigate("example.com") || !s.Loading() {
+		t.Fatal("navigation should re-enter the loading state")
+	}
+	// An error leaves loading for the error panel.
+	s.SetError("boom")
+	if s.Loading() {
+		t.Fatal("an error should drop the skeleton")
+	}
+	// Disconnected is never the skeleton state (that is the offline panel).
+	d := newState()
+	d.BeginLoad()
+	if d.Loading() {
+		t.Fatal("a disconnected browser must not show the skeleton")
+	}
+}
+
+// TestSkeletonPixels proves the loading state paints the web-style skeleton into
+// the content area: the two solid placeholder bars are the skeleton grey, the
+// surrounding page ground is white, every skeleton pixel is contained below the
+// toolbar, and the toolbar band carries none of the skeleton grey.
+func TestSkeletonPixels(t *testing.T) {
+	s := loadingState()
+	buf := newSurface()
+	Render(s, buf)
+
+	// Both solid SkeletonRect bars are flat skeleton grey at phase 0. Sample the
+	// interior (inset past the 6px corner radius + edge AA) so points land on the
+	// solid fill, not a rounded corner.
+	for _, r := range []toolkit.Rect{skelBarRect, skelImg1Rect} {
+		for _, p := range []struct{ x, y int }{
+			{r.X + 12, r.Y + 12}, {r.X + r.W/2, r.Y + r.H/2}, {r.X + r.W - 12, r.Y + r.H - 12},
+		} {
+			if got := pixAt(buf, p.x, p.y); got != skeletonGrey {
+				t.Fatalf("skeleton bar pixel (%d,%d) = %+v, want skeletonGrey %+v", p.x, p.y, got, skeletonGrey)
+			}
+		}
+	}
+
+	// The page ground around the bars is white (Surface), not grey.
+	white := s.theme.Surface
+	for _, p := range []struct{ x, y int }{
+		{5, toolbarH + 6},                      // left pad, above the first bar
+		{surfaceW / 2, toolbarH + 12 + 24 + 8}, // gap between the top bar and the paragraph
+	} {
+		if got := pixAt(buf, p.x, p.y); got != white {
+			t.Fatalf("page ground pixel (%d,%d) = %+v, want white %+v", p.x, p.y, got, white)
+		}
+	}
+
+	// Bounds containment: the skeleton grey never bleeds into the toolbar band.
+	for y := 0; y < toolbarH; y++ {
+		for x := 0; x < surfaceW; x++ {
+			if pixAt(buf, x, y) == skeletonGrey {
+				t.Fatalf("skeleton grey leaked into the toolbar at (%d,%d)", x, y)
+			}
+		}
+	}
+}
+
+// opaqueFrame builds a fully-opaque RGBA buffer of one solid colour, so the
+// blit lands the exact colour (unlike framePixels, whose 0x40 alpha blends).
+func opaqueFrame(w, h int, c toolkit.RGBA) []byte {
+	buf := make([]byte, w*h*4)
+	for i := 0; i < len(buf); i += 4 {
+		buf[i], buf[i+1], buf[i+2], buf[i+3] = c.R, c.G, c.B, 0xff
+	}
+	return buf
+}
+
+// TestSkeletonReplacedByFrame proves the skeleton is gone once a frame streams
+// in: the bar rect that was skeleton grey becomes the streamed frame's colour.
+func TestSkeletonReplacedByFrame(t *testing.T) {
+	s := loadingState()
+	buf := newSurface()
+	Render(s, buf)
+	cx, cy := skelBarRect.X+skelBarRect.W/2, skelBarRect.Y+skelBarRect.H/2
+	if got := pixAt(buf, cx, cy); got != skeletonGrey {
+		t.Fatalf("pre-frame bar pixel = %+v, want skeletonGrey", got)
+	}
+	cw, ch := s.ContentSize()
+	blue := toolkit.RGBA{R: 0x20, G: 0x40, B: 0xf0, A: 0xff}
+	s.SetFrame(opaqueFrame(cw, ch, blue), cw, ch)
+	Render(s, buf)
+	if got := pixAt(buf, cx, cy); got != blue {
+		t.Fatalf("post-frame bar pixel = %+v, want streamed frame %+v", got, blue)
+	}
+}
+
+// TestSkeletonShimmerAnimates proves SetPhase drives the shimmer: at a mid-sweep
+// phase the diagonal highlight lifts some bar pixels lighter than the flat base
+// grey, whereas at the parked phase 0 every bar pixel is the flat base. It scans
+// the top bar's solid interior (inset past the rounded corners + edge AA) so the
+// white background around the rounded rect never counts as a lifted pixel.
+func TestSkeletonShimmerAnimates(t *testing.T) {
+	const inset = 10
+	lifted := func(phase float64) int {
+		s := connected()
+		s.BeginLoad()
+		s.SetPhase(phase)
+		buf := newSurface()
+		Render(s, buf)
+		n := 0
+		for y := skelBarRect.Y + inset; y < skelBarRect.Y+skelBarRect.H-inset; y++ {
+			for x := skelBarRect.X + inset; x < skelBarRect.X+skelBarRect.W-inset; x++ {
+				// Shimmer lifts the base grey toward (but not to) white; the solid
+				// interior has no white, so any R above the base is shimmer.
+				if int(pixAt(buf, x, y).R) > int(skeletonGrey.R) {
+					n++
+				}
+			}
+		}
+		return n
+	}
+	if n := lifted(0); n != 0 {
+		t.Fatalf("parked (phase 0) skeleton interior has %d lifted pixels, want 0 (flat grey)", n)
+	}
+	if n := lifted(0.5); n == 0 {
+		t.Fatal("mid-sweep (phase 0.5) skeleton interior has no shimmer-lifted pixels")
+	}
+}
+
+// TestSkelThemeGrey checks the dedicated skeleton theme carries the visible
+// skeleton grey (WhiteSur's own SurfaceAlt is a near-white that would be
+// invisible).
+func TestSkelThemeGrey(t *testing.T) {
+	s := newState()
+	if s.skelTheme.SurfaceAlt != skeletonGrey {
+		t.Fatalf("skelTheme.SurfaceAlt = %+v, want skeletonGrey %+v", s.skelTheme.SurfaceAlt, skeletonGrey)
+	}
+	if s.theme.SurfaceAlt == skeletonGrey {
+		t.Fatal("base theme SurfaceAlt should be untouched (only the skeleton theme is greyed)")
 	}
 }
 

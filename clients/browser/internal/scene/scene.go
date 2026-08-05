@@ -80,6 +80,19 @@ type State struct {
 	frameW, frameH int
 	hasFrame       bool
 
+	// Skeleton loading state. awaitingFrame is set when a load is in flight
+	// locally (a navigation was issued, or the client just connected and asked
+	// the proxy for an initial render) and no {frame} for it has arrived yet; it
+	// is cleared by the first frame (or an error). While a load is in flight the
+	// content area shows a web-style page skeleton (NewPageSkeleton) instead of a
+	// blank ground, its shimmer swept by phase. phase is advanced by the client's
+	// animation loop (SetPhase) only while Loading() holds, so an idle browser
+	// never repaints.
+	awaitingFrame bool
+	phase         float64
+	skel          *toolkit.SkeletonGroup
+	skelTheme     *toolkit.Theme
+
 	// Address-bar editing.
 	addrFocused bool
 	addrText    string // the text being edited (only meaningful while focused)
@@ -135,12 +148,36 @@ const (
 	zeroGap       = -1
 )
 
+// skeletonGrey is the loading-skeleton placeholder tone: a light neutral grey
+// (#d6d6da) that reads as the familiar "content coming" bar on a white content
+// ground and stays clearly distinct from blank white (#fff), the window/header
+// greys (#f5f5f5 / #ebebeb) and any streamed page frame — so the loading state
+// is unambiguous both to the eye and to a pixel probe.
+var skeletonGrey = toolkit.RGB(0xd6, 0xd6, 0xda)
+
+// SkelCycleSeconds is the shimmer sweep period (seconds): the client advances
+// the skeleton phase as elapsedSeconds/SkelCycleSeconds so one gleam crosses
+// the page roughly this often.
+const SkelCycleSeconds = 1.2
+
 // New builds the browser sized W×H and lays out its widget tree. The client
 // starts disconnected (the offline panel shows) until main.go opens the proxy
 // WebSocket and calls SetConnected(true).
 func New(w, h int) *State {
 	enableAAText()
 	s := &State{W: w, H: h, theme: toolkit.WhiteSurLight()}
+
+	// The loading skeleton draws its placeholder bars in a dedicated theme whose
+	// SurfaceAlt is a proper web-skeleton grey. WhiteSur's own SurfaceAlt (#fbfbfb)
+	// is a near-white that would leave the skeleton invisible against the white
+	// content ground; skeletonGrey (#e2e2e6) reads as the familiar grey placeholder
+	// on white, distinct from both blank white and any streamed frame.
+	skelTheme := *s.theme
+	skelTheme.SurfaceAlt = skeletonGrey
+	s.skelTheme = &skelTheme
+	// A page skeleton sized to the content area (below the toolbar). streamCard
+	// rebuilds it on every (re)layout so its bar widths track the window width.
+	s.skel = toolkit.NewPageSkeleton(toolkit.Rect{X: 0, Y: toolbarH, W: w, H: h - toolbarH})
 	s.favs = []link{
 		{"weft", "weft.dev"},
 		{"claimward", "claimward.io"},
@@ -260,6 +297,7 @@ func (s *State) SetFrame(pixels []byte, w, h int) {
 	s.frameW, s.frameH = w, h
 	s.hasFrame = true
 	s.loading = false
+	s.awaitingFrame = false // the load completed: stop the skeleton
 	s.connected = true
 	s.status = ""
 	s.syncCard()
@@ -270,7 +308,36 @@ func (s *State) SetFrame(pixels []byte, w, h int) {
 func (s *State) SetError(msg string) {
 	s.status = msg
 	s.loading = false
+	s.awaitingFrame = false // the load failed: drop the skeleton for the error panel
 	s.syncCard()
+}
+
+// BeginLoad puts the browser into the loading (skeleton) state without a URL —
+// used by the client right after the proxy socket opens, so the content area
+// shows the page skeleton while it awaits the proxy's first streamed frame.
+// The first {frame} (or an {error}) clears it.
+func (s *State) BeginLoad() {
+	s.awaitingFrame = true
+	s.syncCard()
+}
+
+// Loading reports whether the content area is showing the loading skeleton
+// (connected, no pending error, and a load in flight). The client keeps its
+// shimmer animation loop running exactly while this holds, so an idle browser
+// never repaints.
+func (s *State) Loading() bool { return s.showSkeleton() }
+
+// SetPhase records the shimmer sweep position for the loading skeleton. The
+// client advances it every animation frame (typically elapsedSeconds /
+// SkelCycleSeconds); the skeleton wraps it into [0,1).
+func (s *State) SetPhase(t float64) { s.phase = t }
+
+// showSkeleton reports whether the loading skeleton should be shown: the proxy
+// is connected, no error panel is pending, and a load is in flight — either
+// locally (awaitingFrame, set by a navigation or BeginLoad) or reported by the
+// server ({state loading:true}).
+func (s *State) showSkeleton() bool {
+	return s.connected && s.status == "" && (s.awaitingFrame || s.loading)
 }
 
 // Title returns the current page title (for the window/tab chrome).
@@ -292,9 +359,11 @@ func Render(s *State, buf []byte) {
 		headerBG = th.Background
 	}
 
-	// Content ground: white when a page is shown, window grey otherwise.
+	// Content ground: white when a page is shown or a skeleton is loading (a
+	// loading web page is a white sheet with grey placeholders), window grey
+	// otherwise.
 	contentBG := th.Background
-	if s.hasFrame {
+	if s.hasFrame || s.showSkeleton() {
 		contentBG = th.Surface
 	}
 	p.FillRect(toolkit.Rect{X: 0, Y: toolbarH, W: s.W, H: s.H - toolbarH}, contentBG)
@@ -376,6 +445,7 @@ func (s *State) startNavigate(url string) bool {
 	}
 	s.addrFocused = false
 	s.loading = true
+	s.awaitingFrame = true // show the skeleton until this navigation's first frame
 	s.status = ""
 	s.syncCard()
 	if s.OnNavigate != nil {
@@ -389,6 +459,7 @@ func (s *State) goBack() bool {
 		return false
 	}
 	s.loading = true
+	s.awaitingFrame = true
 	s.syncCard()
 	if s.OnBack != nil {
 		s.OnBack()
@@ -401,6 +472,7 @@ func (s *State) goForward() bool {
 		return false
 	}
 	s.loading = true
+	s.awaitingFrame = true
 	s.syncCard()
 	if s.OnForward != nil {
 		s.OnForward()
@@ -411,7 +483,7 @@ func (s *State) goForward() bool {
 // streaming reports whether the content area shows the stream card (a frame or
 // an offline/loading/error panel) rather than the favourites start page.
 func (s *State) streaming() bool {
-	return s.hasFrame || !s.connected || s.loading || s.status != ""
+	return s.hasFrame || !s.connected || s.loading || s.awaitingFrame || s.status != ""
 }
 
 // syncCard points the CardLayout at the active content view and re-lays the
@@ -577,6 +649,12 @@ type streamCard struct {
 func (c *streamCard) SetBounds(r toolkit.Rect) {
 	c.Base.SetBounds(r)
 	c.s.frameImg.SetBounds(r)
+	// Rebuild the page skeleton to the live content rect so its placeholder bars
+	// span the current window width. CardLayout collapses an inactive card to a
+	// zero rect; skip those so the skeleton keeps its last real geometry.
+	if r.W > 0 && r.H > 0 {
+		c.s.skel = toolkit.NewPageSkeleton(r)
+	}
 }
 
 func (c *streamCard) Draw(p painter.Painter, th *toolkit.Theme) {
@@ -584,17 +662,25 @@ func (c *streamCard) Draw(p painter.Painter, th *toolkit.Theme) {
 	if r.W == 0 || r.H == 0 {
 		return
 	}
+	// A load in flight (navigation or initial connect, no frame yet): a web-style
+	// page skeleton with a shimmer swept by the client's phase clock. It is drawn
+	// in skelTheme so the placeholder bars read as a visible grey on the white
+	// content ground.
+	if c.s.showSkeleton() {
+		c.s.skel.SetPhase(c.s.phase)
+		c.s.skel.Draw(p, c.s.skelTheme)
+		return
+	}
 	if c.s.hasFrame {
 		c.s.frameImg.Draw(p, th)
 		return
 	}
-	// No frame: draw a centred panel with a headline + detail lines. The stream
-	// card is only active (drawn) when a page is loading, the proxy is
-	// disconnected, or an error is pending — so one of these cases always holds.
+	// No frame and not loading: a centred panel. The stream card is only active
+	// (drawn) when the proxy is disconnected or an error is pending — so one of
+	// these two cases always holds here.
 	var head string
 	var detail []string
-	switch {
-	case !c.s.connected:
+	if !c.s.connected {
 		head = "Browser proxy not connected"
 		detail = []string{
 			"The wasmdesk browser streams pages from a local",
@@ -602,9 +688,7 @@ func (c *streamCard) Draw(p painter.Painter, th *toolkit.Theme) {
 			"    go run ./cmd/browserproxy -addr :8090",
 			"then reload this window.",
 		}
-	case c.s.loading:
-		head = "Loading…"
-	default: // c.s.status != ""
+	} else { // c.s.status != ""
 		head = "Could not load the page"
 		detail = []string{c.s.status}
 	}

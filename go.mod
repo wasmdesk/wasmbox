@@ -7,7 +7,7 @@ require (
 	github.com/go-opentype/fonts v0.4.2
 	github.com/go-ruby-parser/parser v0.1.3
 	github.com/go-widgets/painter v0.2.0
-	github.com/go-widgets/toolkit v0.80.0
+	github.com/go-widgets/toolkit v0.109.0
 	github.com/wasmdesk/coreutils v0.0.0-20260629060422-c37bd87ae249
 )
 
