@@ -767,6 +767,25 @@ globalThis.wasmboxBlitRGBA = function (ctx, b64, w, h, dx, dy, key) {
   ctx.putImageData(slot, dx, dy);
 };
 
+// wasmboxBlitRGBARegion(ctx, w, h, dx, dy, key, rx, ry, rw, rh): re-present ONLY
+// the (rx, ry, rw, rh) sub-rectangle of the cached opaque RGBA buffer `key`
+// (built by a prior wasmboxBlitRGBA). The dirty-rect compositor uses this to
+// repaint the desktop background inside a single damage region without
+// disturbing the rest of the canvas: putImageData IGNORES the 2D context clip
+// path, so a plain wasmboxBlitRGBA under a clip would still overwrite the whole
+// canvas — the 7-argument putImageData dirty-rect form is the only way to
+// restrict an opaque putImageData to a region. The buffer spans the whole canvas
+// at (dx, dy) = (0, 0), so the dirty rect in buffer space is (rx-dx, ry-dy).
+// No-op if the slot is missing (the first frame is always a full composite, so
+// the "desktop" slot is populated before any region frame runs).
+globalThis.wasmboxBlitRGBARegion = function (ctx, w, h, dx, dy, key, rx, ry, rw, rh) {
+  const cache = globalThis.__wasmboxRGBACache;
+  const slot = cache && cache[key];
+  if (!slot) return;
+  globalThis.__wasmboxStats.rgbaPresents++;
+  ctx.putImageData(slot, dx, dy, (rx | 0) - (dx | 0), (ry | 0) - (dy | 0), rw | 0, rh | 0);
+};
+
 // Blit a TRANSLUCENT RGBA buffer (same layout as wasmboxBlitRGBA) at (dx, dy),
 // alpha-composited (source-over) onto whatever is already on the canvas —
 // unlike wasmboxBlitRGBA, which putImageData-OVERWRITES (correct only for an

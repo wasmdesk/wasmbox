@@ -31,25 +31,45 @@ class Compositor
     @fps = 0.0
     @last_layout_sig = nil
     @opentype_text = false # flips true after the one-shot AA-text opt-in
-    # --- idle-repaint gate state (see needs_paint?) ------------------------
-    # The render loop runs every rAF, but a full frame is only PAINTED when
-    # something that affects pixels changed. @force_paint is the sticky "dirty"
-    # flag every input + client-message entry point raises (mark_dirty); it is
-    # cleared the instant a frame is painted. @last_applet_sig / @last_content_seqs
-    # remember the self-driven state (a live clock applet, a window's committed
-    # content seq) the last painted frame captured, so a change since then forces
-    # the next paint without any input. true on construction so the FIRST frame
-    # always paints (nothing has been drawn yet).
+    # --- dirty-rect + idle-repaint gate state ------------------------------
+    # The render loop runs every rAF, but compute_damage decides both WHETHER a
+    # frame is painted at all (the #88 idle gate: no damage → skip) and, when it
+    # is, WHICH regions to repaint (dirty-rect compositing: only the changed
+    # rectangles, not the whole canvas).
+    #
+    # @force_paint is the sticky "dirty" belt every input + client/bus message
+    # entry point raises (mark_dirty). It guarantees the next frame composites;
+    # compute_damage localises the change to a region when it can and otherwise
+    # falls back to a full recomposite. Cleared the instant a frame is painted.
+    # true on construction so the FIRST frame always paints (nothing drawn yet).
     @force_paint = true
-    @last_applet_sig = nil
-    @last_content_seqs = nil
+    # @damage accumulates the regions that changed since the last composited
+    # frame; compute_damage rebuilds it each frame by diffing the live scene
+    # against the retained snapshot of what we last drew (@prev_* below).
+    @damage = DamageSet.new
+    @prev_wins = {}          # id => { vk: <visual signature>, b: <screen bounds> }
+    @cur_wins = {}           # working snapshot built during compute_damage
+    @prev_seqs = {}          # id => committed content seq of the last drawn frame
+    @cur_seqs = {}           # working snapshot built during compute_damage
+    @prev_globals = nil      # [frame_name, workspace, width, height]
+    @prev_overlay_active = false  # was a full-screen overlay/menu up last frame?
+    @prev_applet_sig = nil   # combined applet content signature last drawn
+    @prev_applet_layout = nil # applet set + positions last drawn
+    @prev_tray_sig = nil     # tray strip content signature last drawn
+    @prev_notify_sig = nil   # toast stack content signature last drawn
+    @prev_notify_count = 0   # toast count last drawn (for the clear-band extent)
+    @rendered_frames = 0     # frames we ACTUALLY composited (HUD counter)
+    # @bench_no_gate / @bench_no_sprite are optional bench seams: cmd/rbbench
+    # sets them via instance_variable_set to A/B the old (full redraw every
+    # frame) vs new (dirty-rect gate) paths in one binary. They are nil (falsy)
+    # in the shipped compositor, so production never touches the legacy path.
   end
 
   # Raise the idle-repaint dirty flag: the next rAF frame will paint. Called from
   # every input handler (install_input wraps each DOM event), every client / bus
   # message (route_worker_message + the spawn bus), and viewport resize
   # (fit_canvas) — i.e. every externally-triggered state change. Self-driven
-  # changes (a live applet tick, a window commit) are detected in needs_paint?
+  # changes (a live applet tick, a window commit) are detected in compute_damage
   # instead, so they need no explicit call here.
   def mark_dirty
     @force_paint = true
@@ -696,8 +716,8 @@ class Compositor
 
   # Every DOM input event is a potential state change, so each handler is wrapped
   # to raise the idle-repaint dirty flag before it runs. This is the belt half of
-  # the belt-and-suspenders gate: any user input paints the next frame; the
-  # suspenders half (needs_paint?) additionally catches self-driven changes
+  # the belt-and-suspenders gate: any user input composites the next frame; the
+  # suspenders half (compute_damage) additionally catches self-driven changes
   # (applet ticks, window commits) that arrive with no DOM event.
   def install_input
     @canvas.on("mousedown")   { |e| mark_dirty; on_mousedown(e) }
@@ -1463,60 +1483,324 @@ class Compositor
     Widgets.use_opentype_text
   end
 
-  # The per-rAF entry point. Runs every animation frame but only PAINTS a full
-  # frame when needs_paint? reports a pixel-affecting change. An idle desktop —
-  # no window commits, no live-applet tick, no input — skips the whole
-  # desktop→windows→overlays repaint, so idle CPU approaches zero instead of
-  # re-compositing a static scene ~60×/sec (the Firefox 100%-CPU regression the
-  # DE overlays surfaced: every overlay re-PRESENTS a cached buffer each frame,
-  # and the desktop does a full-canvas putImageData, even when nothing moved).
+  # The per-rAF entry point. Runs every animation frame but composites only when
+  # compute_damage reports a change, and then repaints only the changed REGIONS
+  # rather than the whole canvas:
+  #   - empty damage → idle → skip the whole scene walk (the #88 gate: no window
+  #     commit, no live-applet tick, no input → idle CPU approaches zero instead
+  #     of re-compositing a static scene ~60×/sec, the Firefox 100%-CPU
+  #     regression the DE overlays surfaced).
+  #   - full  damage → whole-screen recomposite (first frame, viewport resize,
+  #     frame/palette swap, workspace switch, an open menu / full-screen modal).
+  #   - region damage → repaint only the union of the changed rectangles
+  #     (draw the desktop + intersecting windows clipped to each rect; retain
+  #     everything else from the prior frame), then relay the top overlays.
   # The focused-rect probe publish runs every frame regardless (one cheap JS
   # call) so the snapping probe reads a fresh value even on skipped frames.
   def render
     enable_opentype_text_once
-    paint_frame if needs_paint?
+    # Re-anchor every panel to the bottom-center of the current canvas BEFORE we
+    # diff, so a re-anchor (e.g. after a viewport resize) shows up as a geometry
+    # change in compute_damage rather than being missed.
+    @wm.panels.each { |p| @wm.anchor_panel(p, @width, @height) }
+
+    compute_damage
+    unless @damage.empty?
+      if @damage.full?
+        paint_full
+      else
+        paint_regions(@damage)
+      end
+      @rendered_frames += 1
+    end
+    # This frame is now on the canvas (or was intentionally skipped): clear the
+    # belt and promote the working snapshot so the NEXT compute_damage diffs
+    # against exactly what is on screen. force_paint can only be set here when
+    # damage was non-empty (compute_damage escalates a stray belt to full), so
+    # clearing it unconditionally never drops a pending change.
+    @force_paint = false
+    snapshot_scene
+
     # Publish the focused window's live geometry + the work-area metrics for the
     # snapping probe (test/probe-snapping.mjs reads globalThis.__wasmboxFocusedRect).
-    # One cheap JS call per frame, self-gated on SNAPPING so main is unaffected.
+    # One cheap JS call per frame, self-gated on SNAPPING so main is unaffected,
+    # and OUTSIDE the paint gate so the probe reads a fresh value on idle frames.
     publish_snap_geometry if SNAPPING
   end
 
-  # True when this frame must be repainted. The BELT: @force_paint, raised by
-  # every input + client/bus message (mark_dirty), sticky until the paint clears
-  # it. The SUSPENDERS: self-driven state that changes with no DOM event — an
-  # open menu / modal / drag / non-empty notification stack (these animate or are
-  # transient, so they keep painting while up), a live applet whose content
-  # signature ticked (a clock second), or an external window that committed new
-  # pixels since the last painted frame. The debug HUD's frame/fps counter is
-  # deliberately NOT a trigger, so it never keeps a static desktop awake.
-  def needs_paint?
-    return true if @force_paint
+  # Diff the live scene against the last composited frame and populate @damage.
+  # A global change (or the first frame / a modal / the bench baseline seam)
+  # forces a full recomposite; otherwise we accumulate one rectangle per changed,
+  # appeared or vanished window, one per external surface that committed new
+  # pixels, one per ticking desktop applet, plus the tray / notification / HUD
+  # bands when those changed — then the belt catch-all promotes anything we could
+  # not localise to a full recomposite.
+  def compute_damage
+    @damage.clear
+    g = current_globals
+    overlay = overlay_active?
+    # Full recomposite when the bench baseline seam is set, on the first frame,
+    # on any global change (frame/palette, active workspace, canvas size), or
+    # when a full-screen overlay/menu is up now OR was up last frame (so the
+    # frame it closes on also erases it).
+    force_full = @bench_no_gate || @prev_globals.nil? || g != @prev_globals ||
+                 overlay || @prev_overlay_active
+    # A desktop-applet set/position change (add / remove / drag) is rare and
+    # reshuffles the board, so a full recomposite is simplest and erases any
+    # vacated tile footprint.
+    force_full = true if APPLETS && applet_layout_signature != @prev_applet_layout
+
+    cur = {}
+    seqs = {}
+    wins = visible_windows
+    wins.each do |win|
+      b  = window_bounds(win)
+      vk = window_vkey(win)
+      sq = window_live_seq(win)
+      cur[win.id]  = { vk: vk, b: b }
+      seqs[win.id] = sq
+      next if force_full
+      prev = @prev_wins[win.id]
+      if prev.nil?
+        @damage.add_rect(b)                      # newly appeared
+      elsif prev[:vk] != vk
+        u = DamageSet.union(prev[:b], b)         # moved / resized / focus / shade / retitle
+        @damage.add(u[:x], u[:y], u[:w], u[:h])
+      end
+      # New client pixels (a commit) damage the surface even when its geometry is
+      # unchanged. Over-approximated to the whole window bounds rather than
+      # mapping the sub-rect through the resize scale — simpler, and still far
+      # less than a full-screen repaint whenever other windows exist.
+      prev_sq = @prev_seqs[win.id].nil? ? 0 : @prev_seqs[win.id]
+      if win.external? && (!win.clipped_damage.nil? || sq != prev_sq)
+        @damage.add_rect(b)
+      end
+    end
+    @cur_wins = cur
+    @cur_seqs = seqs
+
+    if force_full
+      @damage.full!
+      return nil
+    end
+
+    # A window present last frame but gone now leaves a hole to repaint.
+    @prev_wins.each do |id, prev|
+      @damage.add_rect(prev[:b]) unless cur.key?(id)
+    end
+
+    # Desktop-applet content ticks (a clock second, a monitor step, a calendar
+    # nav) repaint just the affected tiles — same set + positions, exact bounds.
+    damage_applets
+    # Tray strip + notification column are top-stratum overlays; damage their
+    # bands when their content changed so the region loop repaints the desktop +
+    # windows beneath, and the post-loop redraw lands them back on top.
+    damage_tray
+    damage_notifications
+
+    # Belt catch-all: an input/message raised force_paint but nothing above could
+    # localise it (a wallpaper/theme swap, a hover forward, …) — repaint fully so
+    # a change we cannot pin to a region is never dropped.
+    if @force_paint && @damage.empty?
+      @damage.full!
+      return nil
+    end
+    # NOTE: the debug HUD (fps + composited-frame counter) is a RETAINED top
+    # overlay, like the tray + toasts — its pixels persist on the canvas, so it
+    # is NOT damaged here every frame (that would tax every localized change with
+    # a whole extra region). paint_regions relays it only when another damage
+    # rect repainted the band beneath it; its counter therefore holds steady
+    # during localized activity that never touches the bottom-left band, which is
+    # the honest picture of the work actually done.
+    nil
+  end
+
+  # Promote the working snapshot to the retained one, after a composite (or an
+  # intentionally-skipped idle frame). The next compute_damage diffs against it.
+  def snapshot_scene
+    @prev_wins = @cur_wins
+    @prev_seqs = @cur_seqs
+    @prev_globals = current_globals
+    @prev_overlay_active = overlay_active?
+    @prev_applet_sig = applet_signature
+    @prev_applet_layout = applet_layout_signature
+    @prev_tray_sig = tray_signature
+    @prev_notify_sig = notification_signature
+    @prev_notify_count = NOTIFICATIONS ? notifications.length : 0
+    nil
+  end
+
+  # The bottom-to-top list of windows that actually render: not minimized, and
+  # either a panel (always visible) or on the active workspace.
+  def visible_windows
+    active = @wm.active_workspace
+    out = []
+    @wm.ordered_windows.each do |win|
+      next if win.minimized?
+      next if !win.panel? && win.workspace != active
+      out << win
+    end
+    out
+  end
+
+  # Screen-space bounding box [x, y, w, h] a window paints into: the padded
+  # chrome extent for a decorated window, else the bare body rect.
+  def window_bounds(win)
+    win.decorated? ? Frame.sprite_bounds(win) : win.body_rect
+  end
+
+  # A window's visual signature: every input that changes its on-screen pixels
+  # OR its position. Equal signatures across two frames mean that window need not
+  # be repainted (and its cached chrome buffer still applies).
+  def window_vkey(win)
+    "#{win.x}:#{win.y}:#{win.w}:#{win.h}:#{win.focused? ? 1 : 0}:#{win.shaded? ? 1 : 0}:#{win.title}"
+  end
+
+  # The live committed-content seq of one external window (0 for in-process or
+  # seqlock-less surfaces), read straight from the SAB control word so a client
+  # that painted new pixels is observed BEFORE the blit.
+  def window_live_seq(win)
+    return 0 unless win.external?
+    slot = win.image_data
+    slot.nil? ? 0 : JS.global.call("wasmboxWindowLiveSeq", slot).to_i
+  end
+
+  # Everything that, when it changes, is cheapest to handle with a full
+  # recomposite: the active frame/palette, the active workspace and the canvas
+  # size.
+  def current_globals
+    [Frame.current_name, @wm.active_workspace, @width, @height]
+  end
+
+  # A full-screen overlay / menu is up: repaint fully while it is (and the frame
+  # it closes on). Menus, the drag-to-edge snap preview and the Alt-Tab /
+  # Spotlight / Exposé modals all dim or draw over large areas, so a region walk
+  # would be more code for no win.
+  def overlay_active?
     return true if @menu
-    return true if @drag
     return true if SNAPPING && @snap_preview
     return true if ALTTAB && alttab_active?
     return true if SPOTLIGHT && spotlight_active?
     return true if EXPOSE && expose_active?
-    return true if NOTIFICATIONS && !notifications.empty?
-    return true if applets_changed?
-    return true if external_content_changed?
     false
   end
 
-  # The full-frame paint: desktop → applets → windows → snap preview → menu →
-  # HUD → tray → notifications → modals. Extracted from render so the idle gate
-  # can skip it wholesale. Clears the dirty flag and snapshots the self-driven
-  # state (applet signature, per-window content seqs) so the NEXT needs_paint?
-  # compares against exactly what this frame drew.
-  def paint_frame
+  # Small reserved band at the bottom-left for the HUD text (fps + frame no.),
+  # matching draw_hud_widgets' placement + extent.
+  def hud_rect
+    [0, @height - 24, [560, @width].min, 24]
+  end
+
+  # Damage each desktop applet tile whose content signature ticked (clock
+  # second / monitor step / calendar nav). Same set + positions as last frame
+  # (a set/position change already forced a full recomposite), so the tile
+  # bounds are exact and nothing was vacated.
+  def damage_applets
+    return nil unless APPLETS
+    b = applets
+    return nil if b.empty?
+    return nil if applet_signature == @prev_applet_sig
+    b.items.each { |a| @damage.add_rect([a.x, a.y, a.w, a.h]) }
+    nil
+  end
+
+  # Damage the tray strip band when its content signature changed (an add,
+  # remove or a live glyph/tooltip update). A generous full-width top band — the
+  # strip's left edge depends on the item count, and covering the band handles
+  # any add/remove/update extent without tracking the previous layout.
+  def damage_tray
+    return nil unless TRAY
+    return nil if tray_signature == @prev_tray_sig
+    @damage.add_rect(tray_bounds)
+    nil
+  end
+
+  # Damage the notification column when the toast set changed (a post, an expiry
+  # or the reflow an expiry triggers). The band covers max(prev, cur) toasts so
+  # the vacated slot of an expired toast is repainted too.
+  def damage_notifications
+    return nil unless NOTIFICATIONS
+    return nil if notification_signature == @prev_notify_sig
+    @damage.add_rect(notifications_bounds)
+    nil
+  end
+
+  # The combined content signature of every desktop applet ("" when none /
+  # APPLETS off): a live applet forces a repaint exactly when its pixels must
+  # change and no more often. Reuses applet_sig (14_applets.rb) — the same
+  # signature the per-applet render cache keys on.
+  def applet_signature
+    return "" unless APPLETS
+    b = applets
+    return "" if b.empty?
+    b.items.map { |a| applet_sig(a) }.join("|")
+  end
+
+  # The applet board's structural signature (kinds + positions). A change here
+  # (an add / remove / drag) forces a full recomposite so a vacated tile is
+  # erased; a pure content tick (same kinds + positions) does not.
+  def applet_layout_signature
+    return "" unless APPLETS
+    b = applets
+    return "" if b.empty?
+    b.items.map { |a| "#{a.kind}@#{a.x},#{a.y}" }.join("|")
+  end
+
+  # The tray strip's content signature: id + glyph + tooltip + image-present per
+  # item (TrayItem#sig), so an add/remove OR an in-place update moves it.
+  def tray_signature
+    return "" unless TRAY
+    t = tray
+    return "" if t.empty?
+    t.items.map { |it| it.sig }.join("|")
+  end
+
+  # Full-width top band tall enough for the tray strip (its plate + icons).
+  def tray_bounds
+    [0, 0, @width, TrayArea::MARGIN + TrayArea::ICON + 2 * TRAY_PAD]
+  end
+
+  # The notification column's content signature: the toast ids (keys), which
+  # change on every post / expiry / reflow (toasts are immutable once posted).
+  def notification_signature
+    return "" unless NOTIFICATIONS
+    s = notifications
+    return "" if s.empty?
+    s.items.map { |n| n.key }.join("|")
+  end
+
+  # Screen band the notification column occupies, covering max(prev, cur) toasts
+  # so an expiry's vacated slot is repainted along with the survivors' reflow.
+  def notifications_bounds
+    w   = NotificationStack::TOAST_W
+    mg  = NotificationStack::TOAST_MARGIN
+    gap = NotificationStack::TOAST_GAP
+    th  = NotificationStack::TOAST_H
+    n = notifications.length
+    n = @prev_notify_count if @prev_notify_count > n
+    n = 1 if n < 1
+    [@width - w - mg, 0, w + mg, mg + n * (th + gap)]
+  end
+
+  # True when any accumulated damage rect overlaps the given [x,y,w,h] bounds.
+  def damage_touches?(bounds)
+    hit = false
+    @damage.rects.each { |r| hit = true if DamageSet.rect_intersects?(r, bounds) }
+    hit
+  end
+
+  # The whole-screen recomposite: desktop → applets → windows → snap preview →
+  # menu → HUD → tray → notifications → modals. Used for the first frame,
+  # viewport resizes, frame/palette swaps, workspace switches, whenever a menu /
+  # full-screen modal is up, and whenever damage collapses to `full`. The
+  # dirty-flag clear + scene snapshot live in #render, shared with the region
+  # path, so this method only paints.
+  def paint_full
     draw_desktop
     # Desktop applets (14_applets.rb): the BOTTOM interactive stratum — painted
     # right after the wallpaper and BEFORE the windows, so every window
     # composites OVER an applet. Self-gates on Compositor::APPLETS.
     draw_applets
-    # Re-anchor every panel to the bottom-center of the current canvas, so the
-    # dock tracks viewport resizes and never cascades.
-    @wm.panels.each { |p| @wm.anchor_panel(p, @width, @height) }
     # Draw normal windows first, then panels on top (always-on-top stratum).
     # Minimized windows have been folded into the dock's iconbar; the
     # compositor skips them entirely so they leave no pixels on the canvas.
@@ -1524,12 +1808,7 @@ class Compositor
     # workspace's windows render. Panels (the dock) IGNORE the workspace
     # filter and always render, because the dock is the UI that switches
     # workspaces in the first place.
-    active = @wm.active_workspace
-    @wm.ordered_windows.each do |win|
-      next if win.minimized?
-      next if !win.panel? && win.workspace != active
-      draw_window(win)
-    end
+    visible_windows.each { |win| draw_window(win) }
     # Drag-to-edge landing preview: a translucent rect of where the window will
     # snap, drawn OVER the windows (like a tiling hint) while a move-drag hovers
     # an edge. Self-gates on Compositor::SNAPPING + an armed @snap_preview.
@@ -1558,50 +1837,97 @@ class Compositor
     # Drawn last so it reads as the top-most modal. Self-gates on Compositor::EXPOSE
     # + an open spread (else it only publishes the "inactive" probe state).
     draw_expose if EXPOSE
-    # This frame is now on the canvas: clear the dirty flag and record the
-    # self-driven state it reflects, so the next needs_paint? only re-fires on a
-    # real change (a client commit, an applet tick, or a fresh input/message).
-    @force_paint = false
-    @last_applet_sig = applet_signature
-    @last_content_seqs = content_seqs
+    nil
   end
 
-  # The combined content signature of every desktop applet ("" when none / APPLETS
-  # off), so a live applet forces a repaint exactly when its pixels must change (a
-  # clock second, a monitor step) and no more often. Reuses applet_sig
-  # (14_applets.rb) — the same signature the per-applet render cache keys on.
-  def applet_signature
-    return "" unless APPLETS
-    b = applets
-    return "" if b.empty?
-    b.items.map { |a| applet_sig(a) }.join("|")
-  end
-
-  # True when an applet's content signature changed since the last painted frame.
-  def applets_changed?
-    applet_signature != @last_applet_sig
-  end
-
-  # The live committed-content seq of every external window (0 for in-process or
-  # seqlock-less surfaces), read straight from the SAB control word so a client
-  # that painted new pixels is observed BEFORE the blit. The window-set length
-  # rides along too, so a spawn/close is caught even before its message lands.
-  def content_seqs
-    @wm.ordered_windows.map do |win|
-      # Only external (SAB-backed) windows carry a seqlock + image_data slot; the
-      # base in-process Window has neither, so it never self-animates (0).
-      next 0 unless win.external?
-      slot = win.image_data
-      slot.nil? ? 0 : JS.global.call("wasmboxWindowLiveSeq", slot).to_i
+  # The region recomposite: repaint only the damaged rectangles. Each rect is
+  # clipped so the draw calls for a partially-damaged window touch only the
+  # in-region pixels; everything outside every rect is retained from the prior
+  # frame (the OffscreenCanvas is persistent, never cleared). Within a rect we
+  # repaint the desktop background, then the applets, then every window whose
+  # screen bounds intersect it, in bottom-to-top stacking order, so overlaps
+  # stay correct. The always-on-top overlays (tray, notifications, HUD) sit ABOVE
+  # the windows, so the per-rect loop just painted desktop/window pixels over
+  # them — we relay each one after the loop when any damage rect touched it.
+  # Menus, the snap preview and the Alt-Tab / Spotlight / Exposé modals never
+  # reach this path (overlay_active? forced a full recomposite).
+  def paint_regions(dmg)
+    wins = visible_windows
+    dmg.rects.each do |r|
+      @ctx.call("save")
+      @ctx.call("beginPath")
+      @ctx.call("rect", r[:x], r[:y], r[:w], r[:h])
+      @ctx.call("clip")
+      draw_desktop_region(r)
+      draw_applets_region(r)
+      wins.each do |win|
+        next unless DamageSet.rect_intersects?(r, window_bounds(win))
+        draw_window(win)
+      end
+      @ctx.call("restore")
     end
+    # Top overlays (tray strip, toast column, debug HUD) sit ABOVE the windows
+    # and their pixels persist on the retained canvas, so the per-rect loop just
+    # painted desktop/window pixels over any part a damage rect crossed. Relay
+    # each one — unclipped, at its fixed screen position, where the damage
+    # actually touched it: a change that never reaches a band leaves that overlay
+    # untouched (and unpaid-for).
+    draw_tray if TRAY && damage_touches?(tray_bounds)
+    draw_notifications if NOTIFICATIONS && damage_touches?(notifications_bounds)
+    draw_hud if damage_touches?(hud_rect)
+    nil
   end
 
-  # True when any external window committed new pixels since the last painted
-  # frame (or the window set changed). Suspenders for the SDK "commit" message
-  # path: even a client that bumps only the seqlock (no commit message) wakes the
-  # gate, and a live/animating window keeps painting at its own cadence.
-  def external_content_changed?
-    content_seqs != @last_content_seqs
+  # Repaint the desktop background inside one damage rect. With DESKTOP_WIDGETS
+  # the backdrop is a cached full-canvas RGBA buffer presented via putImageData,
+  # which IGNORES the ctx clip — so we re-present only the rect via the
+  # dirty-rect blit helper (the first frame is always a full composite, so the
+  # "desktop" buffer is populated before any region frame). The hand-drawn
+  # fallback uses fill + grid strokes, which DO respect the clip, so only the
+  # grid lines crossing the rect are stroked.
+  def draw_desktop_region(r)
+    if DESKTOP_WIDGETS
+      JS.global.call("wasmboxBlitRGBARegion", @ctx, @width, @height, 0, 0,
+                     "desktop", r[:x], r[:y], r[:w], r[:h])
+      return nil
+    end
+    fill_rect([r[:x], r[:y], r[:w], r[:h]], Theme::DESKTOP)
+    @ctx.set("strokeStyle", Theme::DESKTOP_GRID)
+    @ctx.set("lineWidth", 1)
+    step = 40
+    x0 = r[:x]; x1 = r[:x] + r[:w]
+    y0 = r[:y]; y1 = r[:y] + r[:h]
+    gx = (x0 / step) * step
+    while gx <= x1
+      @ctx.call("beginPath")
+      @ctx.call("moveTo", gx + 0.5, y0)
+      @ctx.call("lineTo", gx + 0.5, y1)
+      @ctx.call("stroke")
+      gx += step
+    end
+    gy = (y0 / step) * step
+    while gy <= y1
+      @ctx.call("beginPath")
+      @ctx.call("moveTo", x0, gy + 0.5)
+      @ctx.call("lineTo", x1, gy + 0.5)
+      @ctx.call("stroke")
+      gy += step
+    end
+    nil
+  end
+
+  # Repaint the desktop-applet tiles that intersect one damage rect (clipped by
+  # the caller). Applets are the desktop stratum, below the windows, so they are
+  # painted between the background and the window loop. No-op when the flag is
+  # off or nothing is shown.
+  def draw_applets_region(r)
+    return nil unless APPLETS
+    b = applets
+    return nil if b.empty?
+    b.items.each do |a|
+      draw_applet_tile(a) if DamageSet.rect_intersects?(r, [a.x, a.y, a.w, a.h])
+    end
+    nil
   end
 
   # Snap landing preview. Draws the frame extent (body + titlebar headroom) of
@@ -1857,7 +2183,10 @@ class Compositor
       return
     end
     n = @wm.windows.length
-    line = "rbgo compositor — #{n} window#{n == 1 ? '' : 's'} — #{'%.0f' % @fps} fps — frame #{@frames}"
+    # @rendered_frames counts COMPOSITED frames (not every rAF tick): with the
+    # dirty-rect gate an idle desktop stops compositing, so the counter — and the
+    # fps reading — hold steady, the honest picture of the work actually done.
+    line = "rbgo compositor — #{n} window#{n == 1 ? '' : 's'} — #{'%.0f' % @fps} fps — frame #{@rendered_frames}"
     text(line, 10, @height - 12, Theme::HUD_TEXT, 12)
   end
 end

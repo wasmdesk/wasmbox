@@ -220,6 +220,10 @@ jobs:
         working-directory: test
         run: node probe-desktop.mjs
 
+      - name: Run headless dirty-rect equivalence probe (region composite == full composite, pixel-exact)
+        working-directory: test
+        run: node probe-dirty-rect-equivalence.mjs
+
       - name: Run headless wallpaper probe (gradient + bundled image select, cached, fallback, z-order)
         working-directory: test
         run: node probe-wallpaper.mjs

@@ -358,8 +358,16 @@ tasks:
       - go test ./clients/hello/... ./clients/dock/... ./clients/terminal/... ./clients/files/... ./clients/code/...
       - go test ./
       - go test ./packs/...
+      - go test ./cmd/rbbench
       - go run ./cmd/rbtest
       - node test/sdk-bootwasm.test.mjs
+
+  bench:
+    desc: Report compositor wasm<->JS paint crossings per frame (dirty-rect gate + region recomposite vs the whole-screen baseline), idle / drag / animate.
+    env:
+      GOWORK: "off"
+    cmds:
+      - go run ./cmd/rbbench
 
   clean:
     desc: Remove the build artifacts
