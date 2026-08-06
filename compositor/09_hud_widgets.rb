@@ -49,7 +49,9 @@ class Compositor
   # bottom-left placement; called from draw_hud when the flag is on.
   def draw_hud_widgets
     n = @wm.windows.length
-    line = "rbgo compositor - #{n} window#{n == 1 ? '' : 's'} - #{'%.0f' % @fps} fps - frame #{@frames}"
+    # @rendered_frames counts COMPOSITED frames (see draw_hud): with the
+    # dirty-rect gate an idle desktop stops compositing, so the counter holds.
+    line = "rbgo compositor - #{n} window#{n == 1 ? '' : 's'} - #{'%.0f' % @fps} fps - frame #{@rendered_frames}"
     # Bitmap font is monospace at a 6px advance; ASCII-only line so length ==
     # byte count. Clamp the buffer to the canvas width.
     w = line.length * 6 + 6

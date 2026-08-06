@@ -188,28 +188,37 @@ class Compositor
     return nil unless APPLETS
     b = applets
     return nil if b.empty?
-    b.items.each do |a|
-      # Card plate (cheap ctx fill each frame, follows a drag) drawn first so the
-      # transparent-ground widget buffer composites over a solid tile.
-      fill_rect([a.x, a.y, a.w, a.h], APPLET_PLATE)
-      stroke_rect([a.x, a.y, a.w, a.h], APPLET_BORDER, 1)
-      iw = a.w - 2 * APPLET_PAD
-      ih = a.h - 2 * APPLET_PAD
-      dx = a.x + APPLET_PAD
-      dy = a.y + APPLET_PAD
-      sig = applet_sig(a)
-      if a.b64.nil? || a.sig != sig
-        a.b64 = render_applet(a, iw, ih)
-        a.sig = sig
-        a.blitted = false
-      end
-      if a.blitted
-        JS.global.call("wasmboxBlitRGBAOver", @ctx, "", iw, ih, dx, dy, a.key)
-      else
-        JS.global.call("wasmboxBlitRGBAOver", @ctx, a.b64, iw, ih, dx, dy, a.key)
-        a.blitted = true
-      end
+    b.items.each { |a| draw_applet_tile(a) }
+    nil
+  end
+
+  # Paint a single applet tile (plate + cached widget buffer). Extracted from
+  # draw_applets so the dirty-rect compositor (06_core.rb#draw_applets_region)
+  # can repaint only the tiles a damage rect actually touches, clipped, in the
+  # desktop stratum (below the windows). Every ctx op respects the caller's clip,
+  # so painting a tile whose bounds fall outside the current region is a no-op.
+  def draw_applet_tile(a)
+    # Card plate (cheap ctx fill each frame, follows a drag) drawn first so the
+    # transparent-ground widget buffer composites over a solid tile.
+    fill_rect([a.x, a.y, a.w, a.h], APPLET_PLATE)
+    stroke_rect([a.x, a.y, a.w, a.h], APPLET_BORDER, 1)
+    iw = a.w - 2 * APPLET_PAD
+    ih = a.h - 2 * APPLET_PAD
+    dx = a.x + APPLET_PAD
+    dy = a.y + APPLET_PAD
+    sig = applet_sig(a)
+    if a.b64.nil? || a.sig != sig
+      a.b64 = render_applet(a, iw, ih)
+      a.sig = sig
+      a.blitted = false
     end
+    if a.blitted
+      JS.global.call("wasmboxBlitRGBAOver", @ctx, "", iw, ih, dx, dy, a.key)
+    else
+      JS.global.call("wasmboxBlitRGBAOver", @ctx, a.b64, iw, ih, dx, dy, a.key)
+      a.blitted = true
+    end
+    nil
   end
 
   # A content signature that changes exactly when a tile's pixels must: the clock

@@ -29,6 +29,39 @@ class Frame
     cls
   end
 
+  # --- dirty-rect / retained-chrome geometry -------------------------------
+  # A decorated window's chrome (titlebar + buttons + border + resize grip) is
+  # a pure function of its size, focus state, shade state, title and the active
+  # frame/palette — it does NOT change while the window merely sits there or is
+  # dragged around. The FRAME_WIDGETS path (11_frame_widgets.rb) already caches
+  # each window's rendered decoration as a per-window OffscreenCanvas buffer,
+  # keyed by an equivalent signature, so a drag re-presents the cached buffer at
+  # the new position. sprite_key mirrors that signature so the dirty-rect
+  # compositor (06_core.rb#window_vkey) can tell "same chrome, moved" (a cache
+  # hit, drag stays cheap) apart from "chrome must repaint" — and cmd/rbtest can
+  # assert the invalidation rules directly.
+  #
+  # sprite_key MUST fold in every input the paint methods read: the frame
+  # identity (current_name distinguishes OpenboxFrame from a themed variant even
+  # when they share a class), the frame width/height (which already encode window
+  # w/h AND the shaded collapse), the focus flag (active vs inactive colours),
+  # the shade flag and the title text. Position is deliberately EXCLUDED.
+  def self.sprite_key(win, active)
+    _fx, _fy, fw, fh = current.frame_rect(win)
+    "#{current_name}:#{fw}:#{fh}:#{active ? 1 : 0}:#{win.shaded? ? 1 : 0}:#{win.title}"
+  end
+
+  # Screen-space bounding box of a decorated window's full painted extent, as
+  # [x, y, w, h]. This is frame_rect padded by 1px on every side so a chrome's
+  # 1px faux drop shadow (AquaFrame paints one past frame_right / frame_bottom)
+  # and any half-pixel border stroke land inside the box. Used by the dirty-rect
+  # compositor (06_core.rb#window_bounds) as the damage bounds for a decorated
+  # window, so a move/resize/commit damages exactly this rectangle.
+  def self.sprite_bounds(win)
+    fx, fy, fw, fh = current.frame_rect(win)
+    [fx - 1, fy - 1, fw + 2, fh + 2]
+  end
+
   # The window-geometry hooks. Default impls reuse Theme:: constants so a
   # chrome that wants the Openbox geometry can just inherit OpenboxFrame.
 
