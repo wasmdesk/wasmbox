@@ -59,33 +59,51 @@ class Compositor
     @notifications ||= NotificationStack.new
   end
 
-  # Post a toast from a decoded `notify` wire message. Normalizes the wire's
-  # timeout (SECONDS, default 5; <= 0 = sticky) to the model's millisecond clock
-  # and appends to the stack. `worker` is the posting client's worker ref (nil
-  # for the test hook / an in-process poster); it + window_id let a toast action
-  # fire back to the originating client. No-op when the flag is off or the
-  # message carries neither a title nor a body.
+  # Post a toast from a decoded `notify` wire message. Two field sets are
+  # accepted, distinguished by Notification.freedesktop?:
+  #
+  #   * freedesktop.org — summary/body/urgency/expire_timeout/app_icon/
+  #     image-data/actions — mapped by Notification.map_freedesktop, which mirrors
+  #     go-freedesktop/notifications/toast.ToToast (urgency→kind, expire_timeout→
+  #     sticky/timeout, summary+body→lines, app_icon/image-data→icon) so a browser
+  #     post behaves like the native D-Bus path. expire_timeout is already in
+  #     milliseconds; the mapper handles the sentinels.
+  #
+  #   * wasmbox-native — title/body/kind/timeout/icon/actions — the original
+  #     shape, whose `timeout` is in SECONDS (default 5; <= 0 = sticky) and is
+  #     normalized to the model's millisecond clock here.
+  #
+  # `worker` is the posting client's worker ref (nil for the test hook / an
+  # in-process poster); it + window_id let a toast action fire back to the
+  # originating client. No-op when the flag is off or the message carries nothing
+  # to show (neither a summary/title nor a body).
   def post_notification(msg, worker)
     return nil unless NOTIFICATIONS
-    title = msg[:title].to_s
-    body  = msg[:body].to_s
-    return nil if title.empty? && body.empty?
-    to = msg[:timeout]
-    tms = to.nil? ? NotificationStack::DEFAULT_TIMEOUT_MS : (to.to_f <= 0 ? 0 : (to.to_f * 1000).to_i)
-    notifications.post({
-      title:        title,
-      body:         body,
-      kind:         msg[:kind],
-      icon:         msg[:icon],
-      icon_w:       msg[:icon_w],
-      icon_h:       msg[:icon_h],
-      actions:      msg[:actions],
-      action_label: msg[:action_label].to_s,
-      action:       msg[:action],
-      worker:       worker,
-      window_id:    msg[:window_id],
-      timeout_ms:   tms,
-    }, notify_now)
+    if Notification.freedesktop?(msg)
+      opts = Notification.map_freedesktop(msg)
+      return nil if opts.nil?
+    else
+      title = msg[:title].to_s
+      body  = msg[:body].to_s
+      return nil if title.empty? && body.empty?
+      to = msg[:timeout]
+      tms = to.nil? ? NotificationStack::DEFAULT_TIMEOUT_MS : (to.to_f <= 0 ? 0 : (to.to_f * 1000).to_i)
+      opts = {
+        title:        title,
+        body:         body,
+        kind:         msg[:kind],
+        icon:         msg[:icon],
+        icon_w:       msg[:icon_w],
+        icon_h:       msg[:icon_h],
+        actions:      msg[:actions],
+        action_label: msg[:action_label].to_s,
+        action:       msg[:action],
+        timeout_ms:   tms,
+      }
+    end
+    opts[:worker]    = worker
+    opts[:window_id] = msg[:window_id]
+    notifications.post(opts, notify_now)
   end
 
   # Millisecond clock for expiry: the most recent rAF timestamp, captured each
@@ -277,4 +295,15 @@ end
 # stashed click against them, firing the EXACT button the pointer hit rather than
 # always the first. A future notification CENTER (history surface) is the
 # remaining follow-up.
+#
+# freedesktop.org Desktop-Notification semantics are now spoken too: a post using
+# the spec field set (summary/body/urgency/expire_timeout/app_icon/image-data/
+# actions) is mapped by Notification.map_freedesktop (05_notifications.rb), which
+# mirrors go-freedesktop/notifications/toast.ToToast field-for-field —
+# urgency→kind (Critical=error, else info), expire_timeout/resident/Critical→
+# sticky/timeout, summary+markup-stripped body→lines, image-data (else the
+# app_icon glyph)→icon, and the actions scalar (default key skipped)→the per-
+# button routing above. No D-Bus client runs in the browser: the fields arrive
+# over the existing in-page message channel and this is purely the data-model →
+# Toast mapping, so the browser toast behaves like the native D-Bus daemon path.
 # ---------------------------------------------------------------------------

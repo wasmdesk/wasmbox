@@ -380,6 +380,31 @@ assert(!wml.launchable?("nope"), "unknown id is not launchable")
 assert(wml.launchable_url("nope").nil?, "unknown id has no static url")
 assert(wml.launchable_oci("nope").nil?, "unknown id has no OCI ref")
 
+# ---- launcher registry modeled on Desktop Entry (APP_MANIFEST) ------------
+# Each launchable id exposes a desktopentry.Entry-shaped Hash. Name/Icon/
+# Categories come from the embedded APP_MANIFEST; the Exec-analogue is derived
+# from LAUNCHABLE (never stored twice), so it always matches the launch target.
+de = wml.desktop_entry("terminal")
+assert_eq(de[:type], "Application", "a desktop entry is Type=Application")
+assert_eq(de[:name], "Terminal", "Name comes from the manifest")
+assert_eq(de[:generic_name], "Terminal Emulator", "GenericName comes from the manifest")
+assert_eq(de[:icon], "utilities-terminal", "Icon (themed name) comes from the manifest")
+assert_eq(de[:categories], ["System", "TerminalEmulator"], "Categories come from the manifest")
+assert_eq(de[:exec], "clients/terminal/worker.js", "Exec-analogue is the LAUNCHABLE worker URL")
+# The Exec-analogue tracks each LAUNCHABLE descriptor shape.
+assert_eq(wml.desktop_exec("terminal"), "clients/terminal/worker.js", "static descriptor -> worker URL exec")
+assert_eq(wml.desktop_exec("hello-oci"), "oci://hello:latest", "OCI descriptor -> oci:// exec")
+assert_eq(wml.desktop_entry("vscode")[:exec], "/code-server/", "dom descriptor -> dom URL exec")
+assert_eq(wml.desktop_entry("browser")[:categories], ["Network", "WebBrowser"], "browser categories")
+# An unknown id has no entry; a launchable id absent from the manifest still
+# gets a fallback entry (capitalized Name, empty metadata, real exec).
+assert_eq(wml.desktop_entry("nope"), nil, "unknown id has no desktop entry")
+# desktop_entries lists one entry per LAUNCHABLE id, in registry order.
+entries = wml.desktop_entries
+assert_eq(entries.length, WindowManager::LAUNCHABLE.length, "one desktop entry per launchable id")
+assert_eq(entries[0][:id], "terminal", "desktop_entries follows LAUNCHABLE insertion order")
+entries.each { |e| assert(wml.launchable?(e[:id]), "every desktop entry id is launchable") }
+
 # ---- minimize: geometry -----------------------------------------------
 wmin = WindowManager.new
 mw = wmin.spawn("min-test", 200, 120)
@@ -1244,6 +1269,92 @@ assert_eq(Notification.new(18, { title: "t" }, 0).actions, [], "no actions -> []
 nboth = Notification.new(19, { title: "t", action_label: "Old", action: "old", actions: "New|new" }, 0)
 assert_eq(nboth.actions.length, 1, "multi-action list supersedes the legacy pair")
 assert_eq(nboth.actions[0][:label], "New", "multi-action wins over the legacy label")
+
+# ---- freedesktop Notification semantics (map_freedesktop, mirrors ToToast) ----
+# urgency -> kind: Critical is an error pill; Low and Normal are info (never
+# success/warning), matching toast.KindFor.
+assert_eq(Notification.kind_for_urgency(Notification::URGENCY_CRITICAL), "error", "Critical urgency -> error kind")
+assert_eq(Notification.kind_for_urgency(Notification::URGENCY_LOW), "info", "Low urgency -> info kind")
+assert_eq(Notification.kind_for_urgency(Notification::URGENCY_NORMAL), "info", "Normal urgency -> info kind")
+
+# Sticky mapping (toast.Sticky): expire 0, resident, or Critical is sticky.
+assert(Notification.sticky_by?(0, false, Notification::URGENCY_NORMAL), "expire_timeout 0 -> sticky")
+assert(Notification.sticky_by?(3000, true, Notification::URGENCY_NORMAL), "resident hint -> sticky")
+assert(Notification.sticky_by?(3000, false, Notification::URGENCY_CRITICAL), "Critical urgency -> sticky")
+assert(!Notification.sticky_by?(3000, false, Notification::URGENCY_NORMAL), "finite Normal is not sticky")
+# timeout_ms mapping (toast.LifeFor semantics): 0/resident/Critical -> 0 sentinel,
+# -1 (server default) -> DEFAULT_TIMEOUT_MS, any other value passes through (ms).
+assert_eq(Notification.timeout_ms_for(0, false, Notification::URGENCY_NORMAL), 0, "expire 0 -> sticky sentinel 0")
+assert_eq(Notification.timeout_ms_for(3000, false, Notification::URGENCY_CRITICAL), 0, "Critical -> sticky sentinel 0")
+assert_eq(Notification.timeout_ms_for(Notification::EXPIRE_DEFAULT, false, Notification::URGENCY_NORMAL),
+          NotificationStack::DEFAULT_TIMEOUT_MS, "expire -1 -> server default ms")
+assert_eq(Notification.timeout_ms_for(2500, false, Notification::URGENCY_NORMAL), 2500, "finite expire passes through as ms")
+
+# body-markup stripping (toast.stripMarkup): tags dropped, five entities decoded.
+assert_eq(Notification.strip_markup("Build <b>done</b>"), "Build done", "markup tags stripped")
+assert_eq(Notification.strip_markup("a &amp; b &lt;c&gt; &quot;d&quot; &apos;e&apos;"),
+          "a & b <c> \"d\" 'e'", "the five named entities decoded")
+assert_eq(Notification.strip_markup("plain text"), "plain text", "plain text is untouched")
+assert_eq(Notification.strip_markup("open <i tag runs off"), "open ", "unterminated tag runs to end")
+
+# summary + body -> lines (toast.linesFor): stripped summary then each body line.
+assert_eq(Notification.lines_from("Hi <b>there</b>", "line1\nline2"),
+          ["Hi there", "line1", "line2"], "summary over each body line, markup stripped")
+assert_eq(Notification.lines_from("Solo", ""), ["Solo"], "summary-only -> one line")
+
+# actions: default key skipped (toast Action.IsDefault), rest -> {label, action:key}.
+fda = Notification.fdo_actions("Activate|default;Reply|reply;Later|later")
+assert_eq(fda.length, 2, "the reserved default action is skipped")
+assert_eq(fda[0][:label], "Reply", "first non-default action label")
+assert_eq(fda[0][:action], "reply", "action key is echoed back as the action")
+assert_eq(fda[1][:action], "later", "second non-default action key")
+
+# freedesktop? recognizes the spec field set, not a native-only post.
+assert(Notification.freedesktop?({ summary: "s" }), "a summary marks a freedesktop post")
+assert(Notification.freedesktop?({ urgency: 2 }), "an urgency marks a freedesktop post")
+assert(Notification.freedesktop?({ expire_timeout: 0 }), "an expire_timeout marks a freedesktop post")
+assert(!Notification.freedesktop?({ title: "t", kind: "info", timeout: 5 }), "a native post is not freedesktop")
+
+# map_freedesktop: a Critical, 2-action, sticky post round-trips through the model.
+fmsg = { summary: "Deploy <b>failed</b>", body: "2 errors\ncheck logs",
+         urgency: Notification::URGENCY_CRITICAL, expire_timeout: 0,
+         actions: "Retry|act_retry;Dismiss|act_dismiss" }
+assert(Notification.freedesktop?(fmsg), "the critical post is recognized as freedesktop")
+fopts = Notification.map_freedesktop(fmsg)
+fn = Notification.new(30, fopts, 100)
+assert_eq(fn.kind, "error", "Critical urgency mapped to an error pill")
+assert(fn.sticky?, "expire 0 + Critical -> a sticky toast")
+assert(!fn.expired?(999999), "the sticky critical toast never auto-expires")
+assert_eq(fn.lines, ["Deploy failed", "2 errors", "check logs"],
+          "summary + multi-line body mapped to lines with markup stripped")
+assert_eq(fn.actions.length, 2, "both freedesktop actions surfaced as buttons")
+assert_eq(fn.actions[1][:label], "Dismiss", "second freedesktop action label")
+assert_eq(fn.actions[1][:action], "act_dismiss", "second freedesktop action key echoes back")
+
+# map_freedesktop: a Normal, finite-expire post is an info pill that auto-dismisses.
+nmsg = { summary: "Saved", urgency: Notification::URGENCY_NORMAL, expire_timeout: 1500 }
+nopts = Notification.map_freedesktop(nmsg)
+nn = Notification.new(31, nopts, 0)
+assert_eq(nn.kind, "info", "Normal urgency -> info pill")
+assert(!nn.sticky?, "a finite expire_timeout is not sticky")
+assert_eq(nn.expire_at, 1500, "expire_timeout is milliseconds (not re-scaled)")
+assert(nn.expired?(1500), "the normal toast auto-dismisses at its deadline")
+
+# map_freedesktop icon: inline image-data wins; else the app_icon glyph; else none.
+img_opts = Notification.map_freedesktop({ summary: "s", image_data: "QUJD", image_w: 2, image_h: 3, app_icon: "open" })
+img_n = Notification.new(32, img_opts, 0)
+assert(img_n.image_icon?, "inline image-data becomes the image icon")
+assert_eq(img_n.icon_w, 2, "image-data width mapped")
+glyph_opts = Notification.map_freedesktop({ summary: "s", app_icon: "settings" })
+glyph_n = Notification.new(33, glyph_opts, 0)
+assert(glyph_n.has_icon?, "a stock app_icon glyph becomes the icon")
+assert(!glyph_n.image_icon?, "an app_icon glyph is not an image icon")
+assert_eq(glyph_n.icon, "settings", "app_icon glyph name mapped")
+none_opts = Notification.map_freedesktop({ summary: "s", app_icon: "no-such-icon" })
+assert(!Notification.new(34, none_opts, 0).has_icon?, "an unresolved app_icon yields no icon")
+
+# map_freedesktop guards an empty post (no summary and no body).
+assert_eq(Notification.map_freedesktop({ urgency: 1 }), nil, "empty summary+body maps to nil")
 
 # NotificationStack: post + stack order + top-right placement.
 ns = NotificationStack.new
