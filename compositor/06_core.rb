@@ -638,8 +638,16 @@ class Compositor
     # `id`/`glyph`/`tooltip` ride on `tray_add`/`tray_remove`/`tray_update` (a
     # status icon: its caller-chosen id, a stock glyph name OR a base64 RGBA
     # `icon` at `w`x`h`, and the hover tooltip).
+    # `summary`/`urgency`/`expire_timeout`/`app_icon`/`image_data`/`image_w`/
+    # `image_h`/`resident` also ride on `notify` — the freedesktop.org
+    # Desktop-Notification field set (see Notification.map_freedesktop): summary
+    # (title), urgency byte (0/1/2), expire_timeout in MILLISECONDS (-1 default,
+    # 0 never), the app_icon glyph name, inline image-data (base64 RGBA at
+    # `image_w`x`image_h`) and the resident hint. `actions` is shared with the
+    # native path (the compact "Label|key;..." scalar, key = the echoed action).
     %w[window_id w h stride title role app index workspace name parent rel_x rel_y lock_aspect ratio
-       body kind icon icon_w icon_h timeout action_label action actions id glyph tooltip].each do |k|
+       body kind icon icon_w icon_h timeout action_label action actions id glyph tooltip
+       summary urgency expire_timeout app_icon image_data image_w image_h resident].each do |k|
       v = data.get(k)
       h[k.to_sym] = v unless v.nil?
     end

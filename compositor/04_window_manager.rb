@@ -114,6 +114,75 @@ class WindowManager
     "loom"      => { dom: "/loom/", w: 1200, h: 800, title: "Loom" },
   }.freeze
 
+  # APP_MANIFEST models each launchable id on the freedesktop.org Desktop Entry
+  # specification (github.com/go-freedesktop/desktopentry): the embedded,
+  # browser-appropriate slice of a .desktop file's [Desktop Entry] group —
+  #   name          → the Name key   (the user-visible label),
+  #   generic_name  → GenericName    (the category-style "Web Browser" name),
+  #   comment       → Comment        (the tooltip / description),
+  #   icon          → Icon           (a themed icon NAME; there is no icon-theme
+  #                                    filesystem in the browser, so it stays a
+  #                                    metadata string, exactly as a .desktop Icon
+  #                                    key is just a name resolved elsewhere),
+  #   categories    → Categories     (the freedesktop menu categories).
+  # The Desktop Entry "Exec" key (the program command line) has no browser
+  # analogue except the compositor-owned launch target already held in
+  # LAUNCHABLE, so #desktop_entry SYNTHESIZES an Exec-analogue from LAUNCHABLE
+  # (the worker URL / OCI ref / dom URL) rather than storing it twice.
+  #
+  # This is ADDITIVE and does NOT change the launch trust boundary: LAUNCHABLE
+  # stays the single source of truth for WHAT is launchable; APP_MANIFEST only
+  # layers descriptive metadata over it so the launcher registry's data shape
+  # matches the desktopentry.Entry model. An id missing here still launches; its
+  # #desktop_entry falls back to a capitalized-id Name and empty metadata.
+  APP_MANIFEST = {
+    "terminal"   => { name: "Terminal", generic_name: "Terminal Emulator",
+                      comment: "Run shell commands", icon: "utilities-terminal",
+                      categories: ["System", "TerminalEmulator"] },
+    "editor"     => { name: "Editor", generic_name: "Text Editor",
+                      comment: "Edit text files", icon: "accessories-text-editor",
+                      categories: ["Utility", "TextEditor"] },
+    "files"      => { name: "Files", generic_name: "File Manager",
+                      comment: "Browse the file system", icon: "system-file-manager",
+                      categories: ["System", "FileManager"] },
+    "hello"      => { name: "Hello (wasm)", generic_name: "Demo",
+                      comment: "The bundled wasmbox hello demo", icon: "applications-other",
+                      categories: ["Utility"] },
+    "quake"      => { name: "Quake", generic_name: "Game",
+                      comment: "Pure-Go Quake 1", icon: "applications-games",
+                      categories: ["Game", "ActionGame"] },
+    "code"       => { name: "VS Code", generic_name: "Code Editor",
+                      comment: "Pure-Go code editor client", icon: "text-editor",
+                      categories: ["Development", "IDE"] },
+    "vscode"     => { name: "VS Code (code-server)", generic_name: "Code Editor",
+                      comment: "code-server in a dom-window (needs a backend)",
+                      icon: "text-editor", categories: ["Development", "IDE"] },
+    "loom"       => { name: "Loom", generic_name: "Collaborative Editor",
+                      comment: "openweft's Svelte + CodeMirror + Yjs editor",
+                      icon: "accessories-text-editor", categories: ["Development"] },
+    "showcase"   => { name: "Toolkit Showcase", generic_name: "Widget Gallery",
+                      comment: "Live go-widgets toolkit reference", icon: "applications-development",
+                      categories: ["Development", "Utility"] },
+    "calculator" => { name: "Calculator", generic_name: "Calculator",
+                      comment: "Toolkit calculator", icon: "accessories-calculator",
+                      categories: ["Utility", "Calculator"] },
+    "notepad"    => { name: "Notepad", generic_name: "Text Editor",
+                      comment: "Multi-doc plain-text editor", icon: "accessories-text-editor",
+                      categories: ["Utility", "TextEditor"] },
+    "settings"   => { name: "Settings", generic_name: "System Settings",
+                      comment: "WhiteSur-style preferences", icon: "preferences-system",
+                      categories: ["Settings"] },
+    "browser"    => { name: "Browser", generic_name: "Web Browser",
+                      comment: "WhiteSur/Safari-styled web shell", icon: "web-browser",
+                      categories: ["Network", "WebBrowser"] },
+    "rubytk"     => { name: "Tip Calculator (Ruby)", generic_name: "Calculator",
+                      comment: "A go-ruby-widgets app", icon: "accessories-calculator",
+                      categories: ["Utility", "Calculator"] },
+    "hello-oci"  => { name: "Hello (OCI)", generic_name: "Demo",
+                      comment: "The hello demo pulled from an OCI registry",
+                      icon: "applications-other", categories: ["Utility"] },
+  }.freeze
+
   LAYOUT_SEP = "\t"
 
   # Fluxbox-style virtual workspaces. WORKSPACE_COUNT is fixed at 4 (numbered
@@ -448,6 +517,54 @@ class WindowManager
   # future doesn't need a new gate; only the dispatcher needs to learn it.
   def launchable?(app)
     LAUNCHABLE.key?(app.to_s)
+  end
+
+  # The Desktop Entry "Exec" analogue for an id: the compositor-owned launch
+  # target derived from LAUNCHABLE (NOT stored twice) — the worker URL for a
+  # static client, "oci://<ref>" for an OCI image, or the dom URL for a
+  # dom-window. nil for an unknown id. Never a user-supplied path (LAUNCHABLE is
+  # the trust boundary), so an Exec-analogue is always compositor-authored.
+  def desktop_exec(app)
+    id = app.to_s
+    u = launchable_url(id)
+    return u unless u.nil?
+    oci = launchable_oci(id)
+    return "oci://#{oci}" unless oci.nil?
+    dom = launchable_dom(id)
+    return dom[:url] unless dom.nil?
+    nil
+  end
+
+  # The Desktop Entry for a launchable id — the desktopentry.Entry-shaped Hash
+  # (:type/:id/:name/:generic_name/:comment/:icon/:categories/:exec) built from
+  # APP_MANIFEST's metadata + the synthesized :exec. nil for an unknown id. An id
+  # with no APP_MANIFEST row still gets an entry: a capitalized-id Name, empty
+  # descriptive fields, an empty categories list, and its real :exec.
+  def desktop_entry(app)
+    id = app.to_s
+    return nil unless launchable?(id)
+    meta = APP_MANIFEST[id]
+    meta = {} if meta.nil?
+    {
+      type:         "Application",
+      id:           id,
+      name:         (meta[:name].nil? ? id.capitalize : meta[:name]).to_s,
+      generic_name: meta[:generic_name].to_s,
+      comment:      meta[:comment].to_s,
+      icon:         meta[:icon].to_s,
+      categories:   meta[:categories].nil? ? [] : meta[:categories],
+      exec:         desktop_exec(id),
+    }
+  end
+
+  # Every launchable id's Desktop Entry, in LAUNCHABLE (insertion) order. A
+  # launcher / menu surface can read Name / Icon / Categories from here instead
+  # of an ad-hoc label map, keeping LAUNCHABLE the single launch source of truth
+  # while presenting a desktopentry-shaped catalog.
+  def desktop_entries
+    out = []
+    LAUNCHABLE.each { |id, _desc| out.push(desktop_entry(id)) }
+    out
   end
 
   # Normal (non-panel) windows, bottom-to-top, in stacking order.

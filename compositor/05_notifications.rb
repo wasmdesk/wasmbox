@@ -64,6 +64,180 @@ class Notification
     out
   end
 
+  # ---------------------------------------------------------------------------
+  # freedesktop.org Desktop-Notification semantics.
+  #
+  # A browser client (or the in-page notification channel) may post a toast using
+  # the freedesktop field set — summary/body/urgency/expire_timeout/app_icon/
+  # image-data/actions — instead of the wasmbox-native title/body/kind/timeout.
+  # These class methods MIRROR github.com/go-freedesktop/notifications/toast.ToToast
+  # field-for-field so a browser post behaves exactly like the native D-Bus path:
+  # the mapping is pure string/number work (no JS), so cmd/rbtest exercises it
+  # off-wasm. There is deliberately NO D-Bus client in the browser — the
+  # compositor already receives the fields over its in-page message channel; this
+  # is purely the data-model → Toast mapping (map_freedesktop is called by
+  # 12_notifications.rb#post_notification when #freedesktop? recognises the shape).
+  # ---------------------------------------------------------------------------
+
+  # The freedesktop "urgency" hint (a byte): Low/Normal are ordinary, Critical
+  # must stay on screen until the user acts.
+  URGENCY_LOW      = 0
+  URGENCY_NORMAL   = 1
+  URGENCY_CRITICAL = 2
+
+  # The freedesktop expire_timeout sentinel meaning "let the server pick"
+  # (-1 → DEFAULT_TIMEOUT_MS). expire_timeout == 0 means "never" (sticky).
+  EXPIRE_DEFAULT = -1
+
+  # Map an urgency onto a Toast kind, matching toast.KindFor exactly: Critical is
+  # an error pill, Low and Normal are info pills (the advertised capability set
+  # does not distinguish success/warning, so urgency never yields those two).
+  def self.kind_for_urgency(u)
+    u.to_i == URGENCY_CRITICAL ? "error" : "info"
+  end
+
+  # Whether a notification is sticky (never auto-expires), matching
+  # Notification.Sticky(): true when expire_timeout is 0 (never), the resident
+  # hint is set, or the urgency is Critical.
+  def self.sticky_by?(expire_ms, resident, urgency)
+    expire_ms.to_i == 0 || resident == true || urgency.to_i == URGENCY_CRITICAL
+  end
+
+  # Map expire_timeout (MILLISECONDS; -1 = server default, 0 = never) + resident
+  # + urgency onto the model's timeout_ms, mirroring Sticky()/LifeFor: a sticky
+  # notification is the 0 sentinel; a -1 (server default) is DEFAULT_TIMEOUT_MS;
+  # any other value is passed through as-is. NB freedesktop expire_timeout is in
+  # milliseconds, unlike the wasmbox-native wire `timeout` (seconds).
+  def self.timeout_ms_for(expire_ms, resident, urgency)
+    return 0 if sticky_by?(expire_ms, resident, urgency)
+    ms = expire_ms.to_i
+    ms < 0 ? NotificationStack::DEFAULT_TIMEOUT_MS : ms
+  end
+
+  # The five named XML entities the notification body-markup subset uses.
+  MARKUP_ENTITIES = { "&amp;" => "&", "&lt;" => "<", "&gt;" => ">",
+                      "&quot;" => "\"", "&apos;" => "'" }.freeze
+
+  # Decode a leading XML entity in `s` (which begins with '&'): [replacement,
+  # bytes-consumed], or ["", 0] when `s` does not start with a recognised entity.
+  def self.read_entity(s)
+    MARKUP_ENTITIES.each do |name, repl|
+      return [repl, name.length] if s.start_with?(name)
+    end
+    ["", 0]
+  end
+
+  # Strip the notification body's hypertext-subset markup tags (<b>, <i>,
+  # <a href>, ...) and decode the five named entities, yielding plain text —
+  # mirroring toast.stripMarkup (honouring the advertised "body-markup"
+  # capability). Forgiving: an unterminated '<' runs to end of string. A manual
+  # char scan (not a regexp) so it matches the Go byte-for-byte.
+  def self.strip_markup(s)
+    str = s.to_s
+    return str unless str.include?("<") || str.include?("&")
+    parts = []
+    in_tag = false
+    i = 0
+    n = str.length
+    while i < n
+      c = str[i]
+      if c == "<"
+        in_tag = true
+      elsif c == ">"
+        in_tag = false
+      elsif in_tag
+        # inside a tag: drop the content
+      elsif c == "&"
+        repl, consumed = read_entity(str[i..-1])
+        if consumed > 0
+          parts.push(repl)
+          i += consumed - 1
+        else
+          parts.push(c)
+        end
+      else
+        parts.push(c)
+      end
+      i += 1
+    end
+    parts.join
+  end
+
+  # The Toast rows for a freedesktop post, mirroring toast.linesFor: the
+  # markup-stripped summary first, then each newline-separated line of the
+  # markup-stripped body. Empty halves are dropped (the spec makes summary
+  # required, so in practice this only guards a body-only edge) so no blank row
+  # is ever painted.
+  def self.lines_from(summary, body)
+    ls = []
+    s = strip_markup(summary)
+    ls.push(s) unless s.empty?
+    b = strip_markup(body)
+    b.split("\n").each { |line| ls.push(line) } unless b.empty?
+    ls
+  end
+
+  # Map the freedesktop actions onto our button list, mirroring the ToToast
+  # action loop: the wire carries the flat pairs as the SAME compact
+  # "Label|key;Label2|key2" scalar the native path uses (a scalar round-trips
+  # through decode_message; an Array would not), where the "callback" half is the
+  # action KEY that ActionInvoked echoes back. The reserved "default" key (an
+  # activate-the-whole-notification action) is skipped, exactly like
+  # Action.IsDefault().
+  def self.fdo_actions(str)
+    parse_actions(str).reject { |a| a[:action] == "default" }
+  end
+
+  # Does `msg` carry the freedesktop field set (vs. the wasmbox-native one)? True
+  # when any freedesktop-only field is present, so post_notification can route it
+  # through map_freedesktop. Additive: a purely native post (title/kind/timeout)
+  # is never mistaken for a freedesktop one.
+  def self.freedesktop?(msg)
+    !msg[:summary].nil? || !msg[:urgency].nil? || !msg[:expire_timeout].nil? ||
+      !msg[:app_icon].nil? || !msg[:image_data].nil? || !msg[:resident].nil?
+  end
+
+  # Map a decoded freedesktop notification message onto the canonical opts Hash
+  # Notification.new consumes, mirroring toast.ToToast:
+  #   * urgency        → kind        (kind_for_urgency: Critical=error, else info)
+  #   * expire_timeout → timeout_ms  (timeout_ms_for: 0/resident/Critical sticky)
+  #   * summary + body → lines       (lines_from + strip_markup)
+  #   * actions        → actions_list(fdo_actions: default key skipped)
+  #   * image-data / app_icon → icon (resolveIcon order: inline image wins, then
+  #                                    the app_icon glyph name; image-path has no
+  #                                    browser FS so it is not accepted here)
+  # Returns nil when both summary and body are empty (nothing to show).
+  def self.map_freedesktop(msg)
+    summary = (msg[:summary].nil? ? msg[:title] : msg[:summary]).to_s
+    body    = msg[:body].to_s
+    return nil if summary.empty? && body.empty?
+    urg      = msg[:urgency]
+    resident = msg[:resident] == true || msg[:resident].to_s == "true"
+    exp      = msg[:expire_timeout].nil? ? EXPIRE_DEFAULT : msg[:expire_timeout].to_i
+    icon = nil
+    iw   = 0
+    ih   = 0
+    img = msg[:image_data].to_s
+    if !img.empty? && msg[:image_w].to_i > 0 && msg[:image_h].to_i > 0
+      icon = img
+      iw   = msg[:image_w].to_i
+      ih   = msg[:image_h].to_i
+    elsif glyph_icon?(msg[:app_icon])
+      icon = msg[:app_icon].to_s
+    end
+    {
+      title:        summary,
+      body:         body,
+      kind:         kind_for_urgency(urg),
+      timeout_ms:   timeout_ms_for(exp, resident, urg),
+      lines:        lines_from(summary, body),
+      icon:         icon,
+      icon_w:       iw,
+      icon_h:       ih,
+      actions_list: fdo_actions(msg[:actions]),
+    }
+  end
+
   # `now` is a millisecond clock (the rAF timestamp on wasm, a fake counter in
   # tests). timeout_ms == 0 is the "sticky" sentinel — the toast never
   # auto-expires and must be dismissed by a click. opts carries the wire fields
@@ -83,10 +257,17 @@ class Notification
     @icon_h       = opts[:icon_h].to_i
     @action_label = opts[:action_label].to_s
     @action       = opts[:action] # opaque callback id echoed back to the client
-    # Multi-action buttons (go-widgets v0.86 set_toast_actions), parsed from the
-    # wire's compact "Label|cb;Label2|cb2" scalar. Empty when the poster used the
-    # legacy single action_label/action (folded in by #actions below).
-    @actions      = Notification.parse_actions(opts[:actions])
+    # Multi-action buttons (go-widgets v0.86 set_toast_actions). A pre-parsed
+    # :actions_list (from Notification.map_freedesktop) wins; otherwise the wire's
+    # compact "Label|cb;Label2|cb2" scalar is parsed here. Empty when the poster
+    # used the legacy single action_label/action (folded in by #actions below).
+    al            = opts[:actions_list]
+    @actions      = al.is_a?(Array) ? al : Notification.parse_actions(opts[:actions])
+    # Optional pre-composed message rows (Notification.map_freedesktop supplies
+    # these from summary + a possibly multi-line body). When present they ARE the
+    # pill's #lines verbatim; otherwise #lines derives [title, body] as before.
+    lo            = opts[:lines]
+    @lines_override = lo.is_a?(Array) ? lo : nil
     @worker       = opts[:worker]
     @window_id    = opts[:window_id]
     tms           = opts[:timeout_ms]
@@ -96,10 +277,14 @@ class Notification
     @blitted      = false
   end
 
-  # The single pill line the Toast renders: "title — body". Either half may be
-  # empty (a body-only or title-only post), in which case the separator is
-  # dropped so the line never starts/ends with a dangling em dash.
+  # The single pill line the Toast renders (the base Widgets.toast text, before
+  # the render layer switches to the multi-line set_toast_lines): "title — body".
+  # Either half may be empty (a body-only or title-only post), in which case the
+  # separator is dropped so the line never starts/ends with a dangling em dash. A
+  # freedesktop post (with a :lines override) joins its rows with the same em
+  # dash so the base text is never blank.
   def text
+    return @lines_override.join(" — ") unless @lines_override.nil?
     t = @title
     b = @body
     return t if b.empty?
@@ -107,12 +292,14 @@ class Notification
     "#{t} — #{b}"
   end
 
-  # The message rows for a multi-line pill (Widgets.set_toast_lines): the title
-  # (bold-reading first line) over the body, each dropped when empty. A
-  # title-only or body-only post yields a single line — identical to the legacy
-  # single-Text look — and the render layer only switches to set_toast_lines when
-  # there are two, so a one-line toast is byte-unchanged.
+  # The message rows for a multi-line pill (Widgets.set_toast_lines): the
+  # freedesktop-mapped rows verbatim when supplied, else the title (bold-reading
+  # first line) over the body, each dropped when empty. A title-only or body-only
+  # post yields a single line — identical to the legacy single-Text look — and
+  # the render layer only switches to set_toast_lines when there are two, so a
+  # one-line toast is byte-unchanged.
   def lines
+    return @lines_override unless @lines_override.nil?
     ls = []
     ls.push(@title) unless @title.empty?
     ls.push(@body)  unless @body.empty?
