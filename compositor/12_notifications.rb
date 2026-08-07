@@ -33,6 +33,19 @@
 require "widgets"
 require "base64"
 
+# The Compositor caches each toast's per-button rectangles (Widgets.button_rects,
+# go-widgets v0.114 Toast.ButtonRects / go-ruby-widgets v0.9) on the Notification
+# alongside its pixel cache, so a click can be routed to the exact action button
+# it hit. The pure model (05_notifications.rb) stays JS-free; this accessor is
+# compositor-only render state, mirroring the @b64 / @blitted render-cache split.
+class Notification
+  # Per-button rectangles in the toast's LOCAL painted space — an Array of
+  # { "x","y","w","h" } Hashes, one per action button in Actions order — filled
+  # lazily by render_toast on first paint. Nil until then (and for an action-less
+  # toast).
+  attr_accessor :button_rects
+end
+
 class Compositor
   # Master switch for the whole notification feature. `false` makes every
   # post/draw/tick/click hook below a no-op, so the compositor behaves exactly as
@@ -151,38 +164,97 @@ class Compositor
     end
     Widgets.set_visible(handle, true)
     img = Widgets.render(handle, w, h)
+    # Cache the laid-out button rectangles (in the pill's LOCAL painted space) so
+    # a later click can be routed to the exact action button it hit. Render sized
+    # the widget to the whole (w, h) buffer, so these rects share the space of a
+    # toast-local click (a screen click minus the pill's top-left). Nil for an
+    # action-less pill.
+    n.button_rects = acts.empty? ? nil : Widgets.button_rects(handle)
     Base64.strict_encode64(img["pixels"])
   end
 
   # The toast under (px, py), or nil. Used by on_mousedown to let a click on a
-  # toast dismiss it. No-op (nil) when the flag is off or the stack is empty.
+  # toast dismiss it. As a side effect it records the click's TOAST-LOCAL
+  # position (px/py minus the hit pill's top-left) in @notify_click_local, which
+  # dismiss_notification reads to route the click to the exact action button it
+  # landed on. Later (visually lower) rows win a tie, mirroring
+  # NotificationStack#at. No-op (nil) when the flag is off or the stack is empty.
   def notify_at(px, py)
     return nil unless NOTIFICATIONS
     return nil if notifications.empty?
-    notifications.at(px, py, @width)
+    hit = nil
+    notifications.layout(@width).each do |r|
+      if px >= r[:x] && px < r[:x] + r[:w] && py >= r[:y] && py < r[:y] + r[:h]
+        hit = r[:notif]
+        @notify_click_local = [px - r[:x], py - r[:y]]
+      end
+    end
+    hit
   end
 
-  # A toast was clicked: fire its action back to the posting client (if any),
-  # then remove it from the stack.
+  # A toast was clicked: route the click to the action button it landed on, fire
+  # THAT action back to the posting client (if any), publish it for the headless
+  # probe, then remove the toast. The click's toast-local position was stashed by
+  # notify_at (called immediately before by on_mousedown).
   def dismiss_notification(n)
-    fire_notification_action(n) if n.has_action?
+    act = clicked_action(n)
+    publish_notify_action(act, n)
+    fire_notification_action(n, act) if act && !act.empty?
     notifications.dismiss(n.id)
   end
 
-  # Post a toast's action id back to the client that raised it, as an `input`
-  # event of kind "notification_action" carrying the action id + the toast id.
-  # Routed by the poster's window_id so the SDK's onInput (keyed by surface)
-  # delivers it. No-op for a toast with no worker (the test hook / an in-process
-  # poster) or no action id.
-  def fire_notification_action(n)
+  # The action id the recorded click selects, or nil. The stashed toast-local
+  # click (@notify_click_local) is hit-tested against the cached per-button
+  # rectangles render_toast fills on first paint: a hit returns that button's
+  # action id. A miss returns the sole action for a SINGLE-button pill (the whole
+  # pill is that action's target — preserving the legacy "click anywhere to act"
+  # for a one-action toast) and nil for a MULTI-button pill (a body click just
+  # dismisses). With no rects cached yet (a click before the first paint) it
+  # falls back to the first action.
+  def clicked_action(n)
+    acts = n.actions
+    return nil if acts.empty?
+    rects = n.button_rects
+    local = @notify_click_local
+    if rects && !rects.empty? && local
+      lx, ly = local
+      rects.each_with_index do |r, i|
+        if lx >= r["x"] && lx < r["x"] + r["w"] && ly >= r["y"] && ly < r["y"] + r["h"]
+          return acts[i][:action].to_s
+        end
+      end
+      return acts.length == 1 ? acts[0][:action].to_s : nil
+    end
+    acts[0][:action].to_s
+  end
+
+  # Publish the routed action id (+ the toast id) to an OPTIONAL JS observer a
+  # headless probe installs (test/probe-notifications.mjs defines
+  # globalThis.wasmboxPublishNotifyAction before it clicks, then reads back what
+  # the compositor routed). Purely an observability seam: in production the global
+  # is undefined, so JS.global.get returns nil and this is a complete no-op — no
+  # worker.js hook needed. The empty string means "dismissed without firing".
+  def publish_notify_action(act, n)
+    return nil if JS.global.get("wasmboxPublishNotifyAction").nil?
+    JS.global.call("wasmboxPublishNotifyAction", act.to_s, n.id)
+  end
+
+  # Post the CLICKED action id back to the client that raised the toast, as an
+  # `input` event of kind "notification_action" carrying the action id + the toast
+  # id. `action` is the button the click routed to (see clicked_action), so a
+  # multi-action toast delivers the EXACT button pressed rather than always the
+  # first. Routed by the poster's window_id so the SDK's onInput (keyed by
+  # surface) delivers it. No-op for a toast with no worker (the test hook / an
+  # in-process poster) or an empty action id.
+  def fire_notification_action(n, action)
     return nil if n.worker.nil?
-    return nil if n.action.nil?
+    return nil if action.nil? || action.empty?
     payload = JS.global.call("wasmboxMakeObject",
       "type", "input",
       "window_id", n.window_id,
       "event", JS.global.call("wasmboxMakeObject",
         "kind", "notification_action",
-        "action", n.action,
+        "action", action,
         "notification_id", n.id))
     JS.global.call("wasmboxPostMessage", n.worker, payload)
   end
@@ -199,9 +271,10 @@ end
 #                   over the body instead of one joined "title — body" run.
 #   * MULTI-ACTION— Widgets.set_toast_actions(handle, [{label,callback}, ...]):
 #                   N right-edge buttons, superseding the single ActionLabel.
-# Remaining gap (a future notification center): a click on a multi-action pill is
-# still dismiss-only compositor-side (dismiss_notification fires the legacy first
-# action back to the client); per-BUTTON click routing would need the toolkit to
-# expose each button's rect (or a host HitTest) so on_mousedown can fire exactly
-# the button the pointer hit rather than the first.
+# Per-BUTTON click routing is now CLOSED too (go-widgets v0.114 Toast.ButtonRects
+# / go-ruby-widgets v0.9 Widgets.button_rects): render_toast caches each button's
+# laid-out rectangle (pill-local space) and dismiss_notification hit-tests the
+# stashed click against them, firing the EXACT button the pointer hit rather than
+# always the first. A future notification CENTER (history surface) is the
+# remaining follow-up.
 # ---------------------------------------------------------------------------

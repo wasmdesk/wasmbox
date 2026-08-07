@@ -26,6 +26,13 @@
 //      toasts auto-dismissed.
 //   6. A top-left control region stays empty throughout (the hits are the
 //      toasts, top-right, not desktop noise).
+//   12. PER-BUTTON click routing: on a two-action pill, a real mousedown at the
+//       SECOND button's centre (located from the rendered divider columns, driven
+//       through the compositor's genuine on_mousedown path via a relayed
+//       dom_event) routes to the SECOND action, and a first-button click to the
+//       FIRST — proving the compositor fires the exact button hit, not always the
+//       first. The compositor reports the routed action through an optional
+//       observer this probe installs (globalThis.wasmboxPublishNotifyAction).
 
 import { createServer } from "node:http";
 import { readFile } from "node:fs/promises";
@@ -194,6 +201,23 @@ function dividerRuns(png, bg, tol) {
     inRun = full;
   }
   return runs;
+}
+// The pill-local X of each full-height "divider" column — the LEFT edge of each
+// action button, read straight off the rendered pill. One entry per button,
+// left-to-right, so a probe can click a specific button precisely: button i
+// spans [cols[i], cols[i+1]) (the last runs to the pill's right edge).
+function dividerCols(png, bg, tol) {
+  const need = Math.floor(png.height * 0.75);
+  const cols = [];
+  let inRun = false;
+  for (let x = 3; x < png.width - 3; x++) {
+    let rows = 0;
+    for (let y = 0; y < png.height; y++) if (isInk(png, x, y, bg, tol)) rows++;
+    const full = rows >= need;
+    if (full && !inRun) cols.push(x);
+    inRun = full;
+  }
+  return cols;
 }
 
 // Post a notify via the test hook (a real `notify` wire message injected on the
@@ -382,6 +406,101 @@ try {
     fail(`rich auto-dismiss: rows not clear after timeout (row0=${r0b}, row1=${r1b})`);
   } else {
     ok(`rich toasts auto-dismissed after their timeout (row0=${r0b}, row1=${r1b})`);
+  }
+
+  // (12) PER-BUTTON CLICK ROUTING: a click on a two-action pill must fire the
+  // button the pointer actually hit — the SECOND action for a second-button
+  // click, the FIRST for a first-button click — not always the first. We read
+  // each button's horizontal span from the RENDERED divider columns (pixel-
+  // precise, off the real pill), inject a real mousedown at a chosen button's
+  // centre through the compositor's genuine on_mousedown path, and read back the
+  // action the compositor routed.
+  //
+  // No compositor.worker.js test hook is used (that file is owned by a concurrent
+  // PR): we install an OPTIONAL observer the compositor already probes for
+  // (publish_notify_action calls globalThis.wasmboxPublishNotifyAction only when
+  // it is defined), and we relay the click as a `dom_event` message exactly like
+  // the main thread's pointer relay — driving the real routing, not a shortcut.
+  await cw.evaluate(() => {
+    globalThis.__notifRouted = null;
+    globalThis.wasmboxPublishNotifyAction = (action, id) => {
+      globalThis.__notifRouted = { action: String(action), notification_id: id | 0 };
+    };
+  });
+
+  // Inject a real mousedown at canvas-relative (x, y) via the SAME dom_event
+  // message the page relays for genuine pointer input, so it flows through the
+  // compositor's actual on_mousedown -> notify_at -> dismiss_notification routing.
+  async function canvasMouseDown(x, y) {
+    await cw.evaluate(({ x, y }) => {
+      self.dispatchEvent(new MessageEvent("message", {
+        data: { type: "dom_event", target: "canvas", kind: "mousedown", offsetX: x, offsetY: y, button: 0 },
+      }));
+    }, { x, y });
+    await page.waitForTimeout(200);
+    return cw.evaluate(() => globalThis.__notifRouted);
+  }
+
+  // Post a fresh, STICKY two-action toast (timeout 0 = never auto-expires, so it
+  // waits for the click), read its two button spans off the rendered pill, and
+  // return them. Distinct action ids let us prove WHICH button fired.
+  async function postTwoActionToast() {
+    await cw.evaluate(() => { globalThis.__notifRouted = null; });
+    await postNotification(cw, {
+      title: "Deleted file", kind: "info",
+      actions: "Undo|act_undo;Dismiss|act_dismiss", timeout: 0,
+    });
+    await page.waitForTimeout(500);
+    const png = await grab(cw, ROW_X, ROW0_Y, TW, TH);
+    if (!png) { fail("routing: could not grab the two-action toast"); throw new Error("grab route"); }
+    const bg = px(png, TW - 8, 3);           // pill fill near the top-right corner
+    const cols = dividerCols(png, bg, TOL);  // left edge of each of the 2 buttons
+    return { png, cols };
+  }
+
+  // Click the centre of button `idx` (0-based) of the toast at row 0, given its
+  // divider columns, and return the routed { action, ... }.
+  async function clickButtonCentre(cols, idx) {
+    const left = cols[idx];
+    const right = idx + 1 < cols.length ? cols[idx + 1] : TW - 1; // last runs to the edge
+    const localX = Math.floor((left + right) / 2);
+    const localY = Math.floor(TH / 2);
+    return canvasMouseDown(ROW_X + localX, ROW0_Y + localY);
+  }
+
+  // FIRST button -> the FIRST action.
+  const t1 = await postTwoActionToast();
+  if (t1.cols.length !== 2) {
+    fail(`routing: expected 2 button dividers, found ${t1.cols.length}`);
+  } else {
+    const fired1 = await clickButtonCentre(t1.cols, 0);
+    if (!fired1 || fired1.action !== "act_undo") {
+      fail(`routing: first-button click fired ${JSON.stringify(fired1)}, want action "act_undo"`);
+    } else {
+      ok(`per-button routing: first-button click fired the FIRST action (${fired1.action})`);
+    }
+  }
+
+  // SECOND button -> the SECOND action (the headline: NOT the first).
+  const t2 = await postTwoActionToast();
+  if (t2.cols.length !== 2) {
+    fail(`routing: expected 2 button dividers on the second toast, found ${t2.cols.length}`);
+  } else {
+    const fired2 = await clickButtonCentre(t2.cols, 1);
+    if (!fired2 || fired2.action !== "act_dismiss") {
+      fail(`routing: second-button click fired ${JSON.stringify(fired2)}, want action "act_dismiss" (not the first "act_undo")`);
+    } else {
+      ok(`per-button routing: second-button click fired the SECOND action (${fired2.action}), not the first`);
+    }
+    // The dismissing click also cleared the toast.
+    await page.waitForTimeout(200);
+    const goneP = await grab(cw, ROW_X, ROW0_Y, TW, TH);
+    const goneB = goneP ? brightCount(goneP, BRIGHT) : 999999;
+    if (goneB > EMPTY) {
+      fail(`routing: toast still present after the dismissing click (${goneB} bright px)`);
+    } else {
+      ok(`per-button routing: the click also dismissed the toast (${goneB} bright px)`);
+    }
   }
 
   if (pageErrors.length) {
