@@ -40,6 +40,13 @@ jobs:
           check-latest: true
           cache: true
 
+      # Node with a global WebSocket lets `go test ./...` run the browser
+      # client's wasm end-to-end test (clients/browser/e2e_test.go); without it
+      # that test skips cleanly.
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+
       - name: go vet
         run: go vet ./...
 
