@@ -13,11 +13,6 @@
 # / handle_menu_hover in 06_core.rb) are untouched, so the menu behaves
 # identically — it just gets its pixels from the toolkit painter now.
 #
-# Gated behind Compositor::MENU_WIDGETS so the hand-drawn draw_menu_panel path
-# in 06_core.rb remains the shippable fallback while the compositor is
-# co-edited live (flip the flag to false to revert the paint with zero other
-# changes).
-#
 # Requiring the binding here (at boot, after 07_boot.rb) doubles as the
 # boot-time smoke test: if `require "widgets"` did not register in the wasm
 # build the program would raise on load and wasmboxError would be set.
@@ -32,10 +27,6 @@ require "base64"
 Widgets.set_theme("dark")
 
 class Compositor
-  # Master switch for the widgets-painted menu. `false` falls straight back to
-  # the hand-drawn draw_menu_panel path in 06_core.rb.
-  MENU_WIDGETS = true
-
   # Paint the open menu (and its open submenu, if any) via the widgets binding.
   # Mirrors draw_menu's two-panel structure. Called from draw_menu when the
   # flag is on.
