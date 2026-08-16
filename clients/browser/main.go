@@ -1,12 +1,17 @@
 // Command browser is a WhiteSur/Safari-styled web browser client for wasmdesk.
-// It is a thin front-end for the go-webengine browserproxy: it opens a
-// WebSocket to the proxy, streams rendered page frames into its content area,
-// and forwards the user's navigation (address bar, favourites, back/forward),
+// It is a thin front-end for the go-webengine browserproxy: it opens a gRPC
+// stream to the proxy, streams rendered page frames into its content area, and
+// forwards the user's navigation (address bar, favourites, back/forward),
 // content clicks, wheel scrolls and keys back as intents. Rendering happens
 // server-side, so ANY site works (including pages that forbid framing) and the
 // wasmbox page stays under COEP:require-corp — a WebSocket is exempt from
 // COEP/CORS. If the proxy is unreachable the client shows a clear offline
 // panel instead of crashing.
+//
+// The wire protocol is the browserproxy.v1.Browser gRPC service carried over
+// grpc-transports/websocket: one bidirectional Session stream per tab. The
+// transport ships a zero-dependency syscall/js client, so this very client
+// compiles to GOOS=js/wasm and speaks full gRPC in the browser with no sidecar.
 //
 //go:build js && wasm
 
@@ -14,36 +19,24 @@ package main
 
 import (
 	"bytes"
-	"encoding/base64"
-	"encoding/json"
+	"context"
 	"image"
 	"image/draw"
 	"image/png"
+	"sync"
 	"syscall/js"
 
+	"github.com/go-webengine/browserproxy/browserpb"
+	wstransport "github.com/grpc-transports/websocket"
 	"github.com/wasmdesk/wasmbox/clients/browser/internal/scene"
+	"google.golang.org/grpc"
+	"google.golang.org/grpc/credentials/insecure"
 )
 
 // defaultProxyURL is the dev-default browserproxy endpoint. It can be
 // overridden by the compositor via wasmboxClient.browserProxyURL or a global
 // BROWSERPROXY_URL, so a deployment can point the client at a hosted proxy.
 const defaultProxyURL = "ws://localhost:8090/ws"
-
-// serverMsg is a server→client protocol message (see browserproxy
-// docs/protocol.md). Only the fields for the received kind are populated.
-type serverMsg struct {
-	Kind       string `json:"kind"`
-	Frame      string `json:"frame"`
-	W          int    `json:"w"`
-	H          int    `json:"h"`
-	OffsetY    int    `json:"offsetY"`
-	URL        string `json:"url"`
-	Title      string `json:"title"`
-	Loading    bool   `json:"loading"`
-	CanBack    bool   `json:"canBack"`
-	CanForward bool   `json:"canForward"`
-	Message    string `json:"message"`
-}
 
 func main() {
 	client := js.Global().Get("wasmboxClient")
@@ -83,26 +76,32 @@ func main() {
 		}
 	}
 
+	conn := newConn(proxyURL(client), state, render)
+
 	// Loading-skeleton animation loop. While the scene reports Loading() (a
 	// navigation or the initial connect is awaiting its first frame), a
 	// self-rescheduling setTimeout advances the shimmer phase from a wall clock
 	// and repaints. The moment a frame arrives (or an error/idle), Loading() goes
 	// false and the loop stops — so an idle browser never burns CPU repainting,
-	// matching the compositor's don't-paint-when-idle discipline.
+	// matching the compositor's don't-paint-when-idle discipline. Scene access
+	// runs under the conn lock, serialised against the gRPC receive goroutine.
 	dateNow := js.Global().Get("Date")
 	animPending := false
 	var tick js.Func
 	tick = js.FuncOf(func(js.Value, []js.Value) any {
-		animPending = false
-		if !state.Loading() {
-			return nil
-		}
-		now := dateNow.Call("now").Float()
-		state.SetPhase(now / 1000.0 / scene.SkelCycleSeconds)
-		render() // render re-arms the loop via scheduleAnim while still loading
+		conn.withLock(func() {
+			animPending = false
+			if !state.Loading() {
+				return
+			}
+			now := dateNow.Call("now").Float()
+			state.SetPhase(now / 1000.0 / scene.SkelCycleSeconds)
+			render() // render re-arms the loop via scheduleAnim while still loading
+		})
 		return nil
 	})
 	scheduleAnim = func() {
+		// Always called from within render(), i.e. under the conn lock.
 		if animPending || !state.Loading() {
 			return
 		}
@@ -110,15 +109,14 @@ func main() {
 		js.Global().Call("setTimeout", tick, 33) // ~30fps shimmer
 	}
 
-	conn := newConn(proxyURL(client), state, render)
-	state.OnNavigate = func(url string) { conn.send(map[string]any{"kind": "navigate", "url": url}) }
-	state.OnBack = func() { conn.send(map[string]any{"kind": "back"}) }
-	state.OnForward = func() { conn.send(map[string]any{"kind": "forward"}) }
-	state.OnContentClick = func(x, y int) { conn.send(map[string]any{"kind": "click", "x": x, "y": y}) }
-	state.OnScroll = func(dy int) { conn.send(map[string]any{"kind": "scroll", "dy": dy}) }
-	state.OnContentKey = func(key string) { conn.send(map[string]any{"kind": "key", "key": key}) }
+	state.OnNavigate = func(url string) { conn.sendLocked(navigateMsg(url)) }
+	state.OnBack = func() { conn.sendLocked(backMsg()) }
+	state.OnForward = func() { conn.sendLocked(forwardMsg()) }
+	state.OnContentClick = func(x, y int) { conn.sendLocked(clickMsg(x, y)) }
+	state.OnScroll = func(dy int) { conn.sendLocked(scrollMsg(dy)) }
+	state.OnContentKey = func(key string) { conn.sendLocked(keyMsg(key)) }
 
-	render() // initial paint (offline panel until the socket opens)
+	render() // initial paint (offline panel until the stream opens)
 	conn.open()
 
 	cb := js.FuncOf(func(_ js.Value, args []js.Value) any {
@@ -126,20 +124,20 @@ func main() {
 			return nil
 		}
 		ev := args[0]
-		switch ev.Get("kind").String() {
-		case "mousedown":
-			if state.HandleMouse(ev.Get("x").Int(), ev.Get("y").Int()) {
+		conn.withLock(func() {
+			var dirty bool
+			switch ev.Get("kind").String() {
+			case "mousedown":
+				dirty = state.HandleMouse(ev.Get("x").Int(), ev.Get("y").Int())
+			case "wheel":
+				dirty = state.HandleWheel(ev.Get("deltaY").Int())
+			case "keydown":
+				dirty = state.HandleKey(ev.Get("key").String())
+			}
+			if dirty {
 				render()
 			}
-		case "wheel":
-			if state.HandleWheel(ev.Get("deltaY").Int()) {
-				render()
-			}
-		case "keydown":
-			if state.HandleKey(ev.Get("key").String()) {
-				render()
-			}
-		}
+		})
 		return nil
 	})
 	client.Call("onInput", cb)
@@ -159,13 +157,18 @@ func proxyURL(client js.Value) string {
 	return defaultProxyURL
 }
 
-// conn owns the browser-side WebSocket to the proxy and marshals scene intents
-// out / server messages in.
+// conn owns the gRPC Session stream to the proxy and marshals scene intents out
+// / server messages in. Its lock serialises every scene mutation + repaint: the
+// background receive goroutine, the input callbacks and the animation tick all
+// take it, so the single-threaded scene stays race-free.
 type conn struct {
 	url    string
 	state  *scene.State
 	render func()
-	ws     js.Value
+
+	mu     sync.Mutex
+	cc     *grpc.ClientConn
+	stream browserpb.Browser_SessionClient
 	open_  bool
 }
 
@@ -173,83 +176,134 @@ func newConn(url string, state *scene.State, render func()) *conn {
 	return &conn{url: url, state: state, render: render}
 }
 
-// open dials the proxy and wires the socket event handlers. A construction
-// failure (or a later error/close) leaves the client in the offline state.
+// withLock runs fn holding the conn lock — the one gate for scene access.
+func (c *conn) withLock(fn func()) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	fn()
+}
+
+// open dials the proxy over grpc-transports/websocket and starts the receive
+// loop. A construction failure (or a later stream error) leaves the client in
+// the offline state. The browser WebSocket global is required — the transport's
+// js/wasm client is built on it — so its absence is treated as offline.
 func (c *conn) open() {
-	ctor := js.Global().Get("WebSocket")
-	if ctor.IsUndefined() {
-		c.state.SetConnected(false)
-		c.render()
+	if js.Global().Get("WebSocket").IsUndefined() {
+		c.fail()
 		return
 	}
-	c.ws = ctor.New(c.url)
+	opt, err := wstransport.DialOption(c.url, wstransport.ClientConfig{})
+	if err != nil {
+		c.fail()
+		return
+	}
+	cc, err := grpc.NewClient("passthrough:///browserproxy",
+		grpc.WithTransportCredentials(insecure.NewCredentials()), opt)
+	if err != nil {
+		c.fail()
+		return
+	}
+	stream, err := browserpb.NewBrowserClient(cc).Session(context.Background())
+	if err != nil {
+		_ = cc.Close()
+		c.fail()
+		return
+	}
 
-	c.ws.Call("addEventListener", "open", js.FuncOf(func(js.Value, []js.Value) any {
-		c.open_ = true
+	c.withLock(func() {
+		c.cc, c.stream, c.open_ = cc, stream, true
 		c.state.SetConnected(true)
 		// Ask the proxy to render at our content-area size, and show the loading
 		// skeleton until that first streamed frame arrives.
 		cw, ch := c.state.ContentSize()
-		c.send(map[string]any{"kind": "resize", "w": cw, "h": ch})
+		c.sendStreamLocked(resizeMsg(cw, ch))
 		c.state.BeginLoad()
 		c.render()
-		return nil
-	}))
-	closed := js.FuncOf(func(js.Value, []js.Value) any {
+	})
+
+	go c.recvLoop()
+}
+
+// fail transitions the client to the offline state.
+func (c *conn) fail() {
+	c.withLock(func() {
 		c.open_ = false
 		c.state.SetConnected(false)
 		c.render()
-		return nil
 	})
-	c.ws.Call("addEventListener", "close", closed)
-	c.ws.Call("addEventListener", "error", closed)
-	c.ws.Call("addEventListener", "message", js.FuncOf(func(_ js.Value, args []js.Value) any {
-		if len(args) > 0 {
-			c.onMessage(args[0].Get("data").String())
+}
+
+// recvLoop reads server messages until the stream ends, applying each to the
+// scene under the lock. It never holds the lock across Recv, so an in-flight
+// send (from an input callback) never blocks the receive path and vice versa.
+func (c *conn) recvLoop() {
+	for {
+		msg, err := c.stream.Recv()
+		if err != nil {
+			c.fail()
+			return
 		}
-		return nil
-	}))
+		c.withLock(func() {
+			c.apply(msg)
+			c.render()
+		})
+	}
 }
 
-// send JSON-encodes an intent and writes it if the socket is open.
-func (c *conn) send(m map[string]any) {
-	if !c.open_ {
-		return
-	}
-	b, err := json.Marshal(m)
-	if err != nil {
-		return
-	}
-	c.ws.Call("send", string(b))
-}
-
-// onMessage decodes one server message and updates the scene, then repaints.
-func (c *conn) onMessage(data string) {
-	var m serverMsg
-	if err := json.Unmarshal([]byte(data), &m); err != nil {
-		return
-	}
-	switch m.Kind {
-	case "frame":
-		if rgba, w, h, ok := decodeFrame(m.Frame); ok {
+// apply updates the scene from one server message (lock held).
+func (c *conn) apply(msg *browserpb.ServerMsg) {
+	switch m := msg.GetMsg().(type) {
+	case *browserpb.ServerMsg_Frame:
+		if rgba, w, h, ok := decodeFrame(m.Frame.GetPng()); ok {
 			c.state.SetFrame(rgba, w, h)
 		}
-	case "state":
-		c.state.SetState(m.URL, m.Title, m.Loading, m.CanBack, m.CanForward)
-	case "error":
-		c.state.SetError(m.Message)
-	default:
-		return
+	case *browserpb.ServerMsg_State:
+		s := m.State
+		c.state.SetState(s.GetUrl(), s.GetTitle(), s.GetLoading(), s.GetCanBack(), s.GetCanForward())
+	case *browserpb.ServerMsg_Error:
+		c.state.SetError(m.Error.GetMessage())
 	}
-	c.render()
 }
 
-// decodeFrame turns a base64 PNG payload into a tightly-packed RGBA byte buffer.
-func decodeFrame(b64 string) (rgba []byte, w, h int, ok bool) {
-	raw, err := base64.StdEncoding.DecodeString(b64)
-	if err != nil {
-		return nil, 0, 0, false
+// sendLocked sends an intent; it is called from the scene On* callbacks, which
+// always run inside an input handler already holding the lock.
+func (c *conn) sendLocked(m *browserpb.ClientMsg) { c.sendStreamLocked(m) }
+
+// sendStreamLocked writes m to the stream if it is open (lock held). A send
+// error is left to the receive loop to surface as a disconnect.
+func (c *conn) sendStreamLocked(m *browserpb.ClientMsg) {
+	if !c.open_ || c.stream == nil {
+		return
 	}
+	_ = c.stream.Send(m)
+}
+
+// --- ClientMsg builders -------------------------------------------------------
+
+func navigateMsg(url string) *browserpb.ClientMsg {
+	return &browserpb.ClientMsg{Msg: &browserpb.ClientMsg_Navigate{Navigate: &browserpb.Navigate{Url: url}}}
+}
+func clickMsg(x, y int) *browserpb.ClientMsg {
+	return &browserpb.ClientMsg{Msg: &browserpb.ClientMsg_Click{Click: &browserpb.Click{X: int32(x), Y: int32(y)}}}
+}
+func scrollMsg(dy int) *browserpb.ClientMsg {
+	return &browserpb.ClientMsg{Msg: &browserpb.ClientMsg_Scroll{Scroll: &browserpb.Scroll{Dy: int32(dy)}}}
+}
+func keyMsg(key string) *browserpb.ClientMsg {
+	return &browserpb.ClientMsg{Msg: &browserpb.ClientMsg_Key{Key: &browserpb.Key{Key: key}}}
+}
+func resizeMsg(w, h int) *browserpb.ClientMsg {
+	return &browserpb.ClientMsg{Msg: &browserpb.ClientMsg_Resize{Resize: &browserpb.Resize{W: int32(w), H: int32(h)}}}
+}
+func backMsg() *browserpb.ClientMsg {
+	return &browserpb.ClientMsg{Msg: &browserpb.ClientMsg_Back{Back: &browserpb.Back{}}}
+}
+func forwardMsg() *browserpb.ClientMsg {
+	return &browserpb.ClientMsg{Msg: &browserpb.ClientMsg_Forward{Forward: &browserpb.Forward{}}}
+}
+
+// decodeFrame turns raw PNG bytes into a tightly-packed RGBA byte buffer.
+func decodeFrame(raw []byte) (rgba []byte, w, h int, ok bool) {
 	img, err := png.Decode(bytes.NewReader(raw))
 	if err != nil {
 		return nil, 0, 0, false
