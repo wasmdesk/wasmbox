@@ -23,24 +23,13 @@
 #
 # The Backdrop is OPAQUE (it is the bottom layer), so it uses wasmboxBlitRGBA
 # (putImageData-overwrite), like the menu — not the source-over path the
-# translucent HUD needs.
-#
-# Gated behind Compositor::DESKTOP_WIDGETS so the raw-ctx draw_desktop path in
-# 06_core.rb stays the shippable fallback during the live co-edit (flip to
-# false to revert the paint with zero other changes).
-#
-# Known parity diffs (toolkit-painter, same family as the menu/HUD pilots):
-#   * Grid lines are 1px FillRects at gx / gy rather than the raw path's
-#     gx+0.5 hairline strokes — visually identical at 1px, backend-portable.
+# translucent HUD needs. Grid lines are 1px FillRects — visually identical to a
+# 1px hairline stroke, and backend-portable.
 # ---------------------------------------------------------------------------
 require "widgets"
 require "base64"
 
 class Compositor
-  # Master switch for the widgets-painted desktop background. `false` falls
-  # straight back to the raw-ctx draw_desktop path in 06_core.rb.
-  DESKTOP_WIDGETS = true
-
   # Master switch for selectable WALLPAPERS (gradient presets + a bundled
   # procedural image) layered on the widgets desktop background (2026-08-03,
   # the first Batch-3 / desktop-layer feature). When false, draw_desktop_widgets

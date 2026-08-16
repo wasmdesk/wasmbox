@@ -31,6 +31,48 @@ class Compositor
     @fps = 0.0
     @last_layout_sig = nil
     @opentype_text = false # flips true after the one-shot AA-text opt-in
+    # --- dirty-rect + idle-repaint gate state ------------------------------
+    # The render loop runs every rAF, but compute_damage decides both WHETHER a
+    # frame is painted at all (the #88 idle gate: no damage → skip) and, when it
+    # is, WHICH regions to repaint (dirty-rect compositing: only the changed
+    # rectangles, not the whole canvas).
+    #
+    # @force_paint is the sticky "dirty" belt every input + client/bus message
+    # entry point raises (mark_dirty). It guarantees the next frame composites;
+    # compute_damage localises the change to a region when it can and otherwise
+    # falls back to a full recomposite. Cleared the instant a frame is painted.
+    # true on construction so the FIRST frame always paints (nothing drawn yet).
+    @force_paint = true
+    # @damage accumulates the regions that changed since the last composited
+    # frame; compute_damage rebuilds it each frame by diffing the live scene
+    # against the retained snapshot of what we last drew (@prev_* below).
+    @damage = DamageSet.new
+    @prev_wins = {}          # id => { vk: <visual signature>, b: <screen bounds> }
+    @cur_wins = {}           # working snapshot built during compute_damage
+    @prev_seqs = {}          # id => committed content seq of the last drawn frame
+    @cur_seqs = {}           # working snapshot built during compute_damage
+    @prev_globals = nil      # [frame_name, workspace, width, height]
+    @prev_overlay_active = false  # was a full-screen overlay/menu up last frame?
+    @prev_applet_sig = nil   # combined applet content signature last drawn
+    @prev_applet_layout = nil # applet set + positions last drawn
+    @prev_tray_sig = nil     # tray strip content signature last drawn
+    @prev_notify_sig = nil   # toast stack content signature last drawn
+    @prev_notify_count = 0   # toast count last drawn (for the clear-band extent)
+    @rendered_frames = 0     # frames we ACTUALLY composited (HUD counter)
+    # @bench_no_gate / @bench_no_sprite are optional bench seams: cmd/rbbench
+    # sets them via instance_variable_set to A/B the old (full redraw every
+    # frame) vs new (dirty-rect gate) paths in one binary. They are nil (falsy)
+    # in the shipped compositor, so production never touches the legacy path.
+  end
+
+  # Raise the idle-repaint dirty flag: the next rAF frame will paint. Called from
+  # every input handler (install_input wraps each DOM event), every client / bus
+  # message (route_worker_message + the spawn bus), and viewport resize
+  # (fit_canvas) — i.e. every externally-triggered state change. Self-driven
+  # changes (a live applet tick, a window commit) are detected in compute_damage
+  # instead, so they need no explicit call here.
+  def mark_dirty
+    @force_paint = true
   end
 
   # --- persistence ---------------------------------------------------------
@@ -108,14 +150,17 @@ class Compositor
     @bus.set("id", "__wasmbox_bus")
     @doc.get("body").call("appendChild", @bus)
     @bus.on("wasmbox-spawn-external") do |e|
+      mark_dirty
       url = e.get("detail")
       spawn_external(url.to_s)
     end
     @bus.on("wasmbox-spawn-external-oci") do |e|
+      mark_dirty
       ref = e.get("detail")
       spawn_external_oci(ref.to_s)
     end
     @bus.on("wasmbox-spawn-dom-window") do |e|
+      mark_dirty
       detail = e.get("detail")
       url = detail.get("url").to_s
       w = detail.get("w").to_i
@@ -153,14 +198,27 @@ class Compositor
     # when Compositor::APPLETS is off (the helpers no-op), so registering them
     # unconditionally keeps main shippable.
     @bus.on("wasmbox-applet-toggle") do |e|
+      mark_dirty
       toggle_applet(e.get("detail").to_s)
     end
     @bus.on("wasmbox-applet-place") do |e|
+      mark_dirty
       d = e.get("detail")
       place_applet(d.get("kind").to_s, d.get("x").to_i, d.get("y").to_i)
     end
     @bus.on("wasmbox-applet-remove") do |e|
+      mark_dirty
       remove_applet(e.get("detail").to_s)
+    end
+    # Calendar-nav test hook: __wasmboxCalendarNav("prev"/"next")
+    # (compositor.worker.js) dispatches here so test/probe-applets.mjs can step
+    # the calendar applet's month without pixel-hunting the widget's header
+    # arrows. Drives the SAME calendar_nav (14_applets.rb) the header-arrow click
+    # path does. Inert when Compositor::APPLETS is off or no calendar tile is
+    # shown, so registering it unconditionally keeps main shippable.
+    @bus.on("wasmbox-calendar-nav") do |e|
+      mark_dirty
+      calendar_nav(e.get("detail").to_s)
     end
     # Wallpaper test hook: __wasmboxSetWallpaper(name) (compositor.worker.js)
     # dispatches a `set_wallpaper` message here so a probe can switch the desktop
@@ -179,8 +237,21 @@ class Compositor
     # window. Registering it unconditionally is harmless — it only ever fires from
     # the probe-only JS hook.
     @bus.on("wasmbox-spawn-window") do |e|
+      mark_dirty
       @wm.spawn(e.get("detail").to_s)
       notify_windows_changed
+    end
+    # Live-thumbnail test hook: __wasmboxSpawnExternalStub(title, w, h)
+    # (compositor.worker.js) dispatches a `hello`-shaped detail carrying a
+    # SharedArrayBuffer surface here so test/probe-alttab.mjs / probe-expose.mjs
+    # can put a REAL external (SAB) window on the desktop without racing a client's
+    # wasm load — the deterministic surface whose pixels the Alt-Tab / Exposé grab
+    # path captures. Routed through the SAME register_external + build_image_data
+    # path a real client's welcome uses (spawn_external_stub). Registering it
+    # unconditionally is harmless — it only ever fires from the probe-only JS hook.
+    @bus.on("wasmbox-spawn-external-stub") do |e|
+      mark_dirty
+      spawn_external_stub(e.get("detail"))
     end
     # Alt-Tab test hook: __wasmboxAltTab(cmd) (compositor.worker.js) dispatches an
     # `alttab` command ("open"/"advance"/"advance_reverse"/"commit"/"cancel")
@@ -190,6 +261,7 @@ class Compositor
     # off (alttab_probe no-ops), so registering it unconditionally keeps main
     # shippable.
     @bus.on("wasmbox-alttab") do |e|
+      mark_dirty
       alttab_probe(e.get("detail"))
     end
     # Spotlight test hook: __wasmboxSpotlight(cmd) (compositor.worker.js)
@@ -200,6 +272,7 @@ class Compositor
     # spotlight_probe). Inert when Compositor::SPOTLIGHT is off (spotlight_probe
     # no-ops), so registering it unconditionally keeps main shippable.
     @bus.on("wasmbox-spotlight") do |e|
+      mark_dirty
       spotlight_probe(e.get("detail"))
     end
     # Exposé test hook: __wasmboxExpose(cmd) (compositor.worker.js) dispatches an
@@ -210,6 +283,7 @@ class Compositor
     # (17_expose.rb#expose_probe). Inert when Compositor::EXPOSE is off
     # (expose_probe no-ops), so registering it unconditionally keeps main shippable.
     @bus.on("wasmbox-expose") do |e|
+      mark_dirty
       expose_probe(e.get("detail"))
     end
     @worker_seq = 0
@@ -229,6 +303,33 @@ class Compositor
     win = @wm.spawn_dom(title, w, h, url)
     body = win.body_rect
     JS.global.call("wasmboxIframeAttach", win.id, url, body[0], body[1], body[2], body[3])
+    win
+  end
+
+  # Register a synthetic EXTERNAL (SharedArrayBuffer-backed) window from the
+  # live-thumbnail test hook (__wasmboxSpawnExternalStub). It mirrors the
+  # `:welcome` arm of route_worker_message — register_external + stash the SAB /
+  # ctl refs + build_image_data — but there is no client worker, so it posts no
+  # `welcome` back (worker stays nil) and never expects commits: the SAB already
+  # holds a complete frame. The window is a normal ExternalWindow (role "window"),
+  # so it composites, snaps, alt-tabs and exposes like any client surface, and its
+  # pixels are reachable to wasmboxGrabWindow. Focused so a probe finds it.
+  def spawn_external_stub(detail)
+    return nil if detail.nil?
+    title = detail.get("title")
+    title = title.nil? ? "ext-stub" : title.to_s
+    w = detail.get("w").to_i
+    h = detail.get("h").to_i
+    w = 240 if w <= 0
+    h = 180 if h <= 0
+    win = @wm.register_external(title, w, h, "window")
+    win.sab = detail.get("sab")
+    win.ctl = detail.get("ctl")
+    win.stride = 4 * w
+    win.merge_damage({ x: 0, y: 0, w: w, h: h })
+    build_image_data(win)
+    @wm.focus(win)
+    notify_windows_changed
     win
   end
 
@@ -284,6 +385,11 @@ class Compositor
   # stays unit-testable; only the JS-touching pieces (ImageData construction,
   # welcome/closed postMessage) live here.
   def route_worker_message(worker, data)
+    # Any client / bus message can change what is on screen (a hello, a commit, a
+    # title change, a close, a tray/notification/applet/wallpaper bus event), so
+    # raise the idle-repaint dirty flag before dispatching. Window pixel commits
+    # ride the "commit" arm here too, so a client that repaints wakes the gate.
+    mark_dirty
     msg = decode_message(data)
     return nil unless msg
     result = @wm.handle_client_message(msg)
@@ -521,15 +627,27 @@ class Compositor
     # popup placement (without them a popup hello would land at (0,0)).
     # `lock_aspect` rides on `hello` (optional intrinsic ratio); `ratio` rides
     # on `set_lock_aspect` (post-handshake declaration).
-    # `body`/`kind`/`icon`/`timeout`/`action_label`/`action` ride on `notify`
-    # (a desktop notification: headline + detail line, severity, optional base64
-    # icon, seconds-until-dismiss, and a single click-to-act button). Fields NOT
-    # listed here arrive nil, so a new notify field must be added to this list.
+    # `body`/`kind`/`icon`/`icon_w`/`icon_h`/`timeout`/`action_label`/`action`/
+    # `actions` ride on `notify` (a desktop notification: headline + detail line,
+    # severity, an optional leading icon — a stock glyph NAME, or base64 RGBA
+    # pixels at `icon_w`x`icon_h` — seconds-until-dismiss, a legacy single
+    # click-to-act button, and `actions`: a compact "Label|cb;Label2|cb2" scalar
+    # for several buttons). Fields NOT listed here arrive nil, so a new notify
+    # field MUST be added to this list (the go-widgets v0.86 icon/multiline/
+    # multi-action refinements added `icon_w`/`icon_h`/`actions`).
     # `id`/`glyph`/`tooltip` ride on `tray_add`/`tray_remove`/`tray_update` (a
     # status icon: its caller-chosen id, a stock glyph name OR a base64 RGBA
     # `icon` at `w`x`h`, and the hover tooltip).
+    # `summary`/`urgency`/`expire_timeout`/`app_icon`/`image_data`/`image_w`/
+    # `image_h`/`resident` also ride on `notify` — the freedesktop.org
+    # Desktop-Notification field set (see Notification.map_freedesktop): summary
+    # (title), urgency byte (0/1/2), expire_timeout in MILLISECONDS (-1 default,
+    # 0 never), the app_icon glyph name, inline image-data (base64 RGBA at
+    # `image_w`x`image_h`) and the resident hint. `actions` is shared with the
+    # native path (the compact "Label|key;..." scalar, key = the echoed action).
     %w[window_id w h stride title role app index workspace name parent rel_x rel_y lock_aspect ratio
-       body kind icon timeout action_label action id glyph tooltip].each do |k|
+       body kind icon icon_w icon_h timeout action_label action actions id glyph tooltip
+       summary urgency expire_timeout app_icon image_data image_w image_h resident].each do |k|
       v = data.get(k)
       h[k.to_sym] = v unless v.nil?
     end
@@ -599,16 +717,24 @@ class Compositor
     @canvas.set("height", h)
     @width = w
     @height = h
+    # Setting canvas.width/height clears the surface, so the next frame MUST
+    # repaint even if nothing else changed.
+    mark_dirty
   end
 
+  # Every DOM input event is a potential state change, so each handler is wrapped
+  # to raise the idle-repaint dirty flag before it runs. This is the belt half of
+  # the belt-and-suspenders gate: any user input composites the next frame; the
+  # suspenders half (compute_damage) additionally catches self-driven changes
+  # (applet ticks, window commits) that arrive with no DOM event.
   def install_input
-    @canvas.on("mousedown")   { |e| on_mousedown(e) }
-    @canvas.on("mousemove")   { |e| on_mousemove(e) }
-    @canvas.on("mouseup")     { |e| on_mouseup(e) }
-    @canvas.on("contextmenu") { |e| on_contextmenu(e) }
-    @canvas.on("wheel")       { |e| on_wheel(e) }
-    JS.window.on("keydown")   { |e| on_keydown(e) }
-    JS.window.on("keyup")     { |e| on_keyup(e) }
+    @canvas.on("mousedown")   { |e| mark_dirty; on_mousedown(e) }
+    @canvas.on("mousemove")   { |e| mark_dirty; on_mousemove(e) }
+    @canvas.on("mouseup")     { |e| mark_dirty; on_mouseup(e) }
+    @canvas.on("contextmenu") { |e| mark_dirty; on_contextmenu(e) }
+    @canvas.on("wheel")       { |e| mark_dirty; on_wheel(e) }
+    JS.window.on("keydown")   { |e| mark_dirty; on_keydown(e) }
+    JS.window.on("keyup")     { |e| mark_dirty; on_keyup(e) }
   end
 
   # Scroll-wheel input. Forwarded to the panel under the pointer (the dock —
@@ -1354,27 +1480,333 @@ class Compositor
   #
   # The toolkit's active font is a process-global, so this flips it exactly
   # once, on the first frame — before any widgets paint path runs (draw_desktop
-  # is the first) — and only when at least one widgets surface is enabled, so
-  # the opt-in is gated consistently with the per-surface *_WIDGETS flags. If
-  # every widgets path is off, the bitmap default is left untouched.
+  # is the first) — so every surface (desktop, frames, menu, HUD) shapes its
+  # text with the anti-aliased OpenType face instead of the compiled-in bitmap.
   def enable_opentype_text_once
     return if @opentype_text
     @opentype_text = true
-    return unless MENU_WIDGETS || HUD_WIDGETS || DESKTOP_WIDGETS || FRAME_WIDGETS
     require "widgets"
     Widgets.use_opentype_text
   end
 
+  # The per-rAF entry point. Runs every animation frame but composites only when
+  # compute_damage reports a change, and then repaints only the changed REGIONS
+  # rather than the whole canvas:
+  #   - empty damage → idle → skip the whole scene walk (the #88 gate: no window
+  #     commit, no live-applet tick, no input → idle CPU approaches zero instead
+  #     of re-compositing a static scene ~60×/sec, the Firefox 100%-CPU
+  #     regression the DE overlays surfaced).
+  #   - full  damage → whole-screen recomposite (first frame, viewport resize,
+  #     frame/palette swap, workspace switch, an open menu / full-screen modal).
+  #   - region damage → repaint only the union of the changed rectangles
+  #     (draw the desktop + intersecting windows clipped to each rect; retain
+  #     everything else from the prior frame), then relay the top overlays.
+  # The focused-rect probe publish runs every frame regardless (one cheap JS
+  # call) so the snapping probe reads a fresh value even on skipped frames.
   def render
     enable_opentype_text_once
+    # Re-anchor every panel to the bottom-center of the current canvas BEFORE we
+    # diff, so a re-anchor (e.g. after a viewport resize) shows up as a geometry
+    # change in compute_damage rather than being missed.
+    @wm.panels.each { |p| @wm.anchor_panel(p, @width, @height) }
+
+    compute_damage
+    unless @damage.empty?
+      if @damage.full?
+        paint_full
+      else
+        paint_regions(@damage)
+      end
+      @rendered_frames += 1
+    end
+    # This frame is now on the canvas (or was intentionally skipped): clear the
+    # belt and promote the working snapshot so the NEXT compute_damage diffs
+    # against exactly what is on screen. force_paint can only be set here when
+    # damage was non-empty (compute_damage escalates a stray belt to full), so
+    # clearing it unconditionally never drops a pending change.
+    @force_paint = false
+    snapshot_scene
+
+    # Publish the focused window's live geometry + the work-area metrics for the
+    # snapping probe (test/probe-snapping.mjs reads globalThis.__wasmboxFocusedRect).
+    # One cheap JS call per frame, self-gated on SNAPPING so main is unaffected,
+    # and OUTSIDE the paint gate so the probe reads a fresh value on idle frames.
+    publish_snap_geometry if SNAPPING
+  end
+
+  # Diff the live scene against the last composited frame and populate @damage.
+  # A global change (or the first frame / a modal / the bench baseline seam)
+  # forces a full recomposite; otherwise we accumulate one rectangle per changed,
+  # appeared or vanished window, one per external surface that committed new
+  # pixels, one per ticking desktop applet, plus the tray / notification / HUD
+  # bands when those changed — then the belt catch-all promotes anything we could
+  # not localise to a full recomposite.
+  def compute_damage
+    @damage.clear
+    g = current_globals
+    overlay = overlay_active?
+    # Full recomposite when the bench baseline seam is set, on the first frame,
+    # on any global change (frame/palette, active workspace, canvas size), or
+    # when a full-screen overlay/menu is up now OR was up last frame (so the
+    # frame it closes on also erases it).
+    force_full = @bench_no_gate || @prev_globals.nil? || g != @prev_globals ||
+                 overlay || @prev_overlay_active
+    # A desktop-applet set/position change (add / remove / drag) is rare and
+    # reshuffles the board, so a full recomposite is simplest and erases any
+    # vacated tile footprint.
+    force_full = true if APPLETS && applet_layout_signature != @prev_applet_layout
+
+    cur = {}
+    seqs = {}
+    wins = visible_windows
+    wins.each do |win|
+      b  = window_bounds(win)
+      vk = window_vkey(win)
+      sq = window_live_seq(win)
+      cur[win.id]  = { vk: vk, b: b }
+      seqs[win.id] = sq
+      next if force_full
+      prev = @prev_wins[win.id]
+      if prev.nil?
+        @damage.add_rect(b)                      # newly appeared
+      elsif prev[:vk] != vk
+        u = DamageSet.union(prev[:b], b)         # moved / resized / focus / shade / retitle
+        @damage.add(u[:x], u[:y], u[:w], u[:h])
+      end
+      # New client pixels (a commit) damage the surface even when its geometry is
+      # unchanged. Over-approximated to the whole window bounds rather than
+      # mapping the sub-rect through the resize scale — simpler, and still far
+      # less than a full-screen repaint whenever other windows exist.
+      prev_sq = @prev_seqs[win.id].nil? ? 0 : @prev_seqs[win.id]
+      if win.external? && (!win.clipped_damage.nil? || sq != prev_sq)
+        @damage.add_rect(b)
+      end
+    end
+    @cur_wins = cur
+    @cur_seqs = seqs
+
+    if force_full
+      @damage.full!
+      return nil
+    end
+
+    # A window present last frame but gone now leaves a hole to repaint.
+    @prev_wins.each do |id, prev|
+      @damage.add_rect(prev[:b]) unless cur.key?(id)
+    end
+
+    # Desktop-applet content ticks (a clock second, a monitor step, a calendar
+    # nav) repaint just the affected tiles — same set + positions, exact bounds.
+    damage_applets
+    # Tray strip + notification column are top-stratum overlays; damage their
+    # bands when their content changed so the region loop repaints the desktop +
+    # windows beneath, and the post-loop redraw lands them back on top.
+    damage_tray
+    damage_notifications
+
+    # Belt catch-all: an input/message raised force_paint but nothing above could
+    # localise it (a wallpaper/theme swap, a hover forward, …) — repaint fully so
+    # a change we cannot pin to a region is never dropped.
+    if @force_paint && @damage.empty?
+      @damage.full!
+      return nil
+    end
+    # NOTE: the debug HUD (fps + composited-frame counter) is a RETAINED top
+    # overlay, like the tray + toasts — its pixels persist on the canvas, so it
+    # is NOT damaged here every frame (that would tax every localized change with
+    # a whole extra region). paint_regions relays it only when another damage
+    # rect repainted the band beneath it; its counter therefore holds steady
+    # during localized activity that never touches the bottom-left band, which is
+    # the honest picture of the work actually done.
+    nil
+  end
+
+  # Promote the working snapshot to the retained one, after a composite (or an
+  # intentionally-skipped idle frame). The next compute_damage diffs against it.
+  def snapshot_scene
+    @prev_wins = @cur_wins
+    @prev_seqs = @cur_seqs
+    @prev_globals = current_globals
+    @prev_overlay_active = overlay_active?
+    @prev_applet_sig = applet_signature
+    @prev_applet_layout = applet_layout_signature
+    @prev_tray_sig = tray_signature
+    @prev_notify_sig = notification_signature
+    @prev_notify_count = NOTIFICATIONS ? notifications.length : 0
+    nil
+  end
+
+  # The bottom-to-top list of windows that actually render: not minimized, and
+  # either a panel (always visible) or on the active workspace.
+  def visible_windows
+    active = @wm.active_workspace
+    out = []
+    @wm.ordered_windows.each do |win|
+      next if win.minimized?
+      next if !win.panel? && win.workspace != active
+      out << win
+    end
+    out
+  end
+
+  # Screen-space bounding box [x, y, w, h] a window paints into: the padded
+  # chrome extent for a decorated window, else the bare body rect.
+  def window_bounds(win)
+    win.decorated? ? Frame.sprite_bounds(win) : win.body_rect
+  end
+
+  # A window's visual signature: every input that changes its on-screen pixels
+  # OR its position. Equal signatures across two frames mean that window need not
+  # be repainted (and its cached chrome buffer still applies).
+  def window_vkey(win)
+    "#{win.x}:#{win.y}:#{win.w}:#{win.h}:#{win.focused? ? 1 : 0}:#{win.shaded? ? 1 : 0}:#{win.title}"
+  end
+
+  # The live committed-content seq of one external window (0 for in-process or
+  # seqlock-less surfaces), read straight from the SAB control word so a client
+  # that painted new pixels is observed BEFORE the blit.
+  def window_live_seq(win)
+    return 0 unless win.external?
+    slot = win.image_data
+    slot.nil? ? 0 : JS.global.call("wasmboxWindowLiveSeq", slot).to_i
+  end
+
+  # Everything that, when it changes, is cheapest to handle with a full
+  # recomposite: the active frame/palette, the active workspace and the canvas
+  # size.
+  def current_globals
+    [Frame.current_name, @wm.active_workspace, @width, @height]
+  end
+
+  # A full-screen overlay / menu is up: repaint fully while it is (and the frame
+  # it closes on). Menus, the drag-to-edge snap preview and the Alt-Tab /
+  # Spotlight / Exposé modals all dim or draw over large areas, so a region walk
+  # would be more code for no win.
+  def overlay_active?
+    return true if @menu
+    return true if SNAPPING && @snap_preview
+    return true if ALTTAB && alttab_active?
+    return true if SPOTLIGHT && spotlight_active?
+    return true if EXPOSE && expose_active?
+    false
+  end
+
+  # Small reserved band at the bottom-left for the HUD text (fps + frame no.),
+  # matching draw_hud_widgets' placement + extent.
+  def hud_rect
+    [0, @height - 24, [560, @width].min, 24]
+  end
+
+  # Damage each desktop applet tile whose content signature ticked (clock
+  # second / monitor step / calendar nav). Same set + positions as last frame
+  # (a set/position change already forced a full recomposite), so the tile
+  # bounds are exact and nothing was vacated.
+  def damage_applets
+    return nil unless APPLETS
+    b = applets
+    return nil if b.empty?
+    return nil if applet_signature == @prev_applet_sig
+    b.items.each { |a| @damage.add_rect([a.x, a.y, a.w, a.h]) }
+    nil
+  end
+
+  # Damage the tray strip band when its content signature changed (an add,
+  # remove or a live glyph/tooltip update). A generous full-width top band — the
+  # strip's left edge depends on the item count, and covering the band handles
+  # any add/remove/update extent without tracking the previous layout.
+  def damage_tray
+    return nil unless TRAY
+    return nil if tray_signature == @prev_tray_sig
+    @damage.add_rect(tray_bounds)
+    nil
+  end
+
+  # Damage the notification column when the toast set changed (a post, an expiry
+  # or the reflow an expiry triggers). The band covers max(prev, cur) toasts so
+  # the vacated slot of an expired toast is repainted too.
+  def damage_notifications
+    return nil unless NOTIFICATIONS
+    return nil if notification_signature == @prev_notify_sig
+    @damage.add_rect(notifications_bounds)
+    nil
+  end
+
+  # The combined content signature of every desktop applet ("" when none /
+  # APPLETS off): a live applet forces a repaint exactly when its pixels must
+  # change and no more often. Reuses applet_sig (14_applets.rb) — the same
+  # signature the per-applet render cache keys on.
+  def applet_signature
+    return "" unless APPLETS
+    b = applets
+    return "" if b.empty?
+    b.items.map { |a| applet_sig(a) }.join("|")
+  end
+
+  # The applet board's structural signature (kinds + positions). A change here
+  # (an add / remove / drag) forces a full recomposite so a vacated tile is
+  # erased; a pure content tick (same kinds + positions) does not.
+  def applet_layout_signature
+    return "" unless APPLETS
+    b = applets
+    return "" if b.empty?
+    b.items.map { |a| "#{a.kind}@#{a.x},#{a.y}" }.join("|")
+  end
+
+  # The tray strip's content signature: id + glyph + tooltip + image-present per
+  # item (TrayItem#sig), so an add/remove OR an in-place update moves it.
+  def tray_signature
+    return "" unless TRAY
+    t = tray
+    return "" if t.empty?
+    t.items.map { |it| it.sig }.join("|")
+  end
+
+  # Full-width top band tall enough for the tray strip (its plate + icons).
+  def tray_bounds
+    [0, 0, @width, TrayArea::MARGIN + TrayArea::ICON + 2 * TRAY_PAD]
+  end
+
+  # The notification column's content signature: the toast ids (keys), which
+  # change on every post / expiry / reflow (toasts are immutable once posted).
+  def notification_signature
+    return "" unless NOTIFICATIONS
+    s = notifications
+    return "" if s.empty?
+    s.items.map { |n| n.key }.join("|")
+  end
+
+  # Screen band the notification column occupies, covering max(prev, cur) toasts
+  # so an expiry's vacated slot is repainted along with the survivors' reflow.
+  def notifications_bounds
+    w   = NotificationStack::TOAST_W
+    mg  = NotificationStack::TOAST_MARGIN
+    gap = NotificationStack::TOAST_GAP
+    th  = NotificationStack::TOAST_H
+    n = notifications.length
+    n = @prev_notify_count if @prev_notify_count > n
+    n = 1 if n < 1
+    [@width - w - mg, 0, w + mg, mg + n * (th + gap)]
+  end
+
+  # True when any accumulated damage rect overlaps the given [x,y,w,h] bounds.
+  def damage_touches?(bounds)
+    hit = false
+    @damage.rects.each { |r| hit = true if DamageSet.rect_intersects?(r, bounds) }
+    hit
+  end
+
+  # The whole-screen recomposite: desktop → applets → windows → snap preview →
+  # menu → HUD → tray → notifications → modals. Used for the first frame,
+  # viewport resizes, frame/palette swaps, workspace switches, whenever a menu /
+  # full-screen modal is up, and whenever damage collapses to `full`. The
+  # dirty-flag clear + scene snapshot live in #render, shared with the region
+  # path, so this method only paints.
+  def paint_full
     draw_desktop
     # Desktop applets (14_applets.rb): the BOTTOM interactive stratum — painted
     # right after the wallpaper and BEFORE the windows, so every window
     # composites OVER an applet. Self-gates on Compositor::APPLETS.
     draw_applets
-    # Re-anchor every panel to the bottom-center of the current canvas, so the
-    # dock tracks viewport resizes and never cascades.
-    @wm.panels.each { |p| @wm.anchor_panel(p, @width, @height) }
     # Draw normal windows first, then panels on top (always-on-top stratum).
     # Minimized windows have been folded into the dock's iconbar; the
     # compositor skips them entirely so they leave no pixels on the canvas.
@@ -1382,12 +1814,7 @@ class Compositor
     # workspace's windows render. Panels (the dock) IGNORE the workspace
     # filter and always render, because the dock is the UI that switches
     # workspaces in the first place.
-    active = @wm.active_workspace
-    @wm.ordered_windows.each do |win|
-      next if win.minimized?
-      next if !win.panel? && win.workspace != active
-      draw_window(win)
-    end
+    visible_windows.each { |win| draw_window(win) }
     # Drag-to-edge landing preview: a translucent rect of where the window will
     # snap, drawn OVER the windows (like a tiling hint) while a move-drag hovers
     # an edge. Self-gates on Compositor::SNAPPING + an armed @snap_preview.
@@ -1416,10 +1843,70 @@ class Compositor
     # Drawn last so it reads as the top-most modal. Self-gates on Compositor::EXPOSE
     # + an open spread (else it only publishes the "inactive" probe state).
     draw_expose if EXPOSE
-    # Publish the focused window's live geometry + the work-area metrics for the
-    # snapping probe (test/probe-snapping.mjs reads globalThis.__wasmboxFocusedRect).
-    # One cheap JS call per frame, self-gated on SNAPPING so main is unaffected.
-    publish_snap_geometry if SNAPPING
+    nil
+  end
+
+  # The region recomposite: repaint only the damaged rectangles. Each rect is
+  # clipped so the draw calls for a partially-damaged window touch only the
+  # in-region pixels; everything outside every rect is retained from the prior
+  # frame (the OffscreenCanvas is persistent, never cleared). Within a rect we
+  # repaint the desktop background, then the applets, then every window whose
+  # screen bounds intersect it, in bottom-to-top stacking order, so overlaps
+  # stay correct. The always-on-top overlays (tray, notifications, HUD) sit ABOVE
+  # the windows, so the per-rect loop just painted desktop/window pixels over
+  # them — we relay each one after the loop when any damage rect touched it.
+  # Menus, the snap preview and the Alt-Tab / Spotlight / Exposé modals never
+  # reach this path (overlay_active? forced a full recomposite).
+  def paint_regions(dmg)
+    wins = visible_windows
+    dmg.rects.each do |r|
+      @ctx.call("save")
+      @ctx.call("beginPath")
+      @ctx.call("rect", r[:x], r[:y], r[:w], r[:h])
+      @ctx.call("clip")
+      draw_desktop_region(r)
+      draw_applets_region(r)
+      wins.each do |win|
+        next unless DamageSet.rect_intersects?(r, window_bounds(win))
+        draw_window(win)
+      end
+      @ctx.call("restore")
+    end
+    # Top overlays (tray strip, toast column, debug HUD) sit ABOVE the windows
+    # and their pixels persist on the retained canvas, so the per-rect loop just
+    # painted desktop/window pixels over any part a damage rect crossed. Relay
+    # each one — unclipped, at its fixed screen position, where the damage
+    # actually touched it: a change that never reaches a band leaves that overlay
+    # untouched (and unpaid-for).
+    draw_tray if TRAY && damage_touches?(tray_bounds)
+    draw_notifications if NOTIFICATIONS && damage_touches?(notifications_bounds)
+    draw_hud if damage_touches?(hud_rect)
+    nil
+  end
+
+  # Repaint the desktop background inside one damage rect. The backdrop is a
+  # cached full-canvas RGBA buffer (see 10_desktop_widgets.rb) presented via
+  # putImageData, which IGNORES the ctx clip — so we re-present only the rect via
+  # the dirty-rect blit helper (the first frame is always a full composite, so
+  # the "desktop" buffer is populated before any region frame).
+  def draw_desktop_region(r)
+    JS.global.call("wasmboxBlitRGBARegion", @ctx, @width, @height, 0, 0,
+                   "desktop", r[:x], r[:y], r[:w], r[:h])
+    nil
+  end
+
+  # Repaint the desktop-applet tiles that intersect one damage rect (clipped by
+  # the caller). Applets are the desktop stratum, below the windows, so they are
+  # painted between the background and the window loop. No-op when the flag is
+  # off or nothing is shown.
+  def draw_applets_region(r)
+    return nil unless APPLETS
+    b = applets
+    return nil if b.empty?
+    b.items.each do |a|
+      draw_applet_tile(a) if DamageSet.rect_intersects?(r, [a.x, a.y, a.w, a.h])
+    end
+    nil
   end
 
   # Snap landing preview. Draws the frame extent (body + titlebar headroom) of
@@ -1471,44 +1958,12 @@ class Compositor
     @ctx.call("strokeRect", x + 0.5, y + 0.5, w - 1, h - 1)
   end
 
-  def text(str, x, y, colour, size = 12)
-    @ctx.set("fillStyle", colour)
-    @ctx.set("font", "#{size}px ui-monospace, Menlo, monospace")
-    @ctx.call("fillText", str, x, y)
-  end
-
+  # Paint the desktop background (fill + grid, or a wallpaper) through the
+  # go-widgets binding — see draw_desktop_widgets in 10_desktop_widgets.rb,
+  # rendered ONCE and cached (re-rendered only on a resize / palette / wallpaper
+  # change), presented via putImageData.
   def draw_desktop
-    # When Compositor::DESKTOP_WIDGETS is on (see 10_desktop_widgets.rb), paint
-    # the desktop background (fill + grid) through the go-widgets binding
-    # (Widgets.backdrop -> render -> RGBA -> putImageData), rendered ONCE and
-    # cached (re-rendered only on a resize / palette change), instead of the
-    # raw-ctx fill + per-frame grid-stroke loop below. The flag keeps this
-    # hand-drawn path as the shippable fallback during the live co-edit.
-    if DESKTOP_WIDGETS
-      draw_desktop_widgets
-      return
-    end
-    fill_rect([0, 0, @width, @height], Theme::DESKTOP)
-    # A faint grid so window motion reads clearly.
-    @ctx.set("strokeStyle", Theme::DESKTOP_GRID)
-    @ctx.set("lineWidth", 1)
-    step = 40
-    gx = 0
-    while gx < @width
-      @ctx.call("beginPath")
-      @ctx.call("moveTo", gx + 0.5, 0)
-      @ctx.call("lineTo", gx + 0.5, @height)
-      @ctx.call("stroke")
-      gx += step
-    end
-    gy = 0
-    while gy < @height
-      @ctx.call("beginPath")
-      @ctx.call("moveTo", 0, gy + 0.5)
-      @ctx.call("lineTo", @width, gy + 0.5)
-      @ctx.call("stroke")
-      gy += step
-    end
+    draw_desktop_widgets
   end
 
   def draw_window(win)
@@ -1523,39 +1978,17 @@ class Compositor
     end
 
     active = win.focused?
-    chrome = Frame.current
 
-    # WIDGETS paint path (2026-08-02): when Compositor::FRAME_WIDGETS is on (see
-    # 11_frame_widgets.rb), paint the whole decoration (titlebar + buttons +
-    # border + shadow + grip) through the go-widgets binding into one per-window
-    # buffer and composite it OVER the body (source-over), instead of the
-    # hand-drawn chrome.paint / chrome.paint_frame below. The body is painted
-    # FIRST so the decoration's transparent body hole lets it show through and
-    # the border + grip land on top of its edges. Hit-testing (Window#*_rect) is
-    # unchanged, so the window behaves identically. The flag keeps the
-    # hand-drawn path below as the shippable fallback during the live co-edit.
-    if FRAME_WIDGETS
-      paint_window_body(win) unless win.shaded?
-      draw_window_frame_widgets(win, active)
-      return
-    end
-
-    # Chrome-owned titlebar + buttons. The current chrome handles all paint
-    # ops for the bar (background, hairline, title text, close/min/max
-    # glyphs). Both Openbox and Aqua chromes implement this method.
-    chrome.paint(@ctx, win, active, self)
-
-    # Shaded ("rolled up"): only the titlebar + its buttons are drawn — no body,
-    # no resize grip, no border. The body area shows whatever sits behind the
-    # window.
-    return if win.shaded?
-
-    paint_window_body(win)
-
-    # Chrome-owned frame chrome: resize grip + 1px border (Openbox), plus
-    # the faked 1px drop shadow + slightly heavier border on Aqua. Painted
-    # AFTER the body so it lands on top.
-    chrome.paint_frame(@ctx, win, active, self)
+    # Paint the whole decoration (titlebar + buttons + border + shadow + grip)
+    # through the go-widgets binding (chrome.decoration_spec -> Widgets.decoration
+    # -> render -> RGBA) into one per-window buffer and composite it OVER the body
+    # (source-over) — see draw_window_frame_widgets in 11_frame_widgets.rb. The
+    # body is painted FIRST so the decoration's transparent body hole lets it show
+    # through and the border + grip land on top of its edges. Hit-testing
+    # (Window#*_rect) stays the single source of truth, so paint + hit can never
+    # drift. A shaded ("rolled up") window paints only its titlebar — no body.
+    paint_window_body(win) unless win.shaded?
+    draw_window_frame_widgets(win, active)
   end
 
   # Paint a decorated window's client body. In-process windows paint a solid
@@ -1607,76 +2040,19 @@ class Compositor
     win.clear_damage
   end
 
-  # Draw the open menu (and its open submenu, if any) onto the canvas. Both
-  # use the Theme::MENU_* palette: MENU_BG fill, MENU_BORDER 1-px frame,
-  # MENU_TEXT label ink, and MENU_HILITE band for the hovered row.
+  # Draw the open menu (and its open submenu, if any) through the go-widgets
+  # `require "widgets"` binding (render -> RGBA -> putImageData) — see
+  # draw_menu_widgets in 08_menu_widgets.rb. Only the PAINT lives there; the Ruby
+  # hit-testing (menu_resolve / handle_menu_click / handle_menu_hover) stays the
+  # single source of truth, so the menu is clickable exactly as it paints.
   def draw_menu
-    # PILOT (2026-08-02): when Compositor::MENU_WIDGETS is on (see
-    # 08_menu_widgets.rb), paint the menu through the go-widgets `require
-    # "widgets"` binding (render -> RGBA -> putImageData) instead of
-    # hand-drawing it on the canvas below. Only the PAINT changes — the Ruby
-    # hit-testing (menu_resolve / handle_menu_click / handle_menu_hover) is
-    # untouched, so the menu stays clickable exactly as before. The flag keeps
-    # the hand-drawn draw_menu_panel path below as the shippable fallback.
-    if MENU_WIDGETS
-      draw_menu_widgets
-      return
-    end
-    state = @menu
-    draw_menu_panel(state[:menu], state[:x], state[:y], state[:hover],
-                    state[:submenu_idx])
-    if state[:submenu]
-      draw_menu_panel(state[:submenu], state[:submenu_x], state[:submenu_y],
-                      state[:submenu_hover], -1)
-    end
+    draw_menu_widgets
   end
 
-  # Render a single menu panel at (x, y) with `hover` highlighted (-1 = no
-  # highlight) and `open_sub_idx` showing the entry whose submenu is open
-  # (drawn highlighted too, so the user can read the parent path at a glance).
-  def draw_menu_panel(menu, x, y, hover, open_sub_idx)
-    h = menu.height
-    fill_rect([x, y, Menu::WIDTH, h], Theme::MENU_BG)
-    stroke_rect([x, y, Menu::WIDTH, h], Theme::MENU_BORDER, 1)
-    menu.each_row(y) do |entry, row_y, row_h, i|
-      if entry[:separator]
-        # A thin divider centered vertically in its SEP_H band — same colour
-        # as the frame so it reads as a hairline. We inset by Menu::PAD_X on
-        # each side so the line never touches the menu's vertical border.
-        mid = row_y + row_h / 2
-        @ctx.set("strokeStyle", Theme::MENU_BORDER)
-        @ctx.set("lineWidth", 1)
-        @ctx.call("beginPath")
-        @ctx.call("moveTo", x + Menu::PAD_X,                 mid + 0.5)
-        @ctx.call("lineTo", x + Menu::WIDTH - Menu::PAD_X,   mid + 0.5)
-        @ctx.call("stroke")
-        next
-      end
-      # Highlight the hovered row OR the row whose submenu is currently open.
-      if i == hover || i == open_sub_idx
-        fill_rect([x + 1, row_y, Menu::WIDTH - 2, row_h], Theme::MENU_HILITE)
-      end
-      text(entry[:label].to_s, x + Menu::PAD_X, row_y + row_h - 8, Theme::MENU_TEXT)
-      if entry[:submenu]
-        # Right-aligned chevron — render with the same MENU_TEXT colour as
-        # the label so it reads cleanly on both the bg and the hilite band.
-        text(">", x + Menu::WIDTH - Menu::PAD_X - 6, row_y + row_h - 8, Theme::MENU_TEXT)
-      end
-    end
-  end
-
+  # Paint the status HUD through the go-widgets binding (render -> RGBA ->
+  # alpha-composited blit) — see draw_hud_widgets in 09_hud_widgets.rb.
   def draw_hud
-    # When Compositor::HUD_WIDGETS is on (see 09_hud_widgets.rb), paint the HUD
-    # through the go-widgets binding (render -> RGBA -> alpha-composited blit)
-    # instead of the raw-ctx fillText below. The flag keeps this hand-drawn path
-    # as the shippable fallback during the live co-edit.
-    if HUD_WIDGETS
-      draw_hud_widgets
-      return
-    end
-    n = @wm.windows.length
-    line = "rbgo compositor — #{n} window#{n == 1 ? '' : 's'} — #{'%.0f' % @fps} fps — frame #{@frames}"
-    text(line, 10, @height - 12, Theme::HUD_TEXT, 12)
+    draw_hud_widgets
   end
 end
 

@@ -128,6 +128,51 @@ async function tileInk(worker, spot) {
 const PRESENT = 1800; // plate-backed sample lights up well over half its 3600 px
 const EMPTY = 400;    // bare desktop (+ a faint grid line or two) in the sample
 
+// Applet plate + geometry (MUST match compositor/14_applets.rb APPLET_PAD +
+// 05_applets.rb Applet::SIZE). The widget buffer is blitted at (x+PAD, y+PAD) at
+// (w-2*PAD) x (h-2*PAD).
+const PAD = 8;
+const CLOCK_W = 232, CLOCK_H = 88;
+const CAL_W = 210, CAL_H = 184;
+
+// Count light-text pixels (a label glyph on the dark applet plate sums bright,
+// the plate itself stays dark).
+function brightCount(png, floor) {
+  let n = 0;
+  for (let i = 0; i < png.data.length; i += 4) {
+    if (png.data[i] + png.data[i + 1] + png.data[i + 2] > floor) n++;
+  }
+  return n;
+}
+// Vertical extent (last - first + 1) of rows carrying light text, over the whole
+// grabbed region — how tall the painted glyphs stand.
+function brightVExtent(png, floor, perRow) {
+  let first = -1, last = -1;
+  for (let y = 0; y < png.height; y++) {
+    let cnt = 0;
+    for (let x = 0; x < png.width; x++) {
+      const i = (y * png.width + x) * 4;
+      if (png.data[i] + png.data[i + 1] + png.data[i + 2] > floor) cnt++;
+    }
+    if (cnt >= perRow) { if (first < 0) first = y; last = y; }
+  }
+  return first < 0 ? 0 : last - first + 1;
+}
+// Count pixels that differ between two same-size regions by more than `tol`
+// (summed channel distance) — a month navigation repaints the header + grid.
+function diffPixels(a, b, tol) {
+  let n = 0;
+  const len = Math.min(a.data.length, b.data.length);
+  for (let i = 0; i < len; i += 4) {
+    const d = Math.abs(a.data[i] - b.data[i]) +
+              Math.abs(a.data[i + 1] - b.data[i + 1]) +
+              Math.abs(a.data[i + 2] - b.data[i + 2]);
+    if (d > tol) n++;
+  }
+  return n;
+}
+const TEXT_FLOOR = 300; // light glyph sum; the dark plate (#2a2d3a, ~145) stays under
+
 const { server, base } = await startServer();
 console.log(`probe-applets: serving on ${base}`);
 
@@ -250,6 +295,69 @@ try {
     fail(`persistence: the calendar did not survive a reload (${persisted} ink px at its saved spot)`);
   } else {
     ok(`persistence: applet reappeared at its saved spot after a reload (${persisted} ink px)`);
+  }
+
+  // === v0.86 Calendar applet (bound Widgets.calendar) + month navigation ======
+  // The persisted calendar tile (at PERSIST) is a real go-widgets Calendar. It
+  // must (a) render a legible month grid and (b) REPAINT to a different grid when
+  // navigated a month — driven through the __wasmboxCalendarNav test hook, the
+  // same calendar_nav the header-arrow click uses.
+  const hasNav = await cw2.evaluate(() => typeof globalThis.__wasmboxCalendarNav === "function");
+  if (!hasNav) { fail("__wasmboxCalendarNav test hook is missing"); throw new Error("no nav hook"); }
+  const CAL_IN = { x: PERSIST.x + PAD, y: PERSIST.y + PAD, w: CAL_W - 2 * PAD, h: CAL_H - 2 * PAD };
+  const calBefore = await grab(cw2, CAL_IN.x, CAL_IN.y, CAL_IN.w, CAL_IN.h);
+  const calBeforeText = calBefore ? brightCount(calBefore, TEXT_FLOOR) : -1;
+  if (calBeforeText < 300) {
+    fail(`calendar: only ${calBeforeText} text px — the month grid did not render`);
+  } else {
+    ok(`calendar month grid rendered (${calBeforeText} glyph px)`);
+  }
+  await cw2.evaluate(() => globalThis.__wasmboxCalendarNav("next"));
+  await page.waitForTimeout(400);
+  const calNext = await grab(cw2, CAL_IN.x, CAL_IN.y, CAL_IN.w, CAL_IN.h);
+  const dNext = calNext ? diffPixels(calBefore, calNext, 60) : 0;
+  if (dNext < 200) {
+    fail(`calendar next-month: grid changed by only ${dNext} px — navigation did not repaint a new month`);
+  } else {
+    ok(`calendar 'next' repainted a new month grid (${dNext} px changed)`);
+  }
+  await cw2.evaluate(() => globalThis.__wasmboxCalendarNav("prev"));
+  await page.waitForTimeout(400);
+  const calPrev = await grab(cw2, CAL_IN.x, CAL_IN.y, CAL_IN.w, CAL_IN.h);
+  const dPrev = calPrev ? diffPixels(calNext, calPrev, 60) : 0;
+  if (dPrev < 200) {
+    fail(`calendar prev-month: grid changed by only ${dPrev} px — navigation did not repaint`);
+  } else {
+    ok(`calendar 'prev' repainted back a month (${dPrev} px changed)`);
+  }
+
+  // === v0.86 big clock face (Widgets.set_font_size) ===========================
+  // Place a clock at a clear spot; its HH:MM:SS line must render at the large
+  // per-label font (a tall glyph band) and stay WITHIN the tile bounds.
+  const CLOCKSPOT = { x: 560, y: 300 };
+  await cw2.evaluate((s) => globalThis.__wasmboxAppletPlace("clock", s.x, s.y), CLOCKSPOT);
+  await page.waitForTimeout(400);
+  // Time band: the top flex row of the inner buffer (inner h = 72, date row = 20,
+  // so the time row is the top ~52 px).
+  const timeBand = await grab(cw2, CLOCKSPOT.x + PAD, CLOCKSPOT.y + PAD, CLOCK_W - 2 * PAD, 52);
+  const timeText = timeBand ? brightCount(timeBand, TEXT_FLOOR) : -1;
+  const timeTall = timeBand ? brightVExtent(timeBand, TEXT_FLOOR, 3) : 0;
+  if (timeText < 200) {
+    fail(`big clock: only ${timeText} glyph px in the time row — the clock did not render`);
+  } else if (timeTall < 22) {
+    fail(`big clock: time glyphs span only ${timeTall}px tall — set_font_size did not enlarge the face (base ~11px)`);
+  } else {
+    ok(`big clock face rendered large (${timeText} glyph px, ${timeTall}px tall)`);
+  }
+  // Bounds-containment: no glyph pixels bleed past the tile's bottom or right edge.
+  const belowClock = await grab(cw2, CLOCKSPOT.x, CLOCKSPOT.y + CLOCK_H, CLOCK_W, 4);
+  const rightClock = await grab(cw2, CLOCKSPOT.x + CLOCK_W, CLOCKSPOT.y, 4, CLOCK_H);
+  const belowText = belowClock ? brightCount(belowClock, TEXT_FLOOR) : 999;
+  const rightText = rightClock ? brightCount(rightClock, TEXT_FLOOR) : 999;
+  if (belowText > 5 || rightText > 5) {
+    fail(`big clock bounds: glyph pixels bled outside the tile (below=${belowText}, right=${rightText})`);
+  } else {
+    ok(`big clock stays within tile bounds (below=${belowText}, right=${rightText} glyph px)`);
   }
 
   if (pageErrors.length) {

@@ -380,6 +380,31 @@ assert(!wml.launchable?("nope"), "unknown id is not launchable")
 assert(wml.launchable_url("nope").nil?, "unknown id has no static url")
 assert(wml.launchable_oci("nope").nil?, "unknown id has no OCI ref")
 
+# ---- launcher registry modeled on Desktop Entry (APP_MANIFEST) ------------
+# Each launchable id exposes a desktopentry.Entry-shaped Hash. Name/Icon/
+# Categories come from the embedded APP_MANIFEST; the Exec-analogue is derived
+# from LAUNCHABLE (never stored twice), so it always matches the launch target.
+de = wml.desktop_entry("terminal")
+assert_eq(de[:type], "Application", "a desktop entry is Type=Application")
+assert_eq(de[:name], "Terminal", "Name comes from the manifest")
+assert_eq(de[:generic_name], "Terminal Emulator", "GenericName comes from the manifest")
+assert_eq(de[:icon], "utilities-terminal", "Icon (themed name) comes from the manifest")
+assert_eq(de[:categories], ["System", "TerminalEmulator"], "Categories come from the manifest")
+assert_eq(de[:exec], "clients/terminal/worker.js", "Exec-analogue is the LAUNCHABLE worker URL")
+# The Exec-analogue tracks each LAUNCHABLE descriptor shape.
+assert_eq(wml.desktop_exec("terminal"), "clients/terminal/worker.js", "static descriptor -> worker URL exec")
+assert_eq(wml.desktop_exec("hello-oci"), "oci://hello:latest", "OCI descriptor -> oci:// exec")
+assert_eq(wml.desktop_entry("vscode")[:exec], "/code-server/", "dom descriptor -> dom URL exec")
+assert_eq(wml.desktop_entry("browser")[:categories], ["Network", "WebBrowser"], "browser categories")
+# An unknown id has no entry; a launchable id absent from the manifest still
+# gets a fallback entry (capitalized Name, empty metadata, real exec).
+assert_eq(wml.desktop_entry("nope"), nil, "unknown id has no desktop entry")
+# desktop_entries lists one entry per LAUNCHABLE id, in registry order.
+entries = wml.desktop_entries
+assert_eq(entries.length, WindowManager::LAUNCHABLE.length, "one desktop entry per launchable id")
+assert_eq(entries[0][:id], "terminal", "desktop_entries follows LAUNCHABLE insertion order")
+entries.each { |e| assert(wml.launchable?(e[:id]), "every desktop entry id is launchable") }
+
 # ---- minimize: geometry -----------------------------------------------
 wmin = WindowManager.new
 mw = wmin.spawn("min-test", 200, 120)
@@ -1189,6 +1214,148 @@ assert(!nstick.expired?(999999), "sticky never expires")
 nact = Notification.new(5, { title: "x", action_label: "Undo", action: "undo" }, 0)
 assert(nact.has_action?, "action label -> has_action")
 
+# ---- Notification v0.86 refinements: icon slot, multi-line body, multi-action -
+# Icon: a stock glyph name (no dims) vs. base64 pixel data (positive dims) vs.
+# none. glyph_icon? recognizes the ten stock names; image_icon? needs a size.
+assert(Notification.glyph_icon?("open"), "'open' is a stock glyph name")
+assert(Notification.glyph_icon?("settings"), "'settings' is a stock glyph name")
+assert(!Notification.glyph_icon?("nope"), "unknown icon name is not a glyph")
+assert(!Notification.glyph_icon?(""), "empty icon name is not a glyph")
+nicon_g = Notification.new(10, { title: "t", icon: "open" }, 0)
+assert(nicon_g.has_icon?, "a glyph-name icon counts as an icon")
+assert(!nicon_g.image_icon?, "a glyph-name icon (no dims) is not an image icon")
+assert_eq(nicon_g.icon, "open", "glyph icon name stored")
+assert_eq(nicon_g.icon_w, 0, "glyph icon has zero width")
+nicon_p = Notification.new(11, { title: "t", icon: "QUJD", icon_w: 2, icon_h: 3 }, 0)
+assert(nicon_p.has_icon?, "a pixel icon counts as an icon")
+assert(nicon_p.image_icon?, "a pixel icon (positive dims) is an image icon")
+assert_eq(nicon_p.icon_w, 2, "pixel icon width stored")
+assert_eq(nicon_p.icon_h, 3, "pixel icon height stored")
+nicon_n = Notification.new(12, { title: "t" }, 0)
+assert(!nicon_n.has_icon?, "no icon field -> no icon")
+assert(!nicon_n.image_icon?, "no icon field -> not an image icon")
+
+# Multi-line body: title + body -> two lines; a single half -> one line.
+nlines = Notification.new(13, { title: "Build done", body: "3 warnings" }, 0)
+assert_eq(nlines.lines, ["Build done", "3 warnings"], "title over body -> two lines")
+assert_eq(Notification.new(14, { title: "only" }, 0).lines, ["only"], "title-only -> one line")
+assert_eq(Notification.new(15, { body: "hey" }, 0).lines, ["hey"], "body-only -> one line")
+
+# Multi-action parsing: "Label|cb;Label2|cb2" scalar -> ordered [{label, action}].
+acts = Notification.parse_actions("Open|do_open;Dismiss|do_dismiss")
+assert_eq(acts.length, 2, "two actions parsed from the scalar")
+assert_eq(acts[0][:label], "Open", "action 0 label")
+assert_eq(acts[0][:action], "do_open", "action 0 callback")
+assert_eq(acts[1][:label], "Dismiss", "action 1 label")
+assert_eq(acts[1][:action], "do_dismiss", "action 1 callback")
+# A field with no "|callback" carries an empty action; a blank label is skipped.
+acts2 = Notification.parse_actions("Solo;|orphan;Two|cb")
+assert_eq(acts2.length, 2, "blank-label field skipped")
+assert_eq(acts2[0][:label], "Solo", "label-only field kept")
+assert_eq(acts2[0][:action], "", "label-only field has an empty callback")
+assert_eq(acts2[1][:label], "Two", "trailing field parsed after the skipped one")
+assert_eq(Notification.parse_actions(nil), [], "nil actions -> []")
+assert_eq(Notification.parse_actions(""), [], "empty actions -> []")
+# The #actions accessor: parsed list wins; else the legacy single action folds in;
+# else [].
+nmulti = Notification.new(16, { title: "t", actions: "A|a;B|b" }, 0)
+assert_eq(nmulti.actions.length, 2, "parsed actions surface via #actions")
+nlegacy = Notification.new(17, { title: "t", action_label: "Undo", action: "undo" }, 0)
+assert_eq(nlegacy.actions.length, 1, "legacy single action folds into #actions")
+assert_eq(nlegacy.actions[0][:label], "Undo", "folded legacy action label")
+assert_eq(nlegacy.actions[0][:action], "undo", "folded legacy action callback")
+assert_eq(Notification.new(18, { title: "t" }, 0).actions, [], "no actions -> []")
+# A multi-action post supersedes the legacy pair when both are present.
+nboth = Notification.new(19, { title: "t", action_label: "Old", action: "old", actions: "New|new" }, 0)
+assert_eq(nboth.actions.length, 1, "multi-action list supersedes the legacy pair")
+assert_eq(nboth.actions[0][:label], "New", "multi-action wins over the legacy label")
+
+# ---- freedesktop Notification semantics (map_freedesktop, mirrors ToToast) ----
+# urgency -> kind: Critical is an error pill; Low and Normal are info (never
+# success/warning), matching toast.KindFor.
+assert_eq(Notification.kind_for_urgency(Notification::URGENCY_CRITICAL), "error", "Critical urgency -> error kind")
+assert_eq(Notification.kind_for_urgency(Notification::URGENCY_LOW), "info", "Low urgency -> info kind")
+assert_eq(Notification.kind_for_urgency(Notification::URGENCY_NORMAL), "info", "Normal urgency -> info kind")
+
+# Sticky mapping (toast.Sticky): expire 0, resident, or Critical is sticky.
+assert(Notification.sticky_by?(0, false, Notification::URGENCY_NORMAL), "expire_timeout 0 -> sticky")
+assert(Notification.sticky_by?(3000, true, Notification::URGENCY_NORMAL), "resident hint -> sticky")
+assert(Notification.sticky_by?(3000, false, Notification::URGENCY_CRITICAL), "Critical urgency -> sticky")
+assert(!Notification.sticky_by?(3000, false, Notification::URGENCY_NORMAL), "finite Normal is not sticky")
+# timeout_ms mapping (toast.LifeFor semantics): 0/resident/Critical -> 0 sentinel,
+# -1 (server default) -> DEFAULT_TIMEOUT_MS, any other value passes through (ms).
+assert_eq(Notification.timeout_ms_for(0, false, Notification::URGENCY_NORMAL), 0, "expire 0 -> sticky sentinel 0")
+assert_eq(Notification.timeout_ms_for(3000, false, Notification::URGENCY_CRITICAL), 0, "Critical -> sticky sentinel 0")
+assert_eq(Notification.timeout_ms_for(Notification::EXPIRE_DEFAULT, false, Notification::URGENCY_NORMAL),
+          NotificationStack::DEFAULT_TIMEOUT_MS, "expire -1 -> server default ms")
+assert_eq(Notification.timeout_ms_for(2500, false, Notification::URGENCY_NORMAL), 2500, "finite expire passes through as ms")
+
+# body-markup stripping (toast.stripMarkup): tags dropped, five entities decoded.
+assert_eq(Notification.strip_markup("Build <b>done</b>"), "Build done", "markup tags stripped")
+assert_eq(Notification.strip_markup("a &amp; b &lt;c&gt; &quot;d&quot; &apos;e&apos;"),
+          "a & b <c> \"d\" 'e'", "the five named entities decoded")
+assert_eq(Notification.strip_markup("plain text"), "plain text", "plain text is untouched")
+assert_eq(Notification.strip_markup("open <i tag runs off"), "open ", "unterminated tag runs to end")
+
+# summary + body -> lines (toast.linesFor): stripped summary then each body line.
+assert_eq(Notification.lines_from("Hi <b>there</b>", "line1\nline2"),
+          ["Hi there", "line1", "line2"], "summary over each body line, markup stripped")
+assert_eq(Notification.lines_from("Solo", ""), ["Solo"], "summary-only -> one line")
+
+# actions: default key skipped (toast Action.IsDefault), rest -> {label, action:key}.
+fda = Notification.fdo_actions("Activate|default;Reply|reply;Later|later")
+assert_eq(fda.length, 2, "the reserved default action is skipped")
+assert_eq(fda[0][:label], "Reply", "first non-default action label")
+assert_eq(fda[0][:action], "reply", "action key is echoed back as the action")
+assert_eq(fda[1][:action], "later", "second non-default action key")
+
+# freedesktop? recognizes the spec field set, not a native-only post.
+assert(Notification.freedesktop?({ summary: "s" }), "a summary marks a freedesktop post")
+assert(Notification.freedesktop?({ urgency: 2 }), "an urgency marks a freedesktop post")
+assert(Notification.freedesktop?({ expire_timeout: 0 }), "an expire_timeout marks a freedesktop post")
+assert(!Notification.freedesktop?({ title: "t", kind: "info", timeout: 5 }), "a native post is not freedesktop")
+
+# map_freedesktop: a Critical, 2-action, sticky post round-trips through the model.
+fmsg = { summary: "Deploy <b>failed</b>", body: "2 errors\ncheck logs",
+         urgency: Notification::URGENCY_CRITICAL, expire_timeout: 0,
+         actions: "Retry|act_retry;Dismiss|act_dismiss" }
+assert(Notification.freedesktop?(fmsg), "the critical post is recognized as freedesktop")
+fopts = Notification.map_freedesktop(fmsg)
+fn = Notification.new(30, fopts, 100)
+assert_eq(fn.kind, "error", "Critical urgency mapped to an error pill")
+assert(fn.sticky?, "expire 0 + Critical -> a sticky toast")
+assert(!fn.expired?(999999), "the sticky critical toast never auto-expires")
+assert_eq(fn.lines, ["Deploy failed", "2 errors", "check logs"],
+          "summary + multi-line body mapped to lines with markup stripped")
+assert_eq(fn.actions.length, 2, "both freedesktop actions surfaced as buttons")
+assert_eq(fn.actions[1][:label], "Dismiss", "second freedesktop action label")
+assert_eq(fn.actions[1][:action], "act_dismiss", "second freedesktop action key echoes back")
+
+# map_freedesktop: a Normal, finite-expire post is an info pill that auto-dismisses.
+nmsg = { summary: "Saved", urgency: Notification::URGENCY_NORMAL, expire_timeout: 1500 }
+nopts = Notification.map_freedesktop(nmsg)
+nn = Notification.new(31, nopts, 0)
+assert_eq(nn.kind, "info", "Normal urgency -> info pill")
+assert(!nn.sticky?, "a finite expire_timeout is not sticky")
+assert_eq(nn.expire_at, 1500, "expire_timeout is milliseconds (not re-scaled)")
+assert(nn.expired?(1500), "the normal toast auto-dismisses at its deadline")
+
+# map_freedesktop icon: inline image-data wins; else the app_icon glyph; else none.
+img_opts = Notification.map_freedesktop({ summary: "s", image_data: "QUJD", image_w: 2, image_h: 3, app_icon: "open" })
+img_n = Notification.new(32, img_opts, 0)
+assert(img_n.image_icon?, "inline image-data becomes the image icon")
+assert_eq(img_n.icon_w, 2, "image-data width mapped")
+glyph_opts = Notification.map_freedesktop({ summary: "s", app_icon: "settings" })
+glyph_n = Notification.new(33, glyph_opts, 0)
+assert(glyph_n.has_icon?, "a stock app_icon glyph becomes the icon")
+assert(!glyph_n.image_icon?, "an app_icon glyph is not an image icon")
+assert_eq(glyph_n.icon, "settings", "app_icon glyph name mapped")
+none_opts = Notification.map_freedesktop({ summary: "s", app_icon: "no-such-icon" })
+assert(!Notification.new(34, none_opts, 0).has_icon?, "an unresolved app_icon yields no icon")
+
+# map_freedesktop guards an empty post (no summary and no body).
+assert_eq(Notification.map_freedesktop({ urgency: 1 }), nil, "empty summary+body maps to nil")
+
 # NotificationStack: post + stack order + top-right placement.
 ns = NotificationStack.new
 assert(ns.empty?, "fresh stack is empty")
@@ -1201,7 +1368,7 @@ assert_eq(lay[0][:notif].id, a.id, "first posted is the top row")
 assert_eq(lay[1][:notif].id, b.id, "second posted stacks below the first")
 assert_eq(lay[0][:x], 1000 - 300 - 16, "toast x is top-right (screen_w - w - margin)")
 assert_eq(lay[0][:y], 16, "row 0 y == margin")
-assert_eq(lay[1][:y], 16 + 44 + 10, "row 1 y == margin + h + gap")
+assert_eq(lay[1][:y], 16 + NotificationStack::TOAST_H + 10, "row 1 y == margin + h + gap")
 
 # Expiry drops A (deadline 1000); B survives and reflows up to row 0.
 dropped = ns.tick(1000)
@@ -1237,7 +1404,7 @@ assert(nh.at(1000 - 316 + 5, 16 + 5, 1000).equal?(t1), "click inside a toast hit
 assert_eq(nh.at(10, 10, 1000), nil, "click far from any toast misses")
 assert_eq(nh.at(1000 - 316 + 5, 400, 1000), nil, "click below the column misses")
 t2 = nh.post({ title: "hit2", timeout_ms: 9999 }, 0)
-assert(nh.at(1000 - 316 + 5, 16 + 44 + 10 + 5, 1000).equal?(t2), "click in row 1 hits the second toast")
+assert(nh.at(1000 - 316 + 5, 16 + NotificationStack::TOAST_H + 10 + 5, 1000).equal?(t2), "click in row 1 hits the second toast")
 
 # WindowManager notify wire arm: a title OR a body yields :notify; empty drops.
 wmn = WindowManager.new
@@ -1461,6 +1628,62 @@ assert(ab7.empty?, "parse(nil) yields an empty board")
 ab8 = AppletBoard.new
 ab8.parse("clock:99999,99999", 1280, 800)
 assert_eq(ab8.find("clock").x, 1280 - Applet::SIZE["clock"][0], "parse clamps a saved x onto the desktop")
+
+# ---- CalendarView: the calendar applet's month-nav mirror (05_applets.rb) --
+# Construction clamps the month into 1..12 and the day into the month's range.
+cv = CalendarView.new(2026, 8, 15)
+assert_eq(cv.year, 2026, "calendar view year")
+assert_eq(cv.month, 8, "calendar view month")
+assert_eq(cv.selected, 15, "calendar view selected day")
+assert_eq(cv.sig, "2026-8-15", "sig encodes year-month-selected")
+assert_eq(CalendarView.new(2026, 0, 1).month, 1, "month clamped up to 1")
+assert_eq(CalendarView.new(2026, 13, 1).month, 12, "month clamped down to 12")
+assert_eq(CalendarView.new(2026, 1, 0).selected, 1, "selected clamped up to 1")
+assert_eq(CalendarView.new(2026, 1, 99).selected, 31, "selected clamped to days_in_month (Jan=31)")
+
+# days_in_month incl. leap February.
+assert_eq(CalendarView.new(2026, 2, 1).days_in_month, 28, "Feb 2026 has 28 days")
+assert_eq(CalendarView.new(2024, 2, 1).days_in_month, 29, "Feb 2024 (leap) has 29 days")
+assert_eq(CalendarView.new(2000, 2, 1).days_in_month, 29, "Feb 2000 (div-400 leap) has 29 days")
+assert_eq(CalendarView.new(1900, 2, 1).days_in_month, 28, "Feb 1900 (div-100 non-leap) has 28 days")
+assert(CalendarView.leap?(2024), "2024 is leap")
+assert(!CalendarView.leap?(2026), "2026 is not leap")
+assert(!CalendarView.leap?(1900), "1900 is not leap (century, not div-400)")
+assert(CalendarView.leap?(2000), "2000 is leap (div-400)")
+
+# next_month advances, wraps December -> next January, and re-clamps the day.
+cvn = CalendarView.new(2026, 11, 30)
+cvn.next_month
+assert_eq(cvn.month, 12, "next_month Nov -> Dec")
+assert_eq(cvn.year, 2026, "next_month within the year keeps the year")
+cvn.next_month
+assert_eq(cvn.month, 1, "next_month Dec wraps to Jan")
+assert_eq(cvn.year, 2027, "next_month Dec bumps the year")
+# Day re-clamp on a shrink: 31 Jan -> Feb clamps to 28 (2027 non-leap).
+cvc = CalendarView.new(2027, 1, 31)
+cvc.next_month
+assert_eq(cvc.month, 2, "next_month Jan -> Feb")
+assert_eq(cvc.selected, 28, "selected 31 re-clamped to 28 in Feb 2027")
+
+# prev_month steps back, wraps January -> previous December.
+cvp = CalendarView.new(2026, 2, 15)
+cvp.prev_month
+assert_eq(cvp.month, 1, "prev_month Feb -> Jan")
+assert_eq(cvp.year, 2026, "prev_month within the year keeps the year")
+cvp.prev_month
+assert_eq(cvp.month, 12, "prev_month Jan wraps to Dec")
+assert_eq(cvp.year, 2025, "prev_month Jan drops the year")
+
+# set_selected clamps into the current month.
+cvs = CalendarView.new(2026, 4, 10) # April = 30 days
+assert_eq(cvs.set_selected(31).selected, 30, "set_selected clamps 31 -> 30 in April")
+assert_eq(cvs.set_selected(-5).selected, 1, "set_selected clamps below 1 -> 1")
+assert_eq(cvs.set_selected(12).selected, 12, "in-range set_selected keeps the day")
+# A month navigation moves the sig (drives the applet dirty-gate) — and only then.
+cvsig = CalendarView.new(2026, 6, 5)
+before = cvsig.sig
+cvsig.next_month
+assert(cvsig.sig != before, "sig changes after a month navigation")
 
 # ---- RootMenu Applets submenu (05_menu.rb) --------------------------------
 # build_applets: one entry per kind, in KINDS order, active marker on shown.
@@ -1773,6 +1996,18 @@ assert_eq(picked[:id], "terminal", "commit returns the Terminal entry")
 assert(!spc.active?, "palette is closed after commit")
 assert_eq(spc.count, 0, "closed palette holds no results after commit")
 assert(spc.commit.nil?, "a second commit after close returns nil")
+# Command routing: the moved selection is exactly what commit resolves + launches.
+# (16_spotlight.rb drives the bound command_palette, but the pure model pins the
+# open -> filter -> move -> commit contract the launcher routes on.)
+spr = Spotlight.new
+spr.open(sl_apps)
+routed0 = spr.selected
+spr.move(1) # step to the second result
+routed1 = spr.selected
+assert(!routed1.equal?(routed0), "move changes the routed selection")
+picked_routed = spr.commit
+assert(picked_routed.equal?(routed1), "commit routes to the moved selection")
+assert(wsl.launchable?(picked_routed[:id]), "the routed commit id is launchable")
 # Cancel closes without choosing.
 spk = Spotlight.new
 spk.open(sl_apps)
@@ -1944,5 +2179,189 @@ assert(exr.select_index(-1).nil?, "select_index negative is a no-op")
 assert_eq(exr.index, 0, "out-of-range select_index left the selection put")
 
 puts "rbtest: ran all Expose model assertions"
+
+# ---- DamageSet: empty / full / add / collapse -------------------------
+ds = DamageSet.new
+assert(ds.empty?, "fresh DamageSet is empty")
+assert(!ds.full?, "fresh DamageSet is not full")
+ds.add(10, 20, 30, 40)
+assert(!ds.empty?, "DamageSet not empty after add")
+assert_eq(ds.rects.length, 1, "one rect added")
+assert_eq(ds.rects[0], { x: 10, y: 20, w: 30, h: 40 }, "rect stored as hash")
+assert_eq(ds.total_area, 30 * 40, "total_area sums rect area")
+# Zero/negative rects are dropped.
+ds.add(0, 0, 0, 5)
+ds.add(0, 0, -3, 5)
+assert_eq(ds.rects.length, 1, "empty/negative rects dropped")
+# clear resets both flag + rects.
+ds.clear
+assert(ds.empty?, "clear resets to empty")
+# full! wins over rects.
+ds.add(1, 2, 3, 4)
+ds.full!
+assert(ds.full?, "full! marks full")
+assert(!ds.empty?, "full set is not empty")
+ds.add(5, 5, 5, 5) # add is a no-op while full
+assert(ds.full?, "add is a no-op once full")
+# Accumulating past MAX_RECTS collapses to full (bounded book-keeping).
+ds2 = DamageSet.new
+i = 0
+while i <= DamageSet::MAX_RECTS
+  ds2.add(i, 0, 2, 2)
+  i += 1
+end
+assert(ds2.full?, "> MAX_RECTS rects collapses to full")
+
+# ---- DamageSet: add_rect / rect_intersects? / union -------------------
+ds3 = DamageSet.new
+ds3.add_rect([100, 100, 50, 50])
+assert_eq(ds3.rects[0], { x: 100, y: 100, w: 50, h: 50 }, "add_rect takes [x,y,w,h]")
+r = { x: 100, y: 100, w: 50, h: 50 }
+assert(DamageSet.rect_intersects?(r, [120, 120, 10, 10]), "overlapping bounds intersect")
+assert(DamageSet.rect_intersects?(r, [90, 90, 20, 20]), "corner overlap intersects")
+assert(!DamageSet.rect_intersects?(r, [200, 200, 10, 10]), "disjoint bounds do not intersect")
+assert(!DamageSet.rect_intersects?(r, [150, 100, 10, 10]), "touching far edge is half-open (no intersect)")
+assert(!DamageSet.rect_intersects?(r, [100, 60, 10, 40]), "touching top edge is half-open (no intersect)")
+# union bounds two [x,y,w,h] rects.
+u = DamageSet.union([10, 10, 20, 20], [50, 40, 10, 10])
+assert_eq(u, { x: 10, y: 10, w: 50, h: 40 }, "union spans both rects")
+u2 = DamageSet.union([0, 0, 100, 100], [20, 20, 10, 10])
+assert_eq(u2, { x: 0, y: 0, w: 100, h: 100 }, "union of a rect containing another is the outer rect")
+
+# ---- Frame chrome sprite key + bounds ---------------------------------
+wmsp = WindowManager.new
+FrameRegistry.select("openbox")
+spw = wmsp.spawn("sprite", 200, 120)
+k1 = Frame.sprite_key(spw, true)
+# Same inputs -> same key (a cache HIT: the decoration need not repaint).
+assert_eq(Frame.sprite_key(spw, true), k1, "sprite_key is stable for unchanged inputs")
+# Focus flips the key (active vs inactive colours differ).
+assert(Frame.sprite_key(spw, false) != k1, "sprite_key changes with focus state")
+# Position does NOT affect the key: a dragged window keeps its cached sprite.
+spw.move_to(spw.x + 137, spw.y + 42)
+assert_eq(Frame.sprite_key(spw, true), k1, "sprite_key is position-independent (drag stays a cache hit)")
+# Size, title, shade + the active frame each invalidate the key.
+spw.resize_to(260, 120)
+assert(Frame.sprite_key(spw, true) != k1, "sprite_key changes with size")
+spw.resize_to(200, 120)
+spw.title = "renamed"
+assert(Frame.sprite_key(spw, true) != k1, "sprite_key changes with title")
+spw.title = "sprite"
+wmsp.shade(spw)
+assert(Frame.sprite_key(spw, true) != k1, "sprite_key changes when shaded")
+wmsp.unshade(spw)
+FrameRegistry.select("aqua")
+assert(Frame.sprite_key(spw, true) != k1, "sprite_key changes with the active frame/palette")
+FrameRegistry.select("openbox")
+assert_eq(Frame.sprite_key(spw, true), k1, "sprite_key returns to its value once inputs are restored")
+# sprite_bounds is frame_rect padded by 1px on every side (captures the 1px
+# drop shadow / half-pixel border stroke) and fully contains frame_rect.
+frct = spw.frame_rect
+sb = Frame.sprite_bounds(spw)
+assert_eq(sb[0], frct[0] - 1, "sprite_bounds x = frame x - 1 (left pad)")
+assert_eq(sb[1], frct[1] - 1, "sprite_bounds y = frame top - 1 (top pad)")
+assert(sb[0] <= frct[0] && sb[1] <= frct[1], "sprite_bounds origin covers frame origin")
+assert(sb[0] + sb[2] >= frct[0] + frct[2], "sprite_bounds right covers frame right + shadow")
+assert(sb[1] + sb[3] >= frct[1] + frct[3], "sprite_bounds bottom covers frame bottom + shadow")
+# Reset to openbox so downstream state is stable.
+FrameRegistry.select("openbox")
+
+# ---- A11yTree: ARIA projection of the window stack --------------------
+# Stand-in windows built directly so focus / minimize / title are set precisely
+# (the model takes any object answering id/title/role/focused?/minimized?/x/y/w/h).
+aw1 = Window.new(1, "xterm",  40, 40, 500, 320, "#000", "window")
+aw2 = Window.new(2, "editor", 80, 80, 400, 300, "#000", "window")
+aw2.focused = true
+awlist = [aw1, aw2]
+
+# active_id is the focused window's id; nil when nothing is focused.
+assert_eq(A11yTree.active_id(awlist), 2, "active_id is the focused window")
+assert(A11yTree.active_id([aw1]).nil?, "active_id nil when nothing focused")
+
+# build: application root + one node per window, stack order preserved.
+tree = A11yTree.build(awlist)
+assert_eq(tree[:role], "application", "root role is application")
+assert_eq(tree[:label], "wasmbox desktop", "root default label")
+assert_eq(tree[:active_id], 2, "root active_id follows focus")
+assert_eq(tree[:nodes].length, 2, "one node per window")
+assert_eq(tree[:nodes][0][:id], 1, "node order preserved (bottom-to-top)")
+assert_eq(tree[:nodes][1][:id], 2, "second node is the focused window")
+assert_eq(A11yTree.build([aw1], "desk")[:label], "desk", "custom root label honoured")
+
+# window_node fields + geometry.
+n1 = tree[:nodes][0]
+assert_eq(n1[:role], "window", "window node role")
+assert_eq(n1[:label], "xterm", "window node label is the title")
+assert_eq(n1[:focused], false, "unfocused window node not focused")
+assert_eq(n1[:minimized], false, "live window node not minimized")
+assert_eq(n1[:x], 40, "node carries x")
+assert_eq(n1[:y], 40, "node carries y")
+assert_eq(n1[:w], 500, "node carries w")
+assert_eq(n1[:h], 320, "node carries h")
+assert_eq(tree[:nodes][1][:focused], true, "focused window node is focused")
+
+# window_label: title, with a blank-title fallback so no node is nameless.
+blank = Window.new(3, "", 0, 0, 10, 10, "#000", "window")
+assert_eq(A11yTree.window_label(blank), "(untitled)", "blank title -> (untitled)")
+assert_eq(A11yTree.window_label(aw1), "xterm", "non-blank title kept")
+
+# window_actions: a LIVE window offers focus / minimize / close, in that order.
+acts = A11yTree.window_actions(aw1, "xterm")
+assert_eq(acts.length, 3, "live window has 3 actions")
+assert_eq(acts[0][:name], "focus", "first action is focus")
+assert_eq(acts[0][:label], "Activate xterm", "focus action label")
+assert_eq(acts[1][:name], "minimize", "live window offers minimize")
+assert_eq(acts[1][:label], "Minimize xterm", "minimize action label")
+assert_eq(acts[2][:name], "close", "last action is close")
+assert_eq(acts[2][:label], "Close xterm", "close action label")
+
+# a MINIMIZED window offers restore in place of minimize; its node is flagged.
+mini = Window.new(4, "files", 0, 0, 10, 10, "#000", "window")
+mini.minimized = true
+macts = A11yTree.window_actions(mini, "files")
+assert_eq(macts[1][:name], "restore", "minimized window offers restore")
+assert_eq(macts[1][:label], "Restore files", "restore action label")
+assert_eq(A11yTree.window_node(mini)[:minimized], true, "minimized node flagged")
+
+# signature: sensitive to focus / minimize / title, INSENSITIVE to geometry
+# (a drag or resize moves pixels but changes nothing a screen reader announces).
+sig0 = A11yTree.signature(awlist)
+aw1.move_to(aw1.x + 100, aw1.y + 100)
+assert_eq(A11yTree.signature(awlist), sig0, "signature ignores geometry")
+aw1.title = "xterm-2"
+assert(A11yTree.signature(awlist) != sig0, "signature changes on retitle")
+aw1.title = "xterm"
+assert_eq(A11yTree.signature(awlist), sig0, "signature restored when title restored")
+aw2.focused = false
+assert(A11yTree.signature(awlist) != sig0, "signature changes on focus move")
+aw2.focused = true
+aw1.minimized = true
+assert(A11yTree.signature(awlist) != sig0, "signature changes on minimize")
+aw1.minimized = false
+assert_eq(A11yTree.signature(awlist), sig0, "signature returns to baseline")
+
+# to_json: deterministic JSON with booleans, an active_id + null active_id.
+j = A11yTree.to_json(A11yTree.build(awlist))
+assert(j.include?('"role":"application"'), "json has application root")
+assert(j.include?('"active_id":2'), "json carries active_id")
+assert(j.include?('"label":"xterm"'), "json carries a window label")
+assert(j.include?('"name":"focus"'), "json carries an action name")
+assert(j.include?('"minimized":false'), "json serializes booleans")
+assert(j.include?('"w":500'), "json carries geometry")
+jn = A11yTree.to_json(A11yTree.build([aw1]))
+assert(jn.include?('"active_id":null'), "json null active_id when nothing focused")
+
+# esc: quotes, backslashes + the C0 controls that would break a JSON string.
+assert_eq(A11yTree.esc("plain"), "plain", "esc passes plain text")
+assert_eq(A11yTree.esc("a\"b"), "a\\\"b", "esc escapes double-quote")
+assert_eq(A11yTree.esc("a\\b"), "a\\\\b", "esc escapes backslash")
+assert_eq(A11yTree.esc("a\nb"), "a\\nb", "esc escapes newline")
+assert_eq(A11yTree.esc("a\tb\rc"), "a\\tb\\rc", "esc escapes tab + CR")
+# a title needing escaping serializes safely.
+qw = Window.new(5, "a\"q", 0, 0, 10, 10, "#000", "window")
+assert(A11yTree.to_json(A11yTree.build([qw])).include?('a\\"q'), "quoted title escaped in json")
+
+puts "rbtest: ran all A11y model assertions"
+
 puts "rbtest: ran all pure-WM assertions"
 `

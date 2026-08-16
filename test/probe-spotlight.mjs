@@ -182,6 +182,29 @@ try {
     ok(`palette region painted (nonblackPct=${panelRegion.nonblackPct}, brightness=${panelRegion.brightness})`);
   }
 
+  // 3b. Arrow keys move the selection through the widget's filtered list. With
+  // the empty query every app is visible, so "down" advances the highlight off
+  // the first row (index 0 -> 1, a different label) and "up" returns it.
+  const sTop = await stateOf(cw);
+  await drive(cw, "down");
+  await settle(page, 150);
+  const sDown = await stateOf(cw);
+  if (sDown.index !== 1) {
+    fail(`arrow down should move the selection to index 1, got ${sDown.index}`);
+  } else if (sDown.sel_label === sTop.sel_label) {
+    fail(`arrow down should highlight a different app, still '${sDown.sel_label}'`);
+  } else {
+    ok(`arrow down moved the selection ('${sTop.sel_label}' -> '${sDown.sel_label}', index ${sDown.index})`);
+  }
+  await drive(cw, "up");
+  await settle(page, 150);
+  const sUp = await stateOf(cw);
+  if (sUp.index !== 0 || sUp.sel_label !== sTop.sel_label) {
+    fail(`arrow up should return to index 0 ('${sTop.sel_label}'), got index ${sUp.index} '${sUp.sel_label}'`);
+  } else {
+    ok(`arrow up returned the selection to the top ('${sUp.sel_label}')`);
+  }
+
   // 4. Fuzzy-filter to Terminal.
   await drive(cw, "query:term");
   await settle(page, 200);

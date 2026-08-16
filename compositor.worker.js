@@ -206,10 +206,17 @@ globalThis.__wasmboxReadRegion = function (x, y, w, h) {
   try { img = ctx.getImageData(x | 0, y | 0, w | 0, h | 0); } catch (_) { return null; }
   const d = img.data;
   let sum = 0, nonblack = 0, hash = 2166136261;
+  // Luma mean + variance over the region, so a caller can tell a FLAT tile
+  // (a solid placeholder fill -> variance ~0) from a TEXTURED one (a live
+  // window snapshot -> high variance). Rec.601 luma, integer weights.
+  let lsum = 0, lsq = 0;
   for (let i = 0; i < d.length; i += 4) {
     const r = d[i], g = d[i + 1], b = d[i + 2];
     sum += r + g + b;
     if (r + g + b > 40) nonblack++;
+    const luma = (r * 77 + g * 150 + b * 29) >> 8; // ~0.299/0.587/0.114
+    lsum += luma;
+    lsq += luma * luma;
     if ((i & 255) === 0) { // sample the hash cheaply
       hash = ((hash ^ r) * 16777619) >>> 0;
       hash = ((hash ^ g) * 16777619) >>> 0;
@@ -217,7 +224,9 @@ globalThis.__wasmboxReadRegion = function (x, y, w, h) {
     }
   }
   const px = d.length / 4;
-  return { w: w | 0, h: h | 0, brightness: Math.round(sum / px / 3), nonblackPct: Math.round((100 * nonblack) / px), hash: hash >>> 0 };
+  const lmean = lsum / px;
+  const variance = Math.max(0, lsq / px - lmean * lmean);
+  return { w: w | 0, h: h | 0, brightness: Math.round(sum / px / 3), nonblackPct: Math.round((100 * nonblack) / px), hash: hash >>> 0, variance: Math.round(variance) };
 };
 // __wasmboxGrabRegion(x,y,w,h): TEST HOOK. Same source as __wasmboxReadRegion,
 // but returns the actual pixels as a PNG data URL so a test can save a frame to
@@ -311,9 +320,73 @@ try {
 //
 // Regression test: scratchpad/probe-loadingbar-xbrowser.mjs fails on
 // Firefox when this override is removed; passes on all three when present.
+// --- per-frame cost instrumentation (test hook) ---------------------------
+// A cheap set of counters the blit helpers below bump, plus a wrapper around
+// the rAF callback that times each Compositor#render. `__wasmboxFrameStats()`
+// snapshots them so a headless probe (test/probe-frame-cost.mjs) can attribute
+// the idle per-frame cost to a specific overlay: an overlay that RE-RENDERS
+// every frame shows up as a non-zero *DecodesPerFrame (a Widgets.render +
+// base64 + atob round-trip), whereas a cached one shows only *PresentsPerFrame
+// (a single drawImage of a cached buffer). The counters are integer bumps
+// (negligible cost) and left in permanently as a regression guard.
+globalThis.__wasmboxStats = {
+  frames: 0, frameMsSum: 0, frameMsMax: 0,
+  sabCopies: 0, sabPresents: 0,      // external-window SAB blits (copy vs cached)
+  rgbaDecodes: 0, rgbaPresents: 0,   // opaque putImageData path (desktop/menu)
+  overDecodes: 0, overPresents: 0,   // translucent drawImage path (hud/tray/…)
+  decodeKeys: {},                    // per-key decode count (attribution)
+};
+globalThis.__wasmboxStatsBumpDecode = function (key) {
+  const s = globalThis.__wasmboxStats;
+  s.decodeKeys[key] = (s.decodeKeys[key] || 0) + 1;
+};
+globalThis.__wasmboxFrameStats = function (reset) {
+  const s = globalThis.__wasmboxStats;
+  const n = s.frames || 1;
+  const snap = {
+    frames: s.frames,
+    avgFrameMs: s.frameMsSum / n,
+    maxFrameMs: s.frameMsMax,
+    sabCopiesPerFrame: s.sabCopies / n,
+    sabPresentsPerFrame: s.sabPresents / n,
+    rgbaDecodesPerFrame: s.rgbaDecodes / n,
+    rgbaPresentsPerFrame: s.rgbaPresents / n,
+    overDecodesPerFrame: s.overDecodes / n,
+    overPresentsPerFrame: s.overPresents / n,
+    decodeKeys: Object.assign({}, s.decodeKeys),
+  };
+  if (reset) {
+    s.frames = 0; s.frameMsSum = 0; s.frameMsMax = 0;
+    s.sabCopies = 0; s.sabPresents = 0;
+    s.rgbaDecodes = 0; s.rgbaPresents = 0;
+    s.overDecodes = 0; s.overPresents = 0;
+    s.decodeKeys = {};
+  }
+  return snap;
+};
+
+// Set once the first compositor render callback has run to completion -- i.e.
+// the first frame has actually been blitted onto the (transferred) Offscreen
+// canvas. We detect "first presented frame" entirely worker-side here so the
+// splash can hit 100% on a real present, not merely on go.run returning.
+let firstFramePresented = false;
+
 globalThis.requestAnimationFrame = function (cb) {
   const t = performance.now();
-  return setTimeout(() => cb(t), 16);
+  return setTimeout(() => {
+    const s = globalThis.__wasmboxStats;
+    const t0 = performance.now();
+    cb(t);
+    const dt = performance.now() - t0;
+    s.frames++;
+    s.frameMsSum += dt;
+    if (dt > s.frameMsMax) s.frameMsMax = dt;
+    if (!firstFramePresented) {
+      firstFramePresented = true;
+      // Boot stage 5/5: the desktop is on screen. Main fades + removes splash.
+      self.postMessage({ type: "boot", stage: "ready" });
+    }
+  }, 16);
 };
 globalThis.cancelAnimationFrame = function (id) { clearTimeout(id); };
 
@@ -510,9 +583,11 @@ globalThis.wasmboxBlitFromSAB = function (ctx, slot, dx, dy, sx, sy, sw, sh) {
   // churn when a large external window (e.g. clients/showcase at 480×360) is
   // open, and memory grew unboundedly in idle.
   if (slot.seq && slot.lastSeq === s1) {
+    globalThis.__wasmboxStats.sabPresents++;
     ctx.drawImage(slot.canvas, sx, sy, sw, sh, dx + sx, dy + sy, sw, sh);
     return;
   }
+  globalThis.__wasmboxStats.sabCopies++;
   const dst = slot.image.data;
   for (let row = 0; row < sh; row++) {
     const srcOff = (sy + row) * stride + sx * 4;
@@ -553,9 +628,11 @@ globalThis.wasmboxBlitFromSABScaled = function (ctx, slot, sx, sy, sw, sh, dx, d
   // wasmboxBlitFromSAB for the motivation (Firefox GC pressure with idle
   // windows).
   if (slot.seq && slot.lastSeq === s1) {
+    globalThis.__wasmboxStats.sabPresents++;
     ctx.drawImage(slot.canvas, 0, 0, slot.w, slot.h, dx, dy, dw, dh);
     return;
   }
+  globalThis.__wasmboxStats.sabCopies++;
   const dst = slot.image.data;
   for (let row = 0; row < sh; row++) {
     const srcOff = (sy + row) * stride + sx * 4;
@@ -571,6 +648,88 @@ globalThis.wasmboxBlitFromSABScaled = function (ctx, slot, sx, sy, sw, sh, dx, d
   slot.octx.putImageData(slot.image, 0, 0, sx, sy, sw, sh);
   slot.lastSeq = s1;
   ctx.drawImage(slot.canvas, 0, 0, slot.w, slot.h, dx, dy, dw, dh);
+};
+
+// wasmboxWindowSeq(slot): the content sequence of an external window's live
+// surface -- the seq the blit path last COPIED into slot.canvas (slot.lastSeq),
+// so it changes exactly when the client committed new pixels and we re-copied
+// them. Used by the Ruby thumbnail cache (compositor/15_alttab.rb) to key a
+// grabbed Alt-Tab / Exposé thumbnail by (window id, size, content-seq): an idle
+// window holds this value (the tile is re-presented from cache), an animating
+// one bumps it (the tile is re-grabbed + re-rendered). Reuses the SAME seqlock
+// bookkeeping the blit path already maintains — no extra per-frame copy. Returns
+// -1 for a slot with no surface (never built / no image_data).
+globalThis.wasmboxWindowSeq = function (slot) {
+  if (!slot) return -1;
+  if (typeof slot.lastSeq === "number") return slot.lastSeq | 0;
+  if (slot.seq) return Atomics.load(slot.seq, 0) & ~1; // clear the odd mid-paint bit
+  return 0;
+};
+
+// wasmboxWindowLiveSeq(slot): the client's CURRENTLY-PUBLISHED content seq (not
+// the seq the blit path last copied). Reads the live seqlock word with the odd
+// mid-paint bit cleared, so it changes exactly when the client commits a new
+// frame — BEFORE the compositor blits it. The idle-repaint gate
+// (compositor/06_core.rb Compositor#needs_paint?) polls this per external window
+// each frame to decide whether a client committed new pixels since the last
+// painted frame; if none did (and nothing else is dirty), the whole frame is
+// skipped. Unlike wasmboxWindowSeq (which returns lastSeq — what we COPIED), this
+// must return the LIVE value or the gate would never observe a pending commit.
+// Returns 0 for a slot with no seqlock (older client — its repaints ride the
+// "commit" message path instead) and -1 for a missing slot.
+globalThis.wasmboxWindowLiveSeq = function (slot) {
+  if (!slot) return -1;
+  if (slot.seq) return Atomics.load(slot.seq, 0) & ~1; // clear the odd mid-paint bit
+  return 0;
+};
+
+// wasmboxGrabWindow(slot, dw, dh): grab an external window's CURRENT framebuffer
+// downscaled to dw x dh and return it as base64 RGBA (top-left origin, 4 B/px,
+// row-major — the exact layout Widgets.thumbnail + wasmboxBlitRGBAOver expect).
+//
+// The pixel source is slot.canvas — the seqlock-protected last-complete
+// native-size frame the blit path (wasmboxBlitFromSAB) already produced THIS
+// frame (windows draw before the Alt-Tab / Exposé overlay in Compositor#render).
+// So the grab never samples a half-painted SAB and costs one hardware-accelerated
+// drawImage downscale + one getImageData, NOT a fresh W x H SAB copy per tile.
+// It falls back to staging the raw SAB (slot.src, seqlock-checked) only when the
+// window has never been composited (slot.canvas absent). Returns { b64, w, h,
+// seq } or null when there is nothing capturable (no slot / no surface / a torn
+// read on the fallback path — the caller then keeps its placeholder tile).
+globalThis.wasmboxGrabWindow = function (slot, dw, dh) {
+  if (!slot) return null;
+  dw = dw | 0; dh = dh | 0;
+  if (dw < 1 || dh < 1) return null;
+  const seq = globalThis.wasmboxWindowSeq(slot);
+  const oc = new OffscreenCanvas(dw, dh);
+  const octx = oc.getContext("2d");
+  if (slot.canvas) {
+    // Downscale the last complete frame (bilinear, imageSmoothingEnabled=true).
+    octx.drawImage(slot.canvas, 0, 0, slot.w, slot.h, 0, 0, dw, dh);
+  } else if (slot.src) {
+    // Never-composited fallback: stage the raw SAB at native size (seqlock-safe:
+    // discard a mid-paint or torn read), then scale it down.
+    let s1 = 0;
+    if (slot.seq) { s1 = Atomics.load(slot.seq, 0); if (s1 & 1) return null; }
+    const img = new ImageData(slot.w, slot.h);
+    img.data.set(slot.src.subarray(0, slot.w * slot.h * 4));
+    if (slot.seq && Atomics.load(slot.seq, 0) !== s1) return null;
+    const stage = new OffscreenCanvas(slot.w, slot.h);
+    stage.getContext("2d").putImageData(img, 0, 0);
+    octx.drawImage(stage, 0, 0, slot.w, slot.h, 0, 0, dw, dh);
+  } else {
+    return null;
+  }
+  let data;
+  try { data = octx.getImageData(0, 0, dw, dh).data; } catch (_) { return null; }
+  // Encode the RGBA bytes to base64 (ASCII survives the rbgo string bridge
+  // intact, unlike raw binary — same reason the widgets blit path base64s).
+  let bin = "";
+  const CHUNK = 0x8000;
+  for (let i = 0; i < data.length; i += CHUNK) {
+    bin += String.fromCharCode.apply(null, data.subarray(i, Math.min(i + CHUNK, data.length)));
+  }
+  return { b64: btoa(bin), w: dw, h: dh, seq: seq };
 };
 
 // Blit an opaque RGBA buffer (top-left origin, 4 bytes/px, row-major — exactly
@@ -594,14 +753,37 @@ globalThis.wasmboxBlitRGBA = function (ctx, b64, w, h, dx, dy, key) {
   const cache = (globalThis.__wasmboxRGBACache ||= {});
   let slot = cache[key];
   if (b64 && b64.length) {
+    globalThis.__wasmboxStats.rgbaDecodes++;
+    globalThis.__wasmboxStatsBumpDecode(key);
     const bin = atob(b64);
     const n = bin.length;
     const buf = new Uint8ClampedArray(n);
     for (let i = 0; i < n; i++) buf[i] = bin.charCodeAt(i);
     slot = cache[key] = new ImageData(buf, w, h);
+  } else {
+    globalThis.__wasmboxStats.rgbaPresents++;
   }
   if (!slot) return;
   ctx.putImageData(slot, dx, dy);
+};
+
+// wasmboxBlitRGBARegion(ctx, w, h, dx, dy, key, rx, ry, rw, rh): re-present ONLY
+// the (rx, ry, rw, rh) sub-rectangle of the cached opaque RGBA buffer `key`
+// (built by a prior wasmboxBlitRGBA). The dirty-rect compositor uses this to
+// repaint the desktop background inside a single damage region without
+// disturbing the rest of the canvas: putImageData IGNORES the 2D context clip
+// path, so a plain wasmboxBlitRGBA under a clip would still overwrite the whole
+// canvas — the 7-argument putImageData dirty-rect form is the only way to
+// restrict an opaque putImageData to a region. The buffer spans the whole canvas
+// at (dx, dy) = (0, 0), so the dirty rect in buffer space is (rx-dx, ry-dy).
+// No-op if the slot is missing (the first frame is always a full composite, so
+// the "desktop" slot is populated before any region frame runs).
+globalThis.wasmboxBlitRGBARegion = function (ctx, w, h, dx, dy, key, rx, ry, rw, rh) {
+  const cache = globalThis.__wasmboxRGBACache;
+  const slot = cache && cache[key];
+  if (!slot) return;
+  globalThis.__wasmboxStats.rgbaPresents++;
+  ctx.putImageData(slot, dx, dy, (rx | 0) - (dx | 0), (ry | 0) - (dy | 0), rw | 0, rh | 0);
 };
 
 // Blit a TRANSLUCENT RGBA buffer (same layout as wasmboxBlitRGBA) at (dx, dy),
@@ -621,6 +803,8 @@ globalThis.wasmboxBlitRGBAOver = function (ctx, b64, w, h, dx, dy, key) {
   const cache = (globalThis.__wasmboxRGBAOverCache ||= {});
   let slot = cache[key];
   if (b64 && b64.length) {
+    globalThis.__wasmboxStats.overDecodes++;
+    globalThis.__wasmboxStatsBumpDecode(key);
     const bin = atob(b64);
     const n = bin.length;
     const buf = new Uint8ClampedArray(n);
@@ -628,6 +812,8 @@ globalThis.wasmboxBlitRGBAOver = function (ctx, b64, w, h, dx, dy, key) {
     const oc = new OffscreenCanvas(w, h);
     oc.getContext("2d").putImageData(new ImageData(buf, w, h), 0, 0);
     slot = cache[key] = oc;
+  } else {
+    globalThis.__wasmboxStats.overPresents++;
   }
   if (!slot) return;
   ctx.drawImage(slot, dx, dy);
@@ -779,6 +965,24 @@ globalThis.__wasmboxAppletRemove = function (kind) {
   return true;
 };
 
+// `__wasmboxCalendarNav(dir)` -- TEST HOOK. Steps the desktop CALENDAR applet
+// one month back ("prev") or forward ("next") by dispatching on the Ruby event
+// bus, exactly like the other applet hooks. Drives the SAME calendar_nav
+// (compositor/14_applets.rb) the tile's header-arrow click path uses, so
+// test/probe-applets.mjs can assert the grid changes on navigation without
+// pixel-hunting the widget's own header arrows. Inert when Compositor::APPLETS
+// is off or no calendar tile is shown.
+globalThis.__wasmboxCalendarNav = function (dir) {
+  const detail = String(dir);
+  function dispatch() {
+    const bus = fakeDocument.getElementById("__wasmbox_bus");
+    if (!bus) { setTimeout(dispatch, 16); return; }
+    bus.dispatchEvent(new CustomEvent("wasmbox-calendar-nav", { detail: detail }));
+  }
+  dispatch();
+  return true;
+};
+
 // --- window snapping (test/probe-snapping.mjs) ----------------------------
 
 // `wasmboxPublishFocusedRect(...)` -- called by the Ruby compositor once per
@@ -812,6 +1016,47 @@ globalThis.__wasmboxSpawnWindow = function (title) {
     const bus = fakeDocument.getElementById("__wasmbox_bus");
     if (!bus) { setTimeout(dispatch, 16); return; }
     bus.dispatchEvent(new CustomEvent("wasmbox-spawn-window", { detail: detail }));
+  }
+  dispatch();
+  return true;
+};
+
+// `__wasmboxSpawnExternalStub(title, w, h)` -- TEST HOOK. Puts a real EXTERNAL
+// (SharedArrayBuffer-backed) window on the desktop WITHOUT racing a client's wasm
+// load, so the live-thumbnail probes (test/probe-alttab.mjs / probe-expose.mjs)
+// have a deterministic external surface whose pixels the Alt-Tab / Exposé grab
+// path (wasmboxGrabWindow) can capture. It allocates a SAB, paints a bold
+// full-range gradient into it (a NON-uniform pattern so a grabbed thumbnail is
+// visibly textured, unlike a flat placeholder), plus a seqlock control word set
+// even (=2, "committed, not mid-paint"), and dispatches a `hello`-shaped detail
+// on the Ruby bus -> spawn_external_stub (06_core.rb) registers it through the
+// SAME register_external + build_image_data path a real client uses.
+globalThis.__wasmboxSpawnExternalStub = function (title, w, h) {
+  w = (w | 0) || 240;
+  h = (h | 0) || 180;
+  const sab = new SharedArrayBuffer(w * h * 4);
+  const px = new Uint8ClampedArray(sab);
+  for (let y = 0; y < h; y++) {
+    for (let x = 0; x < w; x++) {
+      const o = (y * w + x) * 4;
+      px[o] = Math.round((x * 255) / (w - 1));            // R ramps across x
+      px[o + 1] = Math.round((y * 255) / (h - 1));        // G ramps across y
+      px[o + 2] = Math.round(((x + y) * 255) / (w + h - 2)); // B diagonal
+      px[o + 3] = 255;
+    }
+  }
+  const ctlSab = new SharedArrayBuffer(4);
+  new Int32Array(ctlSab)[0] = 2; // even seq: a committed, non-torn surface
+  const detail = {
+    type: "hello",
+    title: String(title == null ? "ext-stub" : title),
+    w: w, h: h, stride: w * 4,
+    sab: sab, ctl: ctlSab,
+  };
+  function dispatch() {
+    const bus = fakeDocument.getElementById("__wasmbox_bus");
+    if (!bus) { setTimeout(dispatch, 16); return; }
+    bus.dispatchEvent(new CustomEvent("wasmbox-spawn-external-stub", { detail: detail }));
   }
   dispatch();
   return true;
@@ -860,14 +1105,20 @@ globalThis.__wasmboxAltTab = function (cmd) {
 // SELECTED window's body rect (so a probe can confirm a commit focuses exactly
 // that window against __wasmboxFocusedRect). The probe reads the stash via
 // __wasmboxAltTabState().
+// sel_live is 1 when the SELECTED tile shows a LIVE grabbed framebuffer (an
+// external SAB window) rather than a flat placeholder (in-process / dom), and
+// (tx,ty,tw,th) is that tile's on-screen rect on the composited canvas, so a
+// probe can sample it via __wasmboxReadRegion and assert real (textured) pixels.
 globalThis.__wasmboxAltTabData = { active: 0 };
-globalThis.wasmboxPublishAltTab = function (active, count, index, px, py, pw, ph, sx, sy, sw, sh) {
+globalThis.wasmboxPublishAltTab = function (active, count, index, px, py, pw, ph, sx, sy, sw, sh, selLive, tx, ty, tw, th) {
   globalThis.__wasmboxAltTabData = {
     active: active | 0,
     count: count | 0,
     index: index | 0,
     panel_x: px | 0, panel_y: py | 0, panel_w: pw | 0, panel_h: ph | 0,
     sel_x: sx | 0, sel_y: sy | 0, sel_w: sw | 0, sel_h: sh | 0,
+    sel_live: selLive | 0,
+    tile_x: tx | 0, tile_y: ty | 0, tile_w: tw | 0, tile_h: th | 0,
   };
 };
 // `__wasmboxAltTabState()` -- TEST HOOK. Returns the last-published switcher
@@ -945,8 +1196,12 @@ globalThis.__wasmboxExpose = function (cmd) {
 // window against __wasmboxFocusedRect); tilesJson is a JSON "[[x,y,w,h],...]" of
 // every tile rectangle (so a probe can assert the tiles are non-overlapping +
 // within the work area). The probe reads the stash via __wasmboxExposeState().
+// sel_live is 1 when the SELECTED tile shows a LIVE grabbed framebuffer (an
+// external SAB window) rather than a flat placeholder (in-process / dom); the
+// selected tile's on-screen rect is tiles[index], which a probe can sample via
+// __wasmboxReadRegion and assert real (textured) pixels.
 globalThis.__wasmboxExposeData = { active: 0 };
-globalThis.wasmboxPublishExpose = function (active, count, cols, rows, index, sx, sy, sw, sh, tilesJson) {
+globalThis.wasmboxPublishExpose = function (active, count, cols, rows, index, sx, sy, sw, sh, tilesJson, selLive) {
   let tiles = [];
   try { tiles = JSON.parse(String(tilesJson || "[]")); } catch (_) { tiles = []; }
   globalThis.__wasmboxExposeData = {
@@ -956,6 +1211,7 @@ globalThis.wasmboxPublishExpose = function (active, count, cols, rows, index, sx
     rows: rows | 0,
     index: index | 0,
     sel_x: sx | 0, sel_y: sy | 0, sel_w: sw | 0, sel_h: sh | 0,
+    sel_live: selLive | 0,
     tiles: tiles,
   };
 };
@@ -1202,6 +1458,44 @@ function dispatchDomEvent(m) {
 // sidecar and the main thread relays dom_event messages that drive it.
 const canvasBus = new FakeEventTarget();
 
+// Fetch `url` while reporting byte-level download progress to the main thread,
+// then compile + instantiate it. Posts:
+//   {type:"boot", stage:"download", loaded, total}  as bytes stream in
+//   {type:"boot", stage:"instantiate"}              before WebAssembly.instantiate
+// If Content-Length is absent (total=0) the main thread shows an indeterminate
+// bar; we still stream + report loaded so the labels/animation advance. Falls
+// back to a buffered arrayBuffer() read when the body is not a ReadableStream.
+async function instantiateWithProgress(url, importObject) {
+  const resp = await fetch(url);
+  if (!resp.ok) throw new Error("fetch " + url + " -> HTTP " + resp.status);
+  const total = parseInt(resp.headers.get("Content-Length") || "0", 10) || 0;
+
+  let bytes;
+  if (resp.body && typeof resp.body.getReader === "function") {
+    const reader = resp.body.getReader();
+    const chunks = [];
+    let loaded = 0;
+    for (;;) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      chunks.push(value);
+      loaded += value.length;
+      self.postMessage({ type: "boot", stage: "download", loaded: loaded, total: total });
+    }
+    bytes = new Uint8Array(loaded);
+    let off = 0;
+    for (const c of chunks) { bytes.set(c, off); off += c.length; }
+  } else {
+    // No streaming body available -- one buffered read, single progress tick.
+    bytes = new Uint8Array(await resp.arrayBuffer());
+    self.postMessage({ type: "boot", stage: "download", loaded: bytes.length, total: total || bytes.length });
+  }
+
+  // Boot stage 3/5: bytes are in, compiling + instantiating the module.
+  self.postMessage({ type: "boot", stage: "instantiate" });
+  return WebAssembly.instantiate(bytes, importObject);
+}
+
 async function bootWasm() {
   if (!offscreenScreen) {
     self.postMessage({ type: B.C2M_ERROR, message: "boot without OffscreenCanvas" });
@@ -1215,11 +1509,18 @@ async function bootWasm() {
   };
   try {
     const go = new Go();
-    const wasm = await WebAssembly.instantiateStreaming(
-      fetch("./wasmbox.wasm"), go.importObject);
+    // Stream the wasm so the boot splash shows real download progress. We read
+    // Content-Length + the ReadableStream to compute bytes-downloaded / total
+    // and post staged {type:"boot"} messages to the main thread. This replaces
+    // instantiateStreaming (which gives no byte-level progress).
+    const wasm = await instantiateWithProgress("./wasmbox.wasm", go.importObject);
+    // Boot stage 4/5: the Ruby runtime + compositor are about to boot inside
+    // main(). Posted BEFORE go.run because go.run runs main() synchronously.
+    self.postMessage({ type: "boot", stage: "runtime" });
     go.run(wasm.instance);
     // Compositor.attach_to_canvas + comp.start ran synchronously inside main()
-    // before we get here; signal main that the worker is live.
+    // before we get here; signal main that the worker is live. (The splash is
+    // torn down on the first PRESENTED frame -- see the rAF wrapper above.)
     self.postMessage({ type: B.C2M_READY });
     // Auto-spawn the same demo clients as the old index.html did, so a page
     // load still ends with a populated desktop.
@@ -1243,3 +1544,46 @@ function autoSpawnIfPresent(workerUrl, probeUrl) {
     .then((r) => { if (r.ok) globalThis.wasmboxSpawnExternal(workerUrl); })
     .catch(() => {});
 }
+
+// --- accessibility (a11y) ARIA bridge -------------------------------------
+// The compositor renders the whole desktop into an OffscreenCanvas: a screen
+// reader (VoiceOver / Orca / NVDA) sees NOTHING there — a canvas exposes no
+// accessible text. So Ruby (18_a11y.rb) walks its window stack and, whenever the
+// tree changes, hands us a JSON ARIA snapshot via JS.global.call; we post it to
+// the main thread, where a11y-bridge.js reconciles it into a live ARIA element
+// tree the accessibility API reads. This is the browser twin of go-widgets'
+// AT-SPI bridge — the tree just crosses postMessage instead of D-Bus.
+//
+// Message shapes (plain string literals, NOT bridge.js constants, so this stays
+// a self-contained append that never edits the frozen WASMBOX_BRIDGE object or
+// its cross-file consistency test):
+//   compositor -> main : { type: "a11y_update", tree: <json string> }
+//   main -> compositor : { type: "a11y_action", detail: { action, id } }
+//
+// wasmboxA11yPublish(json): Ruby -> main. Ship the ARIA tree JSON to the page.
+globalThis.wasmboxA11yPublish = function (json) {
+  self.postMessage({ type: "a11y_update", tree: String(json) });
+};
+
+// wasmboxA11yAction(detail): main -> Ruby. A screen reader activated a control
+// (Close / Minimize / Restore / Activate a window). Inject it into the running
+// compositor by dispatching on the Ruby event bus, exactly like the spawn /
+// notify / tray hooks — the compositor's a11y_dispatch then runs the same WM
+// path a mouse click would. Retries until the bus element exists (it is created
+// at boot), so an action that arrives before boot completes is not dropped.
+globalThis.wasmboxA11yAction = function (detail) {
+  function dispatch() {
+    const bus = fakeDocument.getElementById("__wasmbox_bus");
+    if (!bus) { setTimeout(dispatch, 16); return; }
+    bus.dispatchEvent(new CustomEvent("wasmbox-a11y-action", { detail: detail || {} }));
+  }
+  dispatch();
+};
+
+// Separate message listener (added, not merged into the M2C switch above) so
+// this whole feature is an append: it ignores every message type but its own.
+self.addEventListener("message", (ev) => {
+  const m = ev.data;
+  if (!m || m.type !== "a11y_action") return;
+  globalThis.wasmboxA11yAction(m.detail || {});
+});

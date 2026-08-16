@@ -15,18 +15,25 @@
 #   (alpha-composited drawImage) centered OVER the windows — the SAME seam the
 #   HUD (09), toasts (12), applets (14) and the Alt-Tab strip (15) use.
 #
-# Composition rather than Widgets.command_palette: the go-ruby-widgets binding
-# (widgets v0.7.0) exposes command_palette only as a render-only black box —
-# CommandPalette / SetVisible / Visible, with NO way from Ruby to feed a
-# keystroke, read the live query, read/move the selection, or introspect the
-# filtered result set. The compositor's keyboard path is Ruby, and Enter must
-# resolve the highlighted app id back against LAUNCHABLE to dispatch do_launch,
-# and the probe must read the query + selection to assert filtering — none of
-# which command_palette surfaces. So the filtering + selection state lives in the
-# pure Spotlight model (05_spotlight.rb, rbtest-tested) and this file just paints
-# a search Entry + filtered ListBox reflecting it, exactly as 15_alttab.rb
-# composes a Thumbnail strip. (go-ruby-widgets gap: command_palette needs
-# query/selection accessors + a key-feed method to back a host-driven palette.)
+# Driven through the go-widgets v0.86 CommandPalette accessors (the gap the
+# v0.7.0 render-only black box left is now closed): a persistent
+# Widgets.command_palette holds the launchable commands, and this file feeds it
+# the host's keystrokes + queries and reads its filtered view back:
+#   * set_query / query               — seed + read the live search text
+#   * handle_key(id, {kind, code})    — route a typed char / Backspace / arrows /
+#                                        Enter / Escape straight into the palette
+#                                        (Enter surfaces {fired, repaint}, fired
+#                                        carrying the chosen command's action)
+#   * move_selection / selected        — host-driven Up/Down + read the cursor
+#   * filtered_commands                — the exact visible rows this file renders
+# The palette's own substring filter REPLACES the compositor's hand-rolled fuzzy
+# match: draw_spotlight + the probe publish both read filtered_commands / query /
+# selected, so the widget is the single authority on what matches. The pure
+# Spotlight model (05_spotlight.rb, rbtest-tested) is kept ONLY for the lifecycle
+# (active? / open / cancel) and for building the ordered app list — neither of
+# which is JS-touching — so cmd/rbtest still exercises the launcher's open/close
+# + app-list resolution off-wasm. Each command's action id IS its launchable app
+# id, so Enter's fired id dispatches straight through do_launch.
 #
 # Because a headless ⌘/Ctrl+Space chord is unreliable, a probe-drivable hook
 # __wasmboxSpotlight(cmd) drives the exact same transitions the real keydown path
@@ -80,55 +87,81 @@ class Compositor
     Spotlight.app_list(WindowManager::LAUNCHABLE, RootMenu::APP_LABELS, RootMenu::HIDDEN)
   end
 
+  # The persistent CommandPalette handle backing the launcher (go-widgets v0.86).
+  # (Re)built from the current app list on each open — each command is
+  # { "label" => friendly label, "action" => the launchable app id }, so Enter's
+  # fired action id dispatches straight through do_launch. Rebuilt (not reused)
+  # per open so a change to the launchable set between opens is always reflected;
+  # set_visible(true) on open clears any prior query + selection.
+  def spotlight_build_palette(apps)
+    cmds = apps.map { |a| { "label" => a[:label].to_s, "action" => a[:id].to_s } }
+    @palette = Widgets.command_palette(cmds)
+    Widgets.set_visible(@palette, true)
+    @palette
+  end
+
   # --- transitions (shared by the real keydown path + the probe hook) ---------
 
-  # Open the palette over the current app list. No-op when the flag is off, the
-  # palette is already up, or there is nothing launchable. Returns self / nil.
+  # Open the palette over the current app list: mark the lifecycle active (the
+  # pure model) AND build the CommandPalette widget that owns the filtering. No-op
+  # when the flag is off, the palette is already up, or there is nothing
+  # launchable. Returns self / nil.
   def spotlight_open
     return nil unless SPOTLIGHT
     return nil if spotlight.active?
     apps = spotlight_app_list
     return nil if apps.empty?
     spotlight.open(apps)
+    spotlight_build_palette(apps)
+    spotlight
   end
 
-  # Feed one typed character into the query (a printable keydown, or a char from
-  # the probe's "type:" command). No-op when the palette is not up.
+  # Feed one typed character into the palette's query via handle_key (a printable
+  # keydown, or a char from the probe's "type:" command) — the widget extends its
+  # query + re-filters. No-op when the palette is not up.
   def spotlight_type(ch)
     return nil unless spotlight_active?
-    spotlight.type(ch)
+    Widgets.handle_key(@palette, { "kind" => "char", "code" => ch.to_s })
   end
 
-  # Delete the last query character (Backspace). No-op when not up.
+  # Delete the last query character via the palette's Backspace key. No-op when
+  # not up.
   def spotlight_backspace
     return nil unless spotlight_active?
-    spotlight.backspace
+    Widgets.handle_key(@palette, { "kind" => "keydown", "code" => "Backspace" })
   end
 
-  # Replace the whole query (the probe's "query:" command drives typing this
-  # way). No-op when not up.
+  # Replace the whole palette query (the probe's "query:" command drives typing
+  # this way), re-filtering as typing would. No-op when not up.
   def spotlight_set_query(q)
     return nil unless spotlight_active?
-    spotlight.set_query(q)
+    Widgets.set_query(@palette, q.to_s)
   end
 
-  # Move the highlight (delta >= 0 = down, else up), wrapping. No-op when not up.
+  # Move the palette highlight (delta >= 0 = down, else up), clamped at both ends
+  # by the widget. No-op when not up.
   def spotlight_move(delta)
     return nil unless spotlight_active?
-    spotlight.move(delta)
+    Widgets.move_selection(@palette, delta)
   end
 
-  # Commit the highlighted app: close the palette and LAUNCH it through the same
-  # do_launch path the root menu uses. Records the launched id + a launch counter
-  # (published for the probe) only when do_launch actually dispatched a spawn, so
-  # the signal is deterministic even though the spawned client's window registers
-  # asynchronously. No-op (nil) when the palette is not up or nothing is
-  # selected. Returns the launched id.
+  # Commit the highlighted app: route an Enter into the palette (the widget fires
+  # the selected command's action + dismisses itself), close the lifecycle, and
+  # LAUNCH the fired app id through the same do_launch path the root menu uses.
+  # handle_key returns a Dispatch-shaped { "fired" => [action, ...] }, so the
+  # launched id is the first fired action. Records the launched id + a launch
+  # counter (published for the probe) only when do_launch actually dispatched a
+  # spawn, so the signal is deterministic even though the spawned client's window
+  # registers asynchronously. No-op (nil) when the palette is not up or nothing
+  # is selected. Returns the launched id.
   def spotlight_commit
     return nil unless spotlight_active?
-    app = spotlight.commit
-    return nil if app.nil?
-    id = app[:id].to_s
+    res = Widgets.handle_key(@palette, { "kind" => "keydown", "code" => "Enter" })
+    spotlight.cancel
+    fired = res.nil? ? nil : res["fired"]
+    return nil if fired.nil? || fired.empty?
+    id = fired[0].to_s
+    return nil if id.empty?
     if do_launch(id) == :launched
       @spotlight_launched   = id
       @spotlight_launch_seq = (@spotlight_launch_seq || 0) + 1
@@ -136,9 +169,11 @@ class Compositor
     id
   end
 
-  # Cancel (Escape): close the palette, launching nothing.
+  # Cancel (Escape): dismiss the palette widget + close the lifecycle, launching
+  # nothing.
   def spotlight_cancel
     return nil unless SPOTLIGHT
+    Widgets.set_visible(@palette, false) unless @palette.nil?
     spotlight.cancel
     nil
   end
@@ -236,7 +271,11 @@ class Compositor
       publish_spotlight_inactive
       return nil
     end
-    results = spotlight.results
+    # Read the live view from the CommandPalette widget (the filtering authority):
+    # the query text, the filtered rows and the selected index.
+    query    = Widgets.query(@palette).to_s
+    results  = Widgets.filtered_commands(@palette)
+    index    = Widgets.selected(@palette).to_i
     rows    = spotlight_visible_rows(results.length)
     inner_w = SPOTLIGHT_W
     inner_h = SPOTLIGHT_QUERY_H + SPOTLIGHT_GAP + rows * SPOTLIGHT_ROW_H
@@ -250,9 +289,9 @@ class Compositor
     fill_rect([panel_x, panel_y, panel_w, panel_h], SPOTLIGHT_PLATE)
     stroke_rect([panel_x, panel_y, panel_w, panel_h], SPOTLIGHT_BORDER, 1)
 
-    sig = spotlight_paint_sig(spotlight.query, results, spotlight.index, inner_w, inner_h)
+    sig = spotlight_paint_sig(query, results, index, inner_w, inner_h)
     if @spotlight_b64.nil? || @spotlight_sig != sig
-      @spotlight_b64 = render_spotlight_panel(spotlight.query, results, spotlight.index, inner_w, inner_h)
+      @spotlight_b64 = render_spotlight_panel(query, results, index, inner_w, inner_h)
       @spotlight_sig = sig
       @spotlight_blitted = false
     end
@@ -265,7 +304,7 @@ class Compositor
       @spotlight_blitted = true
     end
 
-    publish_spotlight_active(results, spotlight.index, panel_x, panel_y, panel_w, panel_h)
+    publish_spotlight_active(query, results, index, panel_x, panel_y, panel_w, panel_h)
     nil
   end
 
@@ -278,14 +317,16 @@ class Compositor
   end
 
   # Build the palette's RGBA buffer (base64): a v_box of a query Entry over a
-  # ListBox of the filtered labels, the highlighted row selected.
+  # ListBox of the filtered_commands labels, the highlighted row selected. The
+  # rows ARE the widget's filtered_commands (each a { "label" => ... } Hash), so
+  # what paints is exactly what the CommandPalette matched.
   def render_spotlight_panel(query, results, sel, w, h)
     col = Widgets.v_box
     Widgets.set_spacing(col, SPOTLIGHT_GAP)
     entry = Widgets.entry(spotlight_query_display(query), "")
     Widgets.add_fixed(col, entry, SPOTLIGHT_QUERY_H)
     labels = []
-    results.each { |app| labels << app[:label] }
+    results.each { |cmd| labels << cmd["label"] }
     list = Widgets.list_box(labels, "")
     Widgets.select(list, sel) unless results.empty?
     Widgets.add_flex(col, list, 1)
@@ -302,10 +343,11 @@ class Compositor
   end
 
   # A content signature that changes exactly when the panel's pixels must: the
-  # query, the ordered result labels, the selected index and the buffer size.
+  # query, the ordered filtered_commands labels, the selected index and the
+  # buffer size.
   def spotlight_paint_sig(query, results, sel, w, h)
     parts = ["#{w}x#{h}", "q:#{query}", "s#{sel}"]
-    results.each { |app| parts << "#{app[:id]}:#{app[:label]}" }
+    results.each { |cmd| parts << cmd["label"].to_s }
     parts.join("|")
   end
 
@@ -316,15 +358,15 @@ class Compositor
   # query + the selected label (to assert the fuzzy filter), and the last-
   # launched app id + a monotonic launch counter (to assert Enter launched the
   # highlighted app and Escape did not).
-  def publish_spotlight_active(results, index, px, py, pw, ph)
+  def publish_spotlight_active(query, results, index, px, py, pw, ph)
     sel_label = ""
     unless results.empty?
-      app = results[index]
-      sel_label = app[:label].to_s unless app.nil?
+      cmd = results[index]
+      sel_label = cmd["label"].to_s unless cmd.nil?
     end
     JS.global.call("wasmboxPublishSpotlight",
       1, results.length, index, px, py, pw, ph,
-      spotlight.query.to_s, sel_label,
+      query.to_s, sel_label,
       (@spotlight_launched || "").to_s, (@spotlight_launch_seq || 0))
     nil
   end
