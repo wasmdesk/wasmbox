@@ -216,3 +216,82 @@ class AppletBoard
     self
   end
 end
+
+# The month-navigation state behind the desktop CALENDAR applet — the pure mirror
+# of the go-widgets v0.86 Calendar widget the render layer (14_applets.rb) paints.
+# The widget owns the pixels; this owns the (year, month, selected-day) triple the
+# compositor tracks so it can (a) build the tile's dirty signature from a change
+# it can compute WITHOUT a JS round-trip (so the applet participates in the #88
+# idle-repaint gate — the sig moves only on a real month/selection change, never
+# per frame) and (b) exercise the exact prev/next wrapping + day re-clamp in
+# cmd/rbtest, off-wasm, next to the AppletBoard. The compositor drives BOTH in
+# lockstep: Widgets.prev_month/next_month on the widget, #prev_month/#next_month
+# here, then #set_selected from Widgets.selected so the mirror follows the
+# widget's own day re-clamp.
+class CalendarView
+  attr_reader :year, :month, :selected
+
+  # Days per 1-based month; February is resolved per-year by #days_in_month.
+  DAYS = [31, 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31].freeze
+
+  def initialize(year, month, selected)
+    @year  = year.to_i
+    @month = month.to_i
+    @month = 1 if @month < 1
+    @month = 12 if @month > 12
+    @selected = selected.to_i
+    clamp_selected
+  end
+
+  # Proleptic-Gregorian leap year (matches the JS Date the widget is seeded from).
+  def self.leap?(y) = (y % 4 == 0 && y % 100 != 0) || (y % 400 == 0)
+
+  # Days in the current month, accounting for a leap February.
+  def days_in_month
+    (@month == 2 && CalendarView.leap?(@year)) ? 29 : DAYS[@month - 1]
+  end
+
+  # Step the view one month forward, wrapping December → the next January, then
+  # re-clamp the selected day into the new month (a 31 → 30/28 shrink). Returns
+  # self. Mirrors toolkit.Calendar#NextMonth.
+  def next_month
+    @month += 1
+    if @month > 12
+      @month = 1
+      @year += 1
+    end
+    clamp_selected
+    self
+  end
+
+  # Step the view one month back, wrapping January → the previous December, then
+  # re-clamp the selected day. Returns self. Mirrors toolkit.Calendar#PrevMonth.
+  def prev_month
+    @month -= 1
+    if @month < 1
+      @month = 12
+      @year -= 1
+    end
+    clamp_selected
+    self
+  end
+
+  # Set the selected day, clamped into [1, days_in_month]. Returns self.
+  def set_selected(day)
+    @selected = day.to_i
+    clamp_selected
+    self
+  end
+
+  # The tile's content signature: it changes EXACTLY on a month or selection
+  # change, so the applet repaints once per navigation and never idles-repaint.
+  def sig = "#{@year}-#{@month}-#{@selected}"
+
+  # Keep @selected inside the current month's day range (>= 1, <= days_in_month).
+  def clamp_selected
+    @selected = 1 if @selected < 1
+    dim = days_in_month
+    @selected = dim if @selected > dim
+    nil
+  end
+end

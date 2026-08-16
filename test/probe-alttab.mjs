@@ -83,6 +83,8 @@ async function compositorWorker(page) {
         () => typeof globalThis.__wasmboxAltTab === "function" &&
               typeof globalThis.__wasmboxAltTabState === "function" &&
               typeof globalThis.__wasmboxSpawnWindow === "function" &&
+              typeof globalThis.__wasmboxSpawnExternalStub === "function" &&
+              typeof globalThis.__wasmboxReadRegion === "function" &&
               typeof globalThis.__wasmboxFocusedRect === "function",
       );
       if (has) return w;
@@ -94,8 +96,17 @@ async function compositorWorker(page) {
 const stateOf = (cw) => cw.evaluate(() => globalThis.__wasmboxAltTabState());
 const focusOf = (cw) => cw.evaluate(() => globalThis.__wasmboxFocusedRect());
 const drive = (cw, cmd) => cw.evaluate((c) => globalThis.__wasmboxAltTab(c), cmd);
+const readRgn = (cw, r) => cw.evaluate(
+  ({ x, y, w, h }) => globalThis.__wasmboxReadRegion(x, y, w, h), r);
 
 const showR = (r) => r ? `[${r.x},${r.y} ${r.w}x${r.h}]` : "null";
+// A centred sub-rect (fraction `frac` of each side) of (x,y,w,h) — sampled to
+// stay clear of a tile's caption strip + selection border when reading pixels.
+function centerRegion(x, y, w, h, frac) {
+  const rw = Math.max(6, Math.floor(w * frac));
+  const rh = Math.max(6, Math.floor(h * frac));
+  return { x: Math.floor(x + (w - rw) / 2), y: Math.floor(y + (h - rh) / 2), w: rw, h: rh };
+}
 async function settle(page, ms) { await page.waitForTimeout(ms); }
 
 const { server, base } = await startServer();
@@ -250,6 +261,79 @@ try {
   } else {
     ok(`cancel left focus unchanged ${showR(postCancel)}`);
   }
+
+  // 7. LIVE THUMBNAILS: an EXTERNAL (SAB) window's Alt-Tab tile shows its real
+  // downscaled framebuffer, not a flat placeholder. We spawn a deterministic
+  // external stub whose SAB holds a bold gradient (a NON-uniform pattern), then:
+  //   - the live window on-screen is textured (sanity: the stub painted);
+  //   - opening the switcher parks on it (it is focused) and publishes sel_live=1
+  //     with a tile whose pixels are textured (variance well above a flat tile);
+  //   - advancing to an IN-PROCESS window's tile publishes sel_live=0 and a flat
+  //     (low-variance) placeholder tile — the before/after contrast in one run.
+  await drive(cw, "cancel");
+  await settle(page, 150);
+  await cw.evaluate(() => globalThis.__wasmboxSpawnExternalStub("live-ext", 240, 180));
+  await settle(page, 700); // let it register, composite + blit at least one frame
+
+  const extFocus = await focusOf(cw);
+  if (!extFocus || extFocus.x < 0 || extFocus.w <= 0) {
+    fail(`external stub did not focus: ${showR(extFocus)}`);
+  } else {
+    ok(`external stub window focused ${showR(extFocus)}`);
+  }
+  // The live window on-screen must be textured (the gradient painted).
+  const liveWinRgn = centerRegion(extFocus.x, extFocus.y, extFocus.w, extFocus.h, 0.4);
+  const liveWin = await readRgn(cw, liveWinRgn);
+  if (liveWin && liveWin.variance > 40) {
+    ok(`live external window is textured on-screen (variance=${liveWin.variance})`);
+  } else {
+    fail(`live external window not textured: ${JSON.stringify(liveWin)}`);
+  }
+
+  // Open: the stub is focused, so index 0 is the stub -> its tile is a live grab.
+  await drive(cw, "open");
+  await settle(page, 250);
+  const sLive = await stateOf(cw);
+  if (sLive.active !== 1) {
+    fail(`open should raise the switcher for the live-thumbnail test: ${JSON.stringify(sLive)}`);
+    throw new Error("live open failed");
+  }
+  if (sLive.sel_live === 1) {
+    ok("selected tile (the external stub) is flagged LIVE (sel_live=1)");
+  } else {
+    fail(`external stub's tile should be live, sel_live=${sLive.sel_live}`);
+  }
+  const liveTileRgn = centerRegion(sLive.tile_x, sLive.tile_y, sLive.tile_w, sLive.tile_h, 0.5);
+  const liveTile = await readRgn(cw, liveTileRgn);
+  if (liveTile && liveTile.variance > 40) {
+    ok(`live tile shows real content (textured, variance=${liveTile.variance}), not a flat placeholder`);
+  } else {
+    fail(`live tile is not textured (expected the grabbed gradient): ${JSON.stringify(liveTile)}`);
+  }
+
+  // Advance to a placeholder (in-process) tile: sel_live flips to 0 and the tile
+  // is flat. The three in-process alttab-A/B/C windows are guaranteed placeholders.
+  let placeholderTile = null;
+  let placeholderVar = null;
+  for (let step = 0; step < sLive.count; step++) {
+    await drive(cw, "advance");
+    await settle(page, 120);
+    const st = await stateOf(cw);
+    if (st.sel_live === 0) {
+      placeholderTile = st;
+      placeholderVar = await readRgn(cw, centerRegion(st.tile_x, st.tile_y, st.tile_w, st.tile_h, 0.5));
+      break;
+    }
+  }
+  if (!placeholderTile) {
+    fail("could not reach an in-process (placeholder) tile by advancing");
+  } else if (placeholderVar && placeholderVar.variance < liveTile.variance) {
+    ok(`placeholder tile is flat (variance=${placeholderVar.variance}) vs live tile (variance=${liveTile.variance}); sel_live=0`);
+  } else {
+    fail(`placeholder tile not clearly flatter than live: placeholder=${JSON.stringify(placeholderVar)} live variance=${liveTile.variance}`);
+  }
+  await drive(cw, "cancel");
+  await settle(page, 200);
 
   // Client-asset load races (a spawned client's .wasm not yet served) are
   // unrelated to the switcher under test — the compositor itself booted fine.

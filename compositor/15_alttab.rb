@@ -73,9 +73,19 @@ class Compositor
   ALTTAB_SRC_H      = 30
   ALTTAB_TITLE_ROWS = 6
   # Titlebar tint + placeholder body tint for windows with no Ruby-reachable
-  # pixels (external SAB / dom iframe).
+  # pixels (dom iframe — cross-origin canvas taint — or an external surface not
+  # yet composited).
   ALTTAB_TITLE_FILL = "#3a3e46"
   ALTTAB_PLACEHOLD  = "#2b2f3a"
+
+  # LIVE thumbnail grab (2026-08-03): an EXTERNAL (SharedArrayBuffer) window's
+  # real framebuffer is downscaled, aspect-preserved, into at most
+  # ALTTAB_GRAB_MAX_W x ALTTAB_GRAB_MAX_H source pixels (never upscaled — a tiny
+  # surface stays tiny and the Thumbnail widget upscales it), then fed to the
+  # SAME Widgets.thumbnail the placeholder used. Kept modest so the per-grab
+  # drawImage + getImageData + base64 stays cheap; the tile does the final fit.
+  ALTTAB_GRAB_MAX_W = 192
+  ALTTAB_GRAB_MAX_H = 144
 
   # Lazily-built switcher cursor (model in 05_alttab.rb, loaded before this
   # file). Built on first access so Compositor#initialize (06_core.rb) needs no
@@ -195,7 +205,14 @@ class Compositor
       @alttab_blitted = true
     end
 
-    publish_alttab_active(n, alttab.index, panel_x, panel_y, panel_w, panel_h, alttab.selected)
+    # The selected tile's on-screen rect (where its thumbnail lands on the
+    # composited canvas) + whether it is a LIVE grab, so a probe can sample the
+    # pixels and assert real content vs a flat placeholder.
+    sel = alttab.index
+    tile_x = dx + sel * (tile_w + ALTTAB_GAP)
+    sel_live = alttab.selected && alttab_live?(alttab.selected) ? 1 : 0
+    publish_alttab_active(n, sel, panel_x, panel_y, panel_w, panel_h, alttab.selected,
+                          sel_live, tile_x, dy, tile_w, inner_h)
     nil
   end
 
@@ -236,7 +253,11 @@ class Compositor
   # the id list; nothing else re-renders.
   def alttab_paint_sig(cands, sel, w, h)
     parts = ["#{w}x#{h}", "s#{sel}"]
-    cands.each { |win| parts << "#{win.id}:#{win.title}" }
+    # Fold each candidate's live content-seq into the signature so a live
+    # (external SAB) window that repaints re-renders its tile; an idle window's
+    # seq holds, so the cached strip is re-presented untouched. 0 for windows
+    # with no live surface (their tile pixels never change on their own).
+    cands.each { |win| parts << "#{win.id}:#{win.title}:#{alttab_content_seq(win)}" }
     parts.join("|")
   end
 
@@ -246,19 +267,96 @@ class Compositor
     t.empty? ? "window ##{win.id}" : t
   end
 
-  # The thumbnail SOURCE for a window: [base64 RGBA, src_w, src_h]. An in-process
-  # window paints its real body fill under a titlebar strip (a faithful shrunk
-  # snapshot); an external (SAB) / dom (iframe) window has no Ruby-reachable
-  # pixels, so it gets a neutral placeholder body — still titlebar-striped, so the
-  # tile reads as a window. The toolkit Thumbnail upscales this small flat source.
+  # The thumbnail SOURCE for a window: [base64 RGBA, src_w, src_h]. An EXTERNAL
+  # (SharedArrayBuffer) window contributes a LIVE downscaled snapshot of its real
+  # framebuffer (alttab_live_thumb); an in-process window paints its real body
+  # fill under a titlebar strip (a faithful shrunk snapshot — a solid-fill window
+  # IS this); a dom (iframe) window's pixels are not capturable (cross-origin
+  # canvas taint) so it keeps a neutral titled placeholder. An external window
+  # whose surface is not yet composited also falls back to the placeholder. The
+  # toolkit Thumbnail scales whatever source it gets (aspect-preserved) into the
+  # tile's image area.
   def alttab_thumb(win)
+    live = alttab_live_thumb(win)
+    return live unless live.nil?
     body = alttab_body_color(win)
     buf = alttab_window_rgba(ALTTAB_SRC_W, ALTTAB_SRC_H, ALTTAB_TITLE_FILL, body)
     [Base64.strict_encode64(buf), ALTTAB_SRC_W, ALTTAB_SRC_H]
   end
 
-  # The body tint for a window's tile: its own fill for an in-process window
-  # (compositor-painted, so this IS its body), else the neutral placeholder.
+  # Does `win` get a LIVE grabbed thumbnail (vs a placeholder)? Only EXTERNAL
+  # (SAB-backed) windows do — their pixels are reachable through the blit path's
+  # per-window surface. In-process windows are a flat fill (their placeholder IS
+  # faithful) and dom windows are cross-origin-tainted iframes. Used to tag the
+  # SELECTED tile in the probe publish (draw_alttab / draw_expose).
+  def alttab_live?(win) = win.external?
+
+  # A live external window's content sequence — the seqlock value the blit path
+  # last copied (wasmboxWindowSeq), so it changes exactly when the client
+  # committed new pixels. Folded into the paint signature so the strip re-renders
+  # (re-grabs) when a live window animates, and 0 for windows without a live
+  # surface (their tile pixels never change on their own).
+  def alttab_content_seq(win)
+    return 0 unless alttab_live?(win)
+    return 0 if win.image_data.nil?
+    JS.global.call("wasmboxWindowSeq", win.image_data).to_i
+  end
+
+  # The grab dimensions for a live external window: its native surface size shrunk
+  # (aspect-preserved) to fit within ALTTAB_GRAB_MAX_W x ALTTAB_GRAB_MAX_H, never
+  # upscaled. Pure integer math. Falls back to the flat source size when the
+  # native dimensions are unknown.
+  def alttab_grab_dims(win)
+    nw = win.native_w.to_i
+    nh = win.native_h.to_i
+    nw = win.w.to_i if nw <= 0
+    nh = win.h.to_i if nh <= 0
+    return [ALTTAB_SRC_W, ALTTAB_SRC_H] if nw <= 0 || nh <= 0
+    dw = nw
+    dh = nh
+    if dw > ALTTAB_GRAB_MAX_W
+      dh = dh * ALTTAB_GRAB_MAX_W / dw
+      dw = ALTTAB_GRAB_MAX_W
+    end
+    if dh > ALTTAB_GRAB_MAX_H
+      dw = dw * ALTTAB_GRAB_MAX_H / dh
+      dh = ALTTAB_GRAB_MAX_H
+    end
+    dw = 1 if dw < 1
+    dh = 1 if dh < 1
+    [dw, dh]
+  end
+
+  # Grab an external window's live framebuffer as [base64 RGBA, dw, dh], or nil
+  # when it has no live pixels (not external / no surface / a torn read). Cached
+  # per (window id, grab size, content-seq): a matching cache entry re-uses the
+  # already-encoded buffer so an idle or repeatedly-rendered window is NOT
+  # re-grabbed every frame (the seqlock the blit path tracks tells us when the
+  # pixels actually changed). The JS helper reads slot.canvas — the seqlock-safe
+  # last-complete frame — so the grab is one downscale + one getImageData.
+  def alttab_live_thumb(win)
+    return nil unless alttab_live?(win)
+    slot = win.image_data
+    return nil if slot.nil?
+    dw, dh = alttab_grab_dims(win)
+    seq = alttab_content_seq(win)
+    key = "#{win.id}:#{dw}x#{dh}"
+    @alttab_thumb_cache ||= {}
+    cached = @alttab_thumb_cache[key]
+    return [cached[:b64], dw, dh] if cached && cached[:seq] == seq
+    res = JS.global.call("wasmboxGrabWindow", slot, dw, dh)
+    return (cached ? [cached[:b64], dw, dh] : nil) if res.nil?
+    b64 = res.get("b64")
+    return (cached ? [cached[:b64], dw, dh] : nil) if b64.nil?
+    b64 = b64.to_s
+    return (cached ? [cached[:b64], dw, dh] : nil) if b64.empty?
+    @alttab_thumb_cache[key] = { seq: seq, b64: b64 }
+    [b64, dw, dh]
+  end
+
+  # The body tint for an in-process window's placeholder tile: its own fill
+  # (compositor-painted, so this IS its body), else the neutral placeholder for a
+  # dom / not-yet-composited external window.
   def alttab_body_color(win)
     if !win.external? && !win.dom? && !win.fill.nil?
       win.fill
@@ -311,17 +409,22 @@ class Compositor
   # index, the centered panel rect (to assert centering) and the SELECTED
   # window's body rect (to assert that a commit focuses exactly that window, by
   # comparing against __wasmboxFocusedRect afterwards).
-  def publish_alttab_active(count, index, px, py, pw, ph, sel)
+  # sel_live is 1 when the selected tile is a LIVE grabbed framebuffer (external
+  # SAB window) vs a flat placeholder (in-process / dom); (tile_x, tile_y,
+  # tile_w, tile_h) is that tile's on-screen rect, so the probe can sample the
+  # composited pixels there and assert real (textured) content.
+  def publish_alttab_active(count, index, px, py, pw, ph, sel, sel_live, tile_x, tile_y, tile_w, tile_h)
     sx = sel.nil? ? -1 : sel.x
     sy = sel.nil? ? -1 : sel.y
     sw = sel.nil? ? 0 : sel.w
     sh = sel.nil? ? 0 : sel.h
-    JS.global.call("wasmboxPublishAltTab", 1, count, index, px, py, pw, ph, sx, sy, sw, sh)
+    JS.global.call("wasmboxPublishAltTab", 1, count, index, px, py, pw, ph, sx, sy, sw, sh,
+                   sel_live, tile_x, tile_y, tile_w, tile_h)
     nil
   end
 
   def publish_alttab_inactive
-    JS.global.call("wasmboxPublishAltTab", 0, 0, 0, 0, 0, 0, 0, -1, -1, 0, 0)
+    JS.global.call("wasmboxPublishAltTab", 0, 0, 0, 0, 0, 0, 0, -1, -1, 0, 0, 0, 0, 0, 0, 0)
     nil
   end
 end

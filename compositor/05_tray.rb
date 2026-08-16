@@ -73,6 +73,15 @@ class TrayItem
   # keys never collide; invalidating @b64 on #update forces a fresh present.
   def key = "tray##{@id}"
 
+  # A content signature that changes EXACTLY when the cell's pixels must: its id,
+  # the stock glyph, the tooltip and whether it carries an image icon. The
+  # dirty-rect compositor (06_core.rb#tray_signature) joins these across the
+  # strip so a tray_update (a new glyph/tooltip on a live id) damages the strip
+  # region even though the item set — and every #key — is unchanged.
+  def sig
+    "#{@id}|#{@glyph}|#{@tooltip}|#{@icon.nil? ? 0 : 1}"
+  end
+
   # Apply a `tray_update`: only the fields actually supplied (non-nil) overwrite,
   # so a partial update (e.g. just a new tooltip) leaves the rest intact. Any
   # change drops the render cache so the next frame repaints the cell.

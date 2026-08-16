@@ -188,7 +188,7 @@ tasks:
       - bridge.go
       - compositor/*.rb
     cmds:
-      - go build -o wasmbox.wasm .
+      - go build -trimpath -ldflags '-s -w' -o wasmbox.wasm .
       - cp "$(go env GOROOT)/lib/wasm/wasm_exec.js" ./wasm_exec.js 2>/dev/null || cp "$(go env GOROOT)/misc/wasm/wasm_exec.js" ./wasm_exec.js
     generates:
       - wasmbox.wasm
@@ -358,8 +358,16 @@ tasks:
       - go test ./clients/hello/... ./clients/dock/... ./clients/terminal/... ./clients/files/... ./clients/code/...
       - go test ./
       - go test ./packs/...
+      - go test ./cmd/rbbench
       - go run ./cmd/rbtest
       - node test/sdk-bootwasm.test.mjs
+
+  bench:
+    desc: Report compositor wasm<->JS paint crossings per frame (dirty-rect gate + region recomposite vs the whole-screen baseline), idle / drag / animate.
+    env:
+      GOWORK: "off"
+    cmds:
+      - go run ./cmd/rbbench
 
   clean:
     desc: Remove the build artifacts
@@ -670,7 +678,7 @@ tasks:
     cmds:
       - rm -rf "{{.SITE_DIR}}" && mkdir -p "{{.SITE_DIR}}"
       # Desktop shell + the worker/loader/bridge + the baked compositor wasm.
-      - cp index.html coi-serviceworker.js bridge.js boot-config.js compositor.worker.js ociapps-loader.js wasm_exec.js wasmbox.wasm "{{.SITE_DIR}}/"
+      - cp index.html coi-serviceworker.js bridge.js a11y-bridge.js boot-config.js compositor.worker.js ociapps-loader.js wasm_exec.js wasmbox.wasm "{{.SITE_DIR}}/"
       # Ship the full client tree so EVERY launch resolves same-origin, exactly
       # like the dev server: the root-menu / dock spawn clients by static path
       # (clients/<app>/worker.js) or DOM path, NOT via the OCI mirror, so those
