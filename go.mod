@@ -6,7 +6,7 @@ require (
 	github.com/go-embedded-ruby/ruby v0.0.0-20260809134646-3ce8c91d38e7
 	github.com/go-opentype/fonts v0.4.2
 	github.com/go-ruby-parser/parser v0.1.3
-	github.com/go-widgets/painter v0.2.0
+	github.com/go-widgets/painter v0.11.0
 	github.com/go-widgets/toolkit v0.114.0
 	github.com/wasmdesk/coreutils v0.0.0-20260629060422-c37bd87ae249
 )
@@ -85,6 +85,7 @@ require (
 	github.com/go-datetime/dates v0.1.0 // indirect
 	github.com/go-facter/facter v0.0.0-20260708052836-752b1a3edee0 // indirect
 	github.com/go-fft/fft v0.0.0-20260620110530-0e3ca1747acb // indirect
+	github.com/go-gfx/gfx v0.1.0 // indirect
 	github.com/go-hiera/hiera v0.0.0-20260708051558-73bff6edd0e9 // indirect
 	github.com/go-hocon/hocon v0.0.0-20260709172937-6d69e3b57178 // indirect
 	github.com/go-images/images v0.0.0-20260702213524-ea366b42f216 // indirect
@@ -374,12 +375,12 @@ require (
 	go.yaml.in/yaml/v3 v3.0.4 // indirect
 	golang.org/x/crypto v0.54.0 // indirect
 	golang.org/x/exp v0.0.0-20260218203240-3dfff04db8fa // indirect
-	golang.org/x/image v0.43.0 // indirect
+	golang.org/x/image v0.45.0 // indirect
 	golang.org/x/net v0.57.0 // indirect
 	golang.org/x/sync v0.22.0 // indirect
 	golang.org/x/sys v0.47.0 // indirect
 	golang.org/x/term v0.45.0 // indirect
-	golang.org/x/text v0.40.0 // indirect
+	golang.org/x/text v0.41.0 // indirect
 	golang.org/x/time v0.15.0 // indirect
 	google.golang.org/genproto/googleapis/api v0.0.0-20260414002931-afd174a4e478 // indirect
 	google.golang.org/genproto/googleapis/rpc v0.0.0-20260414002931-afd174a4e478 // indirect
