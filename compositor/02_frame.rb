@@ -29,6 +29,39 @@ class Frame
     cls
   end
 
+  # --- dirty-rect / retained-chrome geometry -------------------------------
+  # A decorated window's chrome (titlebar + buttons + border + resize grip) is
+  # a pure function of its size, focus state, shade state, title and the active
+  # frame/palette — it does NOT change while the window merely sits there or is
+  # dragged around. The widgets frame path (11_frame_widgets.rb) already caches
+  # each window's rendered decoration as a per-window OffscreenCanvas buffer,
+  # keyed by an equivalent signature, so a drag re-presents the cached buffer at
+  # the new position. sprite_key mirrors that signature so the dirty-rect
+  # compositor (06_core.rb#window_vkey) can tell "same chrome, moved" (a cache
+  # hit, drag stays cheap) apart from "chrome must repaint" — and cmd/rbtest can
+  # assert the invalidation rules directly.
+  #
+  # sprite_key MUST fold in every input the paint methods read: the frame
+  # identity (current_name distinguishes OpenboxFrame from a themed variant even
+  # when they share a class), the frame width/height (which already encode window
+  # w/h AND the shaded collapse), the focus flag (active vs inactive colours),
+  # the shade flag and the title text. Position is deliberately EXCLUDED.
+  def self.sprite_key(win, active)
+    _fx, _fy, fw, fh = current.frame_rect(win)
+    "#{current_name}:#{fw}:#{fh}:#{active ? 1 : 0}:#{win.shaded? ? 1 : 0}:#{win.title}"
+  end
+
+  # Screen-space bounding box of a decorated window's full painted extent, as
+  # [x, y, w, h]. This is frame_rect padded by 1px on every side so a chrome's
+  # 1px faux drop shadow (AquaFrame paints one past frame_right / frame_bottom)
+  # and any half-pixel border stroke land inside the box. Used by the dirty-rect
+  # compositor (06_core.rb#window_bounds) as the damage bounds for a decorated
+  # window, so a move/resize/commit damages exactly this rectangle.
+  def self.sprite_bounds(win)
+    fx, fy, fw, fh = current.frame_rect(win)
+    [fx - 1, fy - 1, fw + 2, fh + 2]
+  end
+
   # The window-geometry hooks. Default impls reuse Theme:: constants so a
   # chrome that wants the Openbox geometry can just inherit OpenboxFrame.
 
@@ -78,22 +111,15 @@ class Frame
     [win.x, win.frame_top, win.w, win.h + title_h]
   end
 
-  # paint(ctx, win, active, host) is the chrome's visual; it owns all the
-  # ctx draw calls for the titlebar, buttons, border + resize grip. `host`
-  # is the Compositor (used for fill_rect/stroke_rect helpers + the @ctx).
-  # Implemented per subclass.
-  def paint(_ctx, _win, _active, _host) ; raise NotImplementedError ; end
-
-  # --- widgets paint path (2026-08-02) -----------------------------------
+  # --- widgets paint path ------------------------------------------------
   # decoration_spec(win, active) returns the go-widgets WindowDecoration
   # spec Hash (see Widgets.decoration) that paints this chrome for `win`,
   # with EVERY rect in FRAME-LOCAL coordinates (origin = win.x, frame_top)
   # so the compositor can render it into a per-window buffer and blit it
-  # around the SAB body (see 11_frame_widgets.rb). This is the widgets
-  # twin of #paint / #paint_frame: it re-expresses the same colours +
-  # geometry as data, so hit-testing (Window#*_rect) stays the single
-  # source of truth and only the PAINT moves to the toolkit. Implemented
-  # per family (OpenboxFrame / AquaFrame); themed subclasses override only
+  # around the SAB body (see 11_frame_widgets.rb). It expresses the chrome's
+  # colours + geometry as data, so hit-testing (Window#*_rect) stays the
+  # single source of truth and the PAINT is the toolkit's. Implemented per
+  # family (OpenboxFrame / AquaFrame); themed subclasses override only
   # #deco_colors.
   def decoration_spec(_win, _active) ; raise NotImplementedError ; end
 
@@ -105,36 +131,10 @@ class Frame
   end
 end
 
-# OpenboxFrame — the existing wasmbox look. Geometry inherits Chrome
-# defaults; paint reproduces what Compositor#draw_window used to inline.
+# OpenboxFrame — the existing wasmbox look. Geometry inherits Frame
+# defaults; the chrome is expressed as a decoration_spec the go-widgets
+# painter renders (see 11_frame_widgets.rb).
 class OpenboxFrame < Frame
-  def paint(ctx, win, active, host)
-    # Titlebar.
-    host.fill_rect(titlebar_rect(win), active ? Theme::TITLE_ACTIVE : Theme::TITLE_INACTIVE)
-    tx, ty, _tw, _th = titlebar_rect(win)
-    host.text(win.title, tx + 6, ty + 15, Theme::TITLE_TEXT)
-    # Close box (× glyph).
-    cx, cy, cw, ch = close_rect(win)
-    host.fill_rect(close_rect(win), Theme::CLOSE_BG)
-    ctx.set("strokeStyle", Theme::CLOSE_GLYPH)
-    ctx.set("lineWidth", 1.5)
-    ctx.call("beginPath")
-    ctx.call("moveTo", cx + 3, cy + 3)
-    ctx.call("lineTo", cx + cw - 3, cy + ch - 3)
-    ctx.call("moveTo", cx + cw - 3, cy + 3)
-    ctx.call("lineTo", cx + 3, cy + ch - 3)
-    ctx.call("stroke")
-    # Minimize box ("_" glyph).
-    mx, my, mw, mh = minimize_rect(win)
-    host.fill_rect(minimize_rect(win), Theme::CLOSE_BG)
-    ctx.set("strokeStyle", active ? Theme::CLOSE_GLYPH : Theme::BORDER_INACTIVE)
-    ctx.set("lineWidth", 1.5)
-    ctx.call("beginPath")
-    ctx.call("moveTo", mx + 3,      my + mh - 4)
-    ctx.call("lineTo", mx + mw - 3, my + mh - 4)
-    ctx.call("stroke")
-  end
-
   # The Openbox palette for the current focus state. Themed subclasses
   # override this (reading their @palette) and inherit #decoration_spec.
   def deco_colors(active)
@@ -174,21 +174,6 @@ class OpenboxFrame < Frame
       spec["show_grip"]    = true
     end
     spec
-  end
-
-  def paint_frame(ctx, win, active, host)
-    # Resize grip + 1px frame border. Called by Compositor after the body
-    # paints (so the grip + border land on top).
-    rx, ry, rw, rh = resize_rect(win)
-    ctx.set("strokeStyle", Theme::RESIZE_GRIP)
-    ctx.set("lineWidth", 1)
-    ctx.call("beginPath")
-    ctx.call("moveTo", rx + rw, ry + rh * 0.4)
-    ctx.call("lineTo", rx + rw * 0.4, ry + rh)
-    ctx.call("moveTo", rx + rw, ry + rh * 0.75)
-    ctx.call("lineTo", rx + rw * 0.75, ry + rh)
-    ctx.call("stroke")
-    host.stroke_rect(frame_rect(win), active ? Theme::BORDER_ACTIVE : Theme::BORDER_INACTIVE, Theme::BORDER)
   end
 end
 
@@ -243,69 +228,8 @@ class AquaFrame < Frame
     [cx + BTN_DIAM + BTN_GAP, cy, BTN_DIAM, BTN_DIAM]
   end
 
-  def paint(ctx, win, active, host)
-    tx, ty, tw, _th = titlebar_rect(win)
-    host.fill_rect(titlebar_rect(win), active ? TITLE_ACTIVE : TITLE_INACTIVE)
-    # 1 px hairline at the bottom of the titlebar.
-    ctx.set("strokeStyle", TITLE_BORDER)
-    ctx.set("lineWidth", 1)
-    ctx.call("beginPath")
-    ctx.call("moveTo", tx,        ty + TITLE_H - 0.5)
-    ctx.call("lineTo", tx + tw,   ty + TITLE_H - 0.5)
-    ctx.call("stroke")
-    # Centred title text.
-    ctx.set("font", "12px -apple-system, BlinkMacSystemFont, 'SF Pro Text', 'Helvetica Neue', Helvetica, Arial, sans-serif")
-    ctx.set("textAlign", "center")
-    ctx.set("textBaseline", "middle")
-    ctx.set("fillStyle", active ? TITLE_TEXT_ON : TITLE_TEXT_OFF)
-    ctx.call("fillText", win.title, tx + tw / 2, ty + TITLE_H / 2 + 1)
-    ctx.set("textAlign", "left")
-    ctx.set("textBaseline", "alphabetic")
-    # Three traffic-light buttons.
-    draw_traffic_light(ctx, close_rect(win),    CLOSE_RED,  CLOSE_RED_OUT,  active)
-    draw_traffic_light(ctx, minimize_rect(win), MIN_YELLOW, MIN_YELLOW_OUT, active)
-    draw_traffic_light(ctx, maximize_rect(win), MAX_GREEN,  MAX_GREEN_OUT,  active)
-  end
-
-  def paint_frame(ctx, win, active, host)
-    rx, ry, rw, rh = resize_rect(win)
-    ctx.set("strokeStyle", RESIZE_GRIP)
-    ctx.set("lineWidth", 1)
-    ctx.call("beginPath")
-    ctx.call("moveTo", rx + rw, ry + rh * 0.4)
-    ctx.call("lineTo", rx + rw * 0.4, ry + rh)
-    ctx.call("moveTo", rx + rw, ry + rh * 0.75)
-    ctx.call("lineTo", rx + rw * 0.75, ry + rh)
-    ctx.call("stroke")
-    # Faked 1 px drop shadow on the right + bottom of the frame.
-    fx, fy, fw, fh = frame_rect(win)
-    host.fill_rect([fx + fw,     fy + 1, 1, fh], SHADOW)
-    host.fill_rect([fx + 1, fy + fh,     fw, 1], SHADOW)
-    host.stroke_rect(frame_rect(win), active ? BORDER_ACTIVE : BORDER_INACTIVE, BORDER_W)
-  end
-
-  # (rbgo's mruby has no `private` keyword; helpers below are
-  # convention-only — callers stay inside the class.)
-
-  def draw_traffic_light(ctx, rect, fill_colour, outline_colour, active)
-    bx, by, bw, bh = rect
-    cx = bx + bw / 2.0
-    cy = by + bh / 2.0
-    fc = active ? fill_colour    : "#C7C7CC"
-    oc = active ? outline_colour : "#B0B0B5"
-    ctx.set("fillStyle", fc)
-    ctx.call("beginPath")
-    ctx.call("arc", cx, cy, BTN_R, 0, 6.283185307179586)
-    ctx.call("fill")
-    ctx.set("strokeStyle", oc)
-    ctx.set("lineWidth", 1)
-    ctx.call("beginPath")
-    ctx.call("arc", cx, cy, BTN_R - 0.5, 0, 6.283185307179586)
-    ctx.call("stroke")
-  end
-
-  # Inactive traffic-lights grey out (matches #draw_traffic_light). Kept as
-  # a constant pair so both the canvas + widget paths agree.
+  # Inactive traffic-lights grey out. Kept as a constant pair the widget
+  # decoration_spec below reads for the dimmed close/min/max faces.
   TL_DIM_FILL = "#C7C7CC"
   TL_DIM_OUT  = "#B0B0B5"
 
@@ -379,7 +303,7 @@ class ThemedOpenboxFrame < OpenboxFrame
   end
 
   # Same layout as OpenboxFrame (inherits #decoration_spec) but the colours
-  # come from @palette, mirroring #paint / #paint_frame's fallbacks.
+  # come from @palette, falling back to the Openbox Theme:: defaults.
   def deco_colors(active)
     p = @palette
     {
@@ -391,50 +315,6 @@ class ThemedOpenboxFrame < OpenboxFrame
       border:      active ? (p[:border_active] || Theme::BORDER_ACTIVE) : (p[:border_inactive] || Theme::BORDER_INACTIVE),
       grip:        p[:resize_grip] || Theme::RESIZE_GRIP,
     }
-  end
-
-  def paint(ctx, win, active, host)
-    p = @palette
-    title_bg = active ? (p[:title_active] || Theme::TITLE_ACTIVE) : (p[:title_inactive] || Theme::TITLE_INACTIVE)
-    close_bg = p[:close_bg] || Theme::CLOSE_BG
-    close_glyph = p[:close_glyph] || Theme::CLOSE_GLYPH
-    title_text = p[:title_text] || Theme::TITLE_TEXT
-    host.fill_rect(titlebar_rect(win), title_bg)
-    tx, ty, _tw, _th = titlebar_rect(win)
-    host.text(win.title, tx + 6, ty + 15, title_text)
-    cx, cy, cw, ch = close_rect(win)
-    host.fill_rect(close_rect(win), close_bg)
-    ctx.set("strokeStyle", close_glyph)
-    ctx.set("lineWidth", 1.5)
-    ctx.call("beginPath")
-    ctx.call("moveTo", cx + 3, cy + 3)
-    ctx.call("lineTo", cx + cw - 3, cy + ch - 3)
-    ctx.call("moveTo", cx + cw - 3, cy + 3)
-    ctx.call("lineTo", cx + 3, cy + ch - 3)
-    ctx.call("stroke")
-    mx, my, mw, mh = minimize_rect(win)
-    host.fill_rect(minimize_rect(win), close_bg)
-    ctx.set("strokeStyle", active ? close_glyph : (p[:border_inactive] || Theme::BORDER_INACTIVE))
-    ctx.set("lineWidth", 1.5)
-    ctx.call("beginPath")
-    ctx.call("moveTo", mx + 3,      my + mh - 4)
-    ctx.call("lineTo", mx + mw - 3, my + mh - 4)
-    ctx.call("stroke")
-  end
-
-  def paint_frame(ctx, win, active, host)
-    p = @palette
-    rx, ry, rw, rh = resize_rect(win)
-    ctx.set("strokeStyle", p[:resize_grip] || Theme::RESIZE_GRIP)
-    ctx.set("lineWidth", 1)
-    ctx.call("beginPath")
-    ctx.call("moveTo", rx + rw, ry + rh * 0.4)
-    ctx.call("lineTo", rx + rw * 0.4, ry + rh)
-    ctx.call("moveTo", rx + rw, ry + rh * 0.75)
-    ctx.call("lineTo", rx + rw * 0.75, ry + rh)
-    ctx.call("stroke")
-    border = active ? (p[:border_active] || Theme::BORDER_ACTIVE) : (p[:border_inactive] || Theme::BORDER_INACTIVE)
-    host.stroke_rect(frame_rect(win), border, Theme::BORDER)
   end
 end
 
@@ -462,7 +342,8 @@ class ThemedAquaFrame < AquaFrame
 
   # Same layout as AquaFrame (inherits #decoration_spec, so the traffic-
   # lights stay canonical red/yellow/green) but the titlebar / border /
-  # grip / shadow colours come from @palette, mirroring #paint's fallbacks.
+  # grip / shadow colours come from @palette, falling back to the Aqua
+  # defaults.
   def deco_colors(active)
     p = @palette
     {
@@ -473,47 +354,6 @@ class ThemedAquaFrame < AquaFrame
       grip:         p[:resize_grip] || RESIZE_GRIP,
       shadow:       p[:shadow] || SHADOW,
     }
-  end
-
-  def paint(ctx, win, active, host)
-    p = @palette
-    tx, ty, tw, _th = titlebar_rect(win)
-    host.fill_rect(titlebar_rect(win), active ? (p[:title_active] || TITLE_ACTIVE) : (p[:title_inactive] || TITLE_INACTIVE))
-    ctx.set("strokeStyle", p[:title_border] || TITLE_BORDER)
-    ctx.set("lineWidth", 1)
-    ctx.call("beginPath")
-    ctx.call("moveTo", tx,        ty + TITLE_H - 0.5)
-    ctx.call("lineTo", tx + tw,   ty + TITLE_H - 0.5)
-    ctx.call("stroke")
-    ctx.set("font", "12px -apple-system, BlinkMacSystemFont, 'SF Pro Text', 'Helvetica Neue', Helvetica, Arial, sans-serif")
-    ctx.set("textAlign", "center")
-    ctx.set("textBaseline", "middle")
-    ctx.set("fillStyle", active ? (p[:title_text_on] || TITLE_TEXT_ON) : (p[:title_text_off] || TITLE_TEXT_OFF))
-    ctx.call("fillText", win.title, tx + tw / 2, ty + TITLE_H / 2 + 1)
-    ctx.set("textAlign", "left")
-    ctx.set("textBaseline", "alphabetic")
-    draw_traffic_light(ctx, close_rect(win),    CLOSE_RED,  CLOSE_RED_OUT,  active)
-    draw_traffic_light(ctx, minimize_rect(win), MIN_YELLOW, MIN_YELLOW_OUT, active)
-    draw_traffic_light(ctx, maximize_rect(win), MAX_GREEN,  MAX_GREEN_OUT,  active)
-  end
-
-  def paint_frame(ctx, win, active, host)
-    p = @palette
-    rx, ry, rw, rh = resize_rect(win)
-    ctx.set("strokeStyle", p[:resize_grip] || RESIZE_GRIP)
-    ctx.set("lineWidth", 1)
-    ctx.call("beginPath")
-    ctx.call("moveTo", rx + rw, ry + rh * 0.4)
-    ctx.call("lineTo", rx + rw * 0.4, ry + rh)
-    ctx.call("moveTo", rx + rw, ry + rh * 0.75)
-    ctx.call("lineTo", rx + rw * 0.75, ry + rh)
-    ctx.call("stroke")
-    fx, fy, fw, fh = frame_rect(win)
-    shadow = p[:shadow] || SHADOW
-    host.fill_rect([fx + fw,     fy + 1, 1, fh], shadow)
-    host.fill_rect([fx + 1, fy + fh,     fw, 1], shadow)
-    border = active ? (p[:border_active] || BORDER_ACTIVE) : (p[:border_inactive] || BORDER_INACTIVE)
-    host.stroke_rect(frame_rect(win), border, BORDER_W)
   end
 end
 

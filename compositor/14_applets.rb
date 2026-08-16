@@ -147,6 +147,15 @@ class Compositor
     return false unless btn.nil? || btn == 0
     a = applets.at(mx, my)
     return false if a.nil?
+    # A click on the calendar tile's header arrows navigates months instead of
+    # starting a drag (the tile body still drags). Consumes the event either way.
+    if a.kind == "calendar"
+      dir = calendar_header_nav(a, mx, my)
+      unless dir.nil?
+        calendar_nav(dir)
+        return true
+      end
+    end
     @applet_drag = { applet: a, dx: mx - a.x, dy: my - a.y }
     true
   end
@@ -179,28 +188,37 @@ class Compositor
     return nil unless APPLETS
     b = applets
     return nil if b.empty?
-    b.items.each do |a|
-      # Card plate (cheap ctx fill each frame, follows a drag) drawn first so the
-      # transparent-ground widget buffer composites over a solid tile.
-      fill_rect([a.x, a.y, a.w, a.h], APPLET_PLATE)
-      stroke_rect([a.x, a.y, a.w, a.h], APPLET_BORDER, 1)
-      iw = a.w - 2 * APPLET_PAD
-      ih = a.h - 2 * APPLET_PAD
-      dx = a.x + APPLET_PAD
-      dy = a.y + APPLET_PAD
-      sig = applet_sig(a)
-      if a.b64.nil? || a.sig != sig
-        a.b64 = render_applet(a, iw, ih)
-        a.sig = sig
-        a.blitted = false
-      end
-      if a.blitted
-        JS.global.call("wasmboxBlitRGBAOver", @ctx, "", iw, ih, dx, dy, a.key)
-      else
-        JS.global.call("wasmboxBlitRGBAOver", @ctx, a.b64, iw, ih, dx, dy, a.key)
-        a.blitted = true
-      end
+    b.items.each { |a| draw_applet_tile(a) }
+    nil
+  end
+
+  # Paint a single applet tile (plate + cached widget buffer). Extracted from
+  # draw_applets so the dirty-rect compositor (06_core.rb#draw_applets_region)
+  # can repaint only the tiles a damage rect actually touches, clipped, in the
+  # desktop stratum (below the windows). Every ctx op respects the caller's clip,
+  # so painting a tile whose bounds fall outside the current region is a no-op.
+  def draw_applet_tile(a)
+    # Card plate (cheap ctx fill each frame, follows a drag) drawn first so the
+    # transparent-ground widget buffer composites over a solid tile.
+    fill_rect([a.x, a.y, a.w, a.h], APPLET_PLATE)
+    stroke_rect([a.x, a.y, a.w, a.h], APPLET_BORDER, 1)
+    iw = a.w - 2 * APPLET_PAD
+    ih = a.h - 2 * APPLET_PAD
+    dx = a.x + APPLET_PAD
+    dy = a.y + APPLET_PAD
+    sig = applet_sig(a)
+    if a.b64.nil? || a.sig != sig
+      a.b64 = render_applet(a, iw, ih)
+      a.sig = sig
+      a.blitted = false
     end
+    if a.blitted
+      JS.global.call("wasmboxBlitRGBAOver", @ctx, "", iw, ih, dx, dy, a.key)
+    else
+      JS.global.call("wasmboxBlitRGBAOver", @ctx, a.b64, iw, ih, dx, dy, a.key)
+      a.blitted = true
+    end
+    nil
   end
 
   # A content signature that changes exactly when a tile's pixels must: the clock
@@ -212,8 +230,11 @@ class Compositor
       c = clock_now
       "#{c[:h]}:#{c[:m]}:#{c[:s]}|#{c[:year]}-#{c[:month]}-#{c[:day]}"
     when "calendar"
-      c = clock_now
-      "#{c[:year]}-#{c[:month]}-#{c[:day]}"
+      # The VIEWED month + selected day (the widget's navigable state), NOT the
+      # wall clock — so the tile repaints once per month-navigation and stays
+      # idle-quiet under the #88 gate. cal_ensure seeds it from today on first use.
+      cal_ensure
+      "cal:#{@cal_view.sig}"
     when "monitor"
       v = monitor_values
       "cpu#{v[0]}|mem#{v[1]}"
@@ -231,48 +252,103 @@ class Compositor
     end
   end
 
-  # Clock: a big HH:MM:SS line (flex) over a weekday-date line.
+  # Pixel font size for the clock's HH:MM:SS face. Chosen to dominate the tile
+  # like a real clock applet yet stay inside the flex row: the clock tile is
+  # 232x88, so after APPLET_PAD the flex time row is ~ (88 - 16 pad - 20 date) =
+  # 52 px tall — a 34-px face renders large + legible with headroom, and the
+  # probe asserts the painted glyphs stay within the tile bounds. Takes effect
+  # via the toolkit's scalable OpenType face (enable_opentype_text_once); on a
+  # bitmap fallback set_font_size degrades gracefully to the base size.
+  CLOCK_FONT_PX = 34
+
+  # Clock: a BIG HH:MM:SS line (flex, per-label font size) over a weekday-date
+  # line. The time label is enlarged via Widgets.set_font_size so the clock reads
+  # from across the desktop instead of at the toolkit's base text size.
   def render_clock(w, h)
     c = clock_now
     box = Widgets.v_box
     time_str = "#{pad2(c[:h])}:#{pad2(c[:m])}:#{pad2(c[:s])}"
     date_str = "#{WEEKDAYS_FULL[c[:dow]]} #{c[:day]} #{MONTHS[c[:month] - 1]} #{c[:year]}"
-    Widgets.add_flex(box, Widgets.label(time_str), 1)
+    time_lbl = Widgets.label(time_str)
+    Widgets.set_font_size(time_lbl, CLOCK_FONT_PX)
+    Widgets.add_flex(box, time_lbl, 1)
     Widgets.add_fixed(box, Widgets.label(date_str), 20)
     img = Widgets.render(box, w, h)
     Base64.strict_encode64(img["pixels"])
   end
 
-  # Calendar: a month title over a 7x7 grid — weekday headers on row 0, the day
-  # numbers laid out from the month's first weekday, today painted as a filled
-  # Badge so it reads as highlighted.
+  # Calendar: the go-widgets v0.86 Calendar widget — a real month grid (weekday
+  # header + day cells + selected-day highlight) painted by the toolkit, replacing
+  # the hand-assembled Grid-of-Labels-with-a-Badge. The persistent widget handle
+  # (cal_ensure) carries the navigable view, so Render just paints its current
+  # month at the tile size.
   def render_calendar(w, h)
-    c = clock_now
-    outer = Widgets.v_box
-    Widgets.add_fixed(outer, Widgets.label("#{MONTHS[c[:month] - 1]} #{c[:year]}"), 20)
-    grid = Widgets.grid(7, 7)
-    col = 0
-    while col < 7
-      Widgets.attach(grid, Widgets.label(WEEKDAYS[col]), col, 0)
-      col += 1
-    end
-    first = c[:first_dow]
-    dim   = c[:days_in_month]
-    today = c[:day]
-    d = 1
-    while d <= dim
-      idx = first + (d - 1)
-      cell = if d == today
-        Widgets.badge(d.to_s, "#3b82f6", "#ffffff")
-      else
-        Widgets.label(d.to_s)
-      end
-      Widgets.attach(grid, cell, idx % 7, 1 + idx / 7)
-      d += 1
-    end
-    Widgets.add_flex(outer, grid, 1)
-    img = Widgets.render(outer, w, h)
+    cal_ensure
+    img = Widgets.render(@cal_widget, w, h)
     Base64.strict_encode64(img["pixels"])
+  end
+
+  # Pixel geometry of the calendar tile's clickable month-navigation zones: the
+  # top HEADER_H band's left ARROW_W corner steps to the previous month, its right
+  # ARROW_W corner to the next (the toolkit paints its own header arrows there; we
+  # own the hit-testing so a click never has to reach into the widget tree). The
+  # rest of the tile drags the applet as before.
+  CAL_HEADER_H = 24
+  CAL_ARROW_W  = 30
+
+  # The persistent Calendar widget's handle, built lazily from today's date via
+  # the go-widgets binding (Widgets.calendar), with its selection + month-change
+  # callbacks wired. Also seeds @cal_view (05_applets.rb), the pure mirror the
+  # dirty-signature reads. Idempotent: a cheap nil-check after the first call, so
+  # calling it from applet_sig every frame costs nothing once built.
+  def cal_ensure
+    return unless @cal_view.nil?
+    c = clock_now
+    @cal_view   = CalendarView.new(c[:year], c[:month], c[:day])
+    @cal_widget = Widgets.calendar(@cal_view.year, @cal_view.month, @cal_view.selected)
+    # Wire the day-selection + month-change callbacks (fire ids the toolkit
+    # invokes on a day click / a month step). The compositor drives navigation
+    # itself, so these are wired for completeness (and to exercise the binding);
+    # set_selected below keeps the mirror's day in sync with the widget's clamp.
+    Widgets.on_select(@cal_widget, "cal_day")
+    Widgets.on_month_change(@cal_widget, "cal_month")
+    Widgets.set_selected(@cal_widget, @cal_view.selected)
+    nil
+  end
+
+  # Step the calendar applet's month via the bound widget's PrevMonth / NextMonth
+  # (dir "prev" / "next"), keeping the pure @cal_view mirror in lockstep and then
+  # syncing the selected day back from Widgets.selected (the widget's own day
+  # re-clamp on a 31 → 30/28 shrink). Invalidates the tile's render cache + marks
+  # the frame dirty so the new month repaints exactly ONCE. No-op when the flag is
+  # off or the calendar applet is not shown.
+  def calendar_nav(dir)
+    return nil unless APPLETS
+    a = applets.find("calendar")
+    return nil if a.nil?
+    cal_ensure
+    if dir.to_s == "prev"
+      Widgets.prev_month(@cal_widget)
+      @cal_view.prev_month
+    else
+      Widgets.next_month(@cal_widget)
+      @cal_view.next_month
+    end
+    @cal_view.set_selected(Widgets.selected(@cal_widget).to_i)
+    a.invalidate
+    mark_dirty
+    dir.to_s
+  end
+
+  # Which month-navigation zone (if any) a mousedown at (mx, my) fell in for the
+  # calendar applet `a`: "prev" for the header's left corner, "next" for its right
+  # corner, nil elsewhere (the click then starts a drag). Only the top CAL_HEADER_H
+  # band arms navigation, so the body still drags the tile freely.
+  def calendar_header_nav(a, mx, my)
+    return nil unless my >= a.y && my < a.y + CAL_HEADER_H
+    return "prev" if mx >= a.x && mx < a.x + CAL_ARROW_W
+    return "next" if mx >= a.x + a.w - CAL_ARROW_W && mx < a.x + a.w
+    nil
   end
 
   # System monitor: CPU + MEM percentage labels each over a LevelBar. The values
@@ -330,17 +406,18 @@ class Compositor
 end
 
 # ---------------------------------------------------------------------------
-# go-ruby-widgets/widgets notes hit while wiring this (for the toolkit backlog):
-#   * No per-Label font SIZE — the clock's HH:MM:SS cannot be drawn larger than
-#     the date line (the toolkit exposes only a process-global font via
-#     use_opentype_text / use_opentype_text_size). A per-widget text scale (or a
-#     dedicated big-numeral "Clock"/"Gauge" widget) would let the time dominate
-#     the tile the way a real clock applet does.
-#   * No native CALENDAR / month-grid widget — the calendar is hand-assembled
-#     from a Grid of Labels with a Badge for today. A toolkit MonthView (weekday
-#     header + today highlight + optional week numbers) would remove the date
-#     math + the Badge-as-highlight workaround here.
-#   * LevelBar has no label/threshold colouring — the CPU/MEM percentages are a
-#     separate Label above each bar, and a "danger" band (red past 80%) would
-#     need SetKind-style styling the LevelBar binding does not expose yet.
+# go-ruby-widgets v0.86 CLOSED two of the three gaps this file used to carry:
+#   * Per-Label font SIZE — Widgets.set_font_size(label, px) now draws the
+#     clock's HH:MM:SS far larger than the date line (render_clock above),
+#     instead of the process-global text size only.
+#   * Native CALENDAR / month-grid widget — Widgets.calendar(year, month,
+#     selected) + prev_month/next_month/on_select/on_month_change/set_selected/
+#     selected replace the hand-assembled Grid-of-Labels-with-a-Badge; the
+#     compositor drives navigation through the binding (calendar_nav) and the
+#     pure CalendarView (05_applets.rb) mirrors it for the dirty signature.
+# Remaining gap:
+#   * LevelBar caption/threshold colouring is exposed by the v0.86 LevelBar
+#     binding (label + thresholds args), but the monitor tile still uses a plain
+#     bar + a separate Label; a follow-up could fold the CPU/MEM caption + a
+#     red "danger" band past 80% into the LevelBar itself.
 # ---------------------------------------------------------------------------

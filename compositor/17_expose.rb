@@ -297,7 +297,10 @@ class Compositor
   # changes the id list; a resize changes the bounds; nothing else re-renders.
   def expose_paint_sig(cands, sel, ax, ay, aw, ah)
     parts = ["#{ax},#{ay},#{aw},#{ah}", "s#{sel}", "n#{cands.length}"]
-    cands.each { |win| parts << "#{win.id}:#{win.title}" }
+    # Fold each window's live content-seq (alttab_content_seq, 15_alttab.rb) into
+    # the signature so a live (external SAB) tile re-renders when its window
+    # repaints; idle tiles hold their seq and the cached spread is re-presented.
+    cands.each { |win| parts << "#{win.id}:#{win.title}:#{alttab_content_seq(win)}" }
     parts.join("|")
   end
 
@@ -321,21 +324,26 @@ class Compositor
   # cols/rows, the selected index, the SELECTED window's body rect (to confirm a
   # commit focuses exactly that window against __wasmboxFocusedRect) and the JSON
   # of every tile rect (to assert the non-overlapping spread).
+  # sel_live is 1 when the selected tile is a LIVE grabbed framebuffer (external
+  # SAB window) vs a flat placeholder (in-process / dom); the selected tile's
+  # on-screen rect is tiles[index], which the probe samples to assert real
+  # (textured) content.
   def publish_expose_active(n, index, ax, ay, aw, ah)
     sel = expose.selected
     sx = sel.nil? ? -1 : sel.x
     sy = sel.nil? ? -1 : sel.y
     sw = sel.nil? ? 0 : sel.w
     sh = sel.nil? ? 0 : sel.h
+    sel_live = sel && alttab_live?(sel) ? 1 : 0
     tiles = expose_tiles_json(ax, ay, aw, ah, EXPOSE_GAP, n)
     JS.global.call("wasmboxPublishExpose",
-      1, n, expose.cols, expose.rows, index, sx, sy, sw, sh, tiles)
+      1, n, expose.cols, expose.rows, index, sx, sy, sw, sh, tiles, sel_live)
     nil
   end
 
   def publish_expose_inactive
     JS.global.call("wasmboxPublishExpose",
-      0, 0, 0, 0, 0, -1, -1, 0, 0, "[]")
+      0, 0, 0, 0, 0, -1, -1, 0, 0, "[]", 0)
     nil
   end
 end

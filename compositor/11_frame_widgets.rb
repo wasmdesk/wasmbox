@@ -12,8 +12,8 @@
 #   Widgets.render(handle, w, h) -> RGBA bytes -> base64 -> JS
 #   wasmboxBlitRGBAOver -> alpha-composited drawImage AROUND the window body.
 #
-# The chrome spec expresses the SAME colours + geometry the canvas #paint /
-# #paint_frame draw, but the rects are FRAME-LOCAL (see Frame#frame_local) and
+# The chrome spec (Frame#decoration_spec) expresses the chrome's colours +
+# geometry as data, but the rects are FRAME-LOCAL (see Frame#frame_local) and
 # the whole thing is rendered into one per-window buffer that spans the frame
 # extent with a TRANSPARENT body hole. The body itself is untouched — it stays
 # SAB-blitted (external), fill-painted (in-process) or an <iframe> (dom) — and
@@ -37,27 +37,15 @@
 # per-frame cost to a single composite and avoiding the render + base64 +
 # ImageData churn every tick (the Firefox-GC hazard the SAB blit path documents).
 #
-# Gated behind Compositor::FRAME_WIDGETS so the hand-drawn chrome.paint /
-# chrome.paint_frame path in 06_core.rb stays the shippable fallback during the
-# live co-edit (flip to false to revert the paint with zero other changes).
-#
-# Known parity diffs (toolkit-painter, same family as the menu/HUD pilots):
-#   * Title font: the toolkit Label paints the built-in 5x7 bitmap font (~7px
-#     tall, 6px advance) rather than the canvas path's 12px monospace (Openbox)
-#     / 12px system sans (Aqua) — so titles read smaller. Non-ASCII bytes render
-#     as blank advances (the bitmap font table is ASCII-only).
-#   * Traffic-light + close-× / grip strokes are 1px Bresenham lines rather than
-#     the canvas path's anti-aliased arcs / 1.5px strokes — crisper, backend-
-#     portable, visually equivalent at these sizes.
+# The compositor calls Widgets.use_opentype_text on the first frame, so window
+# titles shape with the anti-aliased OpenType face; the traffic-light / close-×
+# / grip strokes are drawn by the toolkit painter (backend-portable, no canvas
+# arc / stroke calls).
 # ---------------------------------------------------------------------------
 require "widgets"
 require "base64"
 
 class Compositor
-  # Master switch for the widgets-painted window frames. `false` falls straight
-  # back to the hand-drawn chrome.paint / chrome.paint_frame path in 06_core.rb.
-  FRAME_WIDGETS = true
-
   # Paint `win`'s decoration through the widgets binding, composited over the
   # already-painted body. Called from draw_window when the flag is on and the
   # window is decorated. `active` is win.focused?.

@@ -84,6 +84,7 @@ async function compositorWorker(page) {
         () => typeof globalThis.__wasmboxExpose === "function" &&
               typeof globalThis.__wasmboxExposeState === "function" &&
               typeof globalThis.__wasmboxSpawnWindow === "function" &&
+              typeof globalThis.__wasmboxSpawnExternalStub === "function" &&
               typeof globalThis.__wasmboxReadRegion === "function" &&
               typeof globalThis.__wasmboxFocusedRect === "function",
       );
@@ -101,6 +102,13 @@ const readRgn  = (cw, r) => cw.evaluate(
 
 const showR = (r) => r ? `[${r.x},${r.y} ${r.w}x${r.h}]` : "null";
 async function settle(page, ms) { await page.waitForTimeout(ms); }
+// A centred sub-rect (fraction `frac` of each side) of a tile [x,y,w,h] — sampled
+// to stay clear of the tile's caption strip + selection border.
+function centerRegion(t, frac) {
+  const rw = Math.max(6, Math.floor(t[2] * frac));
+  const rh = Math.max(6, Math.floor(t[3] * frac));
+  return { x: Math.floor(t[0] + (t[2] - rw) / 2), y: Math.floor(t[1] + (t[3] - rh) / 2), w: rw, h: rh };
+}
 
 // Two axis-aligned rects overlap iff they intersect on BOTH axes.
 function overlaps(a, b) {
@@ -315,6 +323,58 @@ try {
   } else {
     ok(`cancel left focus unchanged ${showR(postCancel)}`);
   }
+
+  // 7. LIVE THUMBNAILS: an EXTERNAL (SAB) window's Exposé tile shows its real
+  // downscaled framebuffer, not a flat placeholder. Spawn a deterministic
+  // external stub (bold gradient SAB), open the spread, and walk the tiles: the
+  // tile whose selection flags sel_live=1 must be textured (its grabbed content),
+  // while an in-process tile flags sel_live=0 and is flat — the contrast in one run.
+  await drive(cw, "cancel");
+  await settle(page, 150);
+  await cw.evaluate(() => globalThis.__wasmboxSpawnExternalStub("live-ext", 240, 180));
+  await settle(page, 700); // register, composite + blit at least one frame
+
+  const extFocus = await focusOf(cw);
+  if (!extFocus || extFocus.x < 0 || extFocus.w <= 0) {
+    fail(`external stub did not focus: ${showR(extFocus)}`);
+  } else {
+    ok(`external stub window focused ${showR(extFocus)}`);
+  }
+
+  await drive(cw, "open");
+  await settle(page, 250);
+  const sOpen = await stateOf(cw);
+  if (sOpen.active !== 1 || (sOpen.tiles || []).length < 2) {
+    fail(`open should raise the spread for the live-thumbnail test: ${JSON.stringify(sOpen)}`);
+    throw new Error("live open failed");
+  }
+  // Walk every tile via select:<i>, classifying by the published sel_live flag +
+  // the tile's pixel variance. Collect one live tile and one placeholder tile.
+  let liveTile = null, liveVar = null, placeTile = null, placeVar = null;
+  for (let i = 0; i < sOpen.count; i++) {
+    await drive(cw, `select:${i}`);
+    await settle(page, 100);
+    const st = await stateOf(cw);
+    const rgn = await readRgn(cw, centerRegion(st.tiles[i], 0.5));
+    if (st.sel_live === 1 && !liveTile) { liveTile = i; liveVar = rgn; }
+    if (st.sel_live === 0 && !placeTile) { placeTile = i; placeVar = rgn; }
+  }
+  if (liveTile === null) {
+    fail("no tile flagged live (sel_live=1) — the external stub's tile should be live");
+  } else if (liveVar && liveVar.variance > 40) {
+    ok(`live tile #${liveTile} shows real content (textured, variance=${liveVar.variance}), not a flat placeholder`);
+  } else {
+    fail(`live tile #${liveTile} is not textured: ${JSON.stringify(liveVar)}`);
+  }
+  if (placeTile === null) {
+    fail("no in-process (placeholder) tile found (sel_live=0)");
+  } else if (liveVar && placeVar && placeVar.variance < liveVar.variance) {
+    ok(`placeholder tile #${placeTile} is flat (variance=${placeVar.variance}) vs live tile (variance=${liveVar.variance}); sel_live=0`);
+  } else {
+    fail(`placeholder tile not clearly flatter than live: placeholder=${JSON.stringify(placeVar)} live=${JSON.stringify(liveVar)}`);
+  }
+  await drive(cw, "cancel");
+  await settle(page, 200);
 
   // Client-asset load races (a spawned client's .wasm not yet served) are
   // unrelated to the spread under test — the compositor itself booted fine.
