@@ -1480,13 +1480,11 @@ class Compositor
   #
   # The toolkit's active font is a process-global, so this flips it exactly
   # once, on the first frame — before any widgets paint path runs (draw_desktop
-  # is the first) — and only when at least one widgets surface is enabled, so
-  # the opt-in is gated consistently with the per-surface *_WIDGETS flags. If
-  # every widgets path is off, the bitmap default is left untouched.
+  # is the first) — so every surface (desktop, frames, menu, HUD) shapes its
+  # text with the anti-aliased OpenType face instead of the compiled-in bitmap.
   def enable_opentype_text_once
     return if @opentype_text
     @opentype_text = true
-    return unless MENU_WIDGETS || HUD_WIDGETS || DESKTOP_WIDGETS || FRAME_WIDGETS
     require "widgets"
     Widgets.use_opentype_text
   end
@@ -1886,41 +1884,14 @@ class Compositor
     nil
   end
 
-  # Repaint the desktop background inside one damage rect. With DESKTOP_WIDGETS
-  # the backdrop is a cached full-canvas RGBA buffer presented via putImageData,
-  # which IGNORES the ctx clip — so we re-present only the rect via the
-  # dirty-rect blit helper (the first frame is always a full composite, so the
-  # "desktop" buffer is populated before any region frame). The hand-drawn
-  # fallback uses fill + grid strokes, which DO respect the clip, so only the
-  # grid lines crossing the rect are stroked.
+  # Repaint the desktop background inside one damage rect. The backdrop is a
+  # cached full-canvas RGBA buffer (see 10_desktop_widgets.rb) presented via
+  # putImageData, which IGNORES the ctx clip — so we re-present only the rect via
+  # the dirty-rect blit helper (the first frame is always a full composite, so
+  # the "desktop" buffer is populated before any region frame).
   def draw_desktop_region(r)
-    if DESKTOP_WIDGETS
-      JS.global.call("wasmboxBlitRGBARegion", @ctx, @width, @height, 0, 0,
-                     "desktop", r[:x], r[:y], r[:w], r[:h])
-      return nil
-    end
-    fill_rect([r[:x], r[:y], r[:w], r[:h]], Theme::DESKTOP)
-    @ctx.set("strokeStyle", Theme::DESKTOP_GRID)
-    @ctx.set("lineWidth", 1)
-    step = 40
-    x0 = r[:x]; x1 = r[:x] + r[:w]
-    y0 = r[:y]; y1 = r[:y] + r[:h]
-    gx = (x0 / step) * step
-    while gx <= x1
-      @ctx.call("beginPath")
-      @ctx.call("moveTo", gx + 0.5, y0)
-      @ctx.call("lineTo", gx + 0.5, y1)
-      @ctx.call("stroke")
-      gx += step
-    end
-    gy = (y0 / step) * step
-    while gy <= y1
-      @ctx.call("beginPath")
-      @ctx.call("moveTo", x0, gy + 0.5)
-      @ctx.call("lineTo", x1, gy + 0.5)
-      @ctx.call("stroke")
-      gy += step
-    end
+    JS.global.call("wasmboxBlitRGBARegion", @ctx, @width, @height, 0, 0,
+                   "desktop", r[:x], r[:y], r[:w], r[:h])
     nil
   end
 
@@ -1987,44 +1958,12 @@ class Compositor
     @ctx.call("strokeRect", x + 0.5, y + 0.5, w - 1, h - 1)
   end
 
-  def text(str, x, y, colour, size = 12)
-    @ctx.set("fillStyle", colour)
-    @ctx.set("font", "#{size}px ui-monospace, Menlo, monospace")
-    @ctx.call("fillText", str, x, y)
-  end
-
+  # Paint the desktop background (fill + grid, or a wallpaper) through the
+  # go-widgets binding — see draw_desktop_widgets in 10_desktop_widgets.rb,
+  # rendered ONCE and cached (re-rendered only on a resize / palette / wallpaper
+  # change), presented via putImageData.
   def draw_desktop
-    # When Compositor::DESKTOP_WIDGETS is on (see 10_desktop_widgets.rb), paint
-    # the desktop background (fill + grid) through the go-widgets binding
-    # (Widgets.backdrop -> render -> RGBA -> putImageData), rendered ONCE and
-    # cached (re-rendered only on a resize / palette change), instead of the
-    # raw-ctx fill + per-frame grid-stroke loop below. The flag keeps this
-    # hand-drawn path as the shippable fallback during the live co-edit.
-    if DESKTOP_WIDGETS
-      draw_desktop_widgets
-      return
-    end
-    fill_rect([0, 0, @width, @height], Theme::DESKTOP)
-    # A faint grid so window motion reads clearly.
-    @ctx.set("strokeStyle", Theme::DESKTOP_GRID)
-    @ctx.set("lineWidth", 1)
-    step = 40
-    gx = 0
-    while gx < @width
-      @ctx.call("beginPath")
-      @ctx.call("moveTo", gx + 0.5, 0)
-      @ctx.call("lineTo", gx + 0.5, @height)
-      @ctx.call("stroke")
-      gx += step
-    end
-    gy = 0
-    while gy < @height
-      @ctx.call("beginPath")
-      @ctx.call("moveTo", 0, gy + 0.5)
-      @ctx.call("lineTo", @width, gy + 0.5)
-      @ctx.call("stroke")
-      gy += step
-    end
+    draw_desktop_widgets
   end
 
   def draw_window(win)
@@ -2039,39 +1978,17 @@ class Compositor
     end
 
     active = win.focused?
-    chrome = Frame.current
 
-    # WIDGETS paint path (2026-08-02): when Compositor::FRAME_WIDGETS is on (see
-    # 11_frame_widgets.rb), paint the whole decoration (titlebar + buttons +
-    # border + shadow + grip) through the go-widgets binding into one per-window
-    # buffer and composite it OVER the body (source-over), instead of the
-    # hand-drawn chrome.paint / chrome.paint_frame below. The body is painted
-    # FIRST so the decoration's transparent body hole lets it show through and
-    # the border + grip land on top of its edges. Hit-testing (Window#*_rect) is
-    # unchanged, so the window behaves identically. The flag keeps the
-    # hand-drawn path below as the shippable fallback during the live co-edit.
-    if FRAME_WIDGETS
-      paint_window_body(win) unless win.shaded?
-      draw_window_frame_widgets(win, active)
-      return
-    end
-
-    # Chrome-owned titlebar + buttons. The current chrome handles all paint
-    # ops for the bar (background, hairline, title text, close/min/max
-    # glyphs). Both Openbox and Aqua chromes implement this method.
-    chrome.paint(@ctx, win, active, self)
-
-    # Shaded ("rolled up"): only the titlebar + its buttons are drawn — no body,
-    # no resize grip, no border. The body area shows whatever sits behind the
-    # window.
-    return if win.shaded?
-
-    paint_window_body(win)
-
-    # Chrome-owned frame chrome: resize grip + 1px border (Openbox), plus
-    # the faked 1px drop shadow + slightly heavier border on Aqua. Painted
-    # AFTER the body so it lands on top.
-    chrome.paint_frame(@ctx, win, active, self)
+    # Paint the whole decoration (titlebar + buttons + border + shadow + grip)
+    # through the go-widgets binding (chrome.decoration_spec -> Widgets.decoration
+    # -> render -> RGBA) into one per-window buffer and composite it OVER the body
+    # (source-over) — see draw_window_frame_widgets in 11_frame_widgets.rb. The
+    # body is painted FIRST so the decoration's transparent body hole lets it show
+    # through and the border + grip land on top of its edges. Hit-testing
+    # (Window#*_rect) stays the single source of truth, so paint + hit can never
+    # drift. A shaded ("rolled up") window paints only its titlebar — no body.
+    paint_window_body(win) unless win.shaded?
+    draw_window_frame_widgets(win, active)
   end
 
   # Paint a decorated window's client body. In-process windows paint a solid
@@ -2123,79 +2040,19 @@ class Compositor
     win.clear_damage
   end
 
-  # Draw the open menu (and its open submenu, if any) onto the canvas. Both
-  # use the Theme::MENU_* palette: MENU_BG fill, MENU_BORDER 1-px frame,
-  # MENU_TEXT label ink, and MENU_HILITE band for the hovered row.
+  # Draw the open menu (and its open submenu, if any) through the go-widgets
+  # `require "widgets"` binding (render -> RGBA -> putImageData) — see
+  # draw_menu_widgets in 08_menu_widgets.rb. Only the PAINT lives there; the Ruby
+  # hit-testing (menu_resolve / handle_menu_click / handle_menu_hover) stays the
+  # single source of truth, so the menu is clickable exactly as it paints.
   def draw_menu
-    # PILOT (2026-08-02): when Compositor::MENU_WIDGETS is on (see
-    # 08_menu_widgets.rb), paint the menu through the go-widgets `require
-    # "widgets"` binding (render -> RGBA -> putImageData) instead of
-    # hand-drawing it on the canvas below. Only the PAINT changes — the Ruby
-    # hit-testing (menu_resolve / handle_menu_click / handle_menu_hover) is
-    # untouched, so the menu stays clickable exactly as before. The flag keeps
-    # the hand-drawn draw_menu_panel path below as the shippable fallback.
-    if MENU_WIDGETS
-      draw_menu_widgets
-      return
-    end
-    state = @menu
-    draw_menu_panel(state[:menu], state[:x], state[:y], state[:hover],
-                    state[:submenu_idx])
-    if state[:submenu]
-      draw_menu_panel(state[:submenu], state[:submenu_x], state[:submenu_y],
-                      state[:submenu_hover], -1)
-    end
+    draw_menu_widgets
   end
 
-  # Render a single menu panel at (x, y) with `hover` highlighted (-1 = no
-  # highlight) and `open_sub_idx` showing the entry whose submenu is open
-  # (drawn highlighted too, so the user can read the parent path at a glance).
-  def draw_menu_panel(menu, x, y, hover, open_sub_idx)
-    h = menu.height
-    fill_rect([x, y, Menu::WIDTH, h], Theme::MENU_BG)
-    stroke_rect([x, y, Menu::WIDTH, h], Theme::MENU_BORDER, 1)
-    menu.each_row(y) do |entry, row_y, row_h, i|
-      if entry[:separator]
-        # A thin divider centered vertically in its SEP_H band — same colour
-        # as the frame so it reads as a hairline. We inset by Menu::PAD_X on
-        # each side so the line never touches the menu's vertical border.
-        mid = row_y + row_h / 2
-        @ctx.set("strokeStyle", Theme::MENU_BORDER)
-        @ctx.set("lineWidth", 1)
-        @ctx.call("beginPath")
-        @ctx.call("moveTo", x + Menu::PAD_X,                 mid + 0.5)
-        @ctx.call("lineTo", x + Menu::WIDTH - Menu::PAD_X,   mid + 0.5)
-        @ctx.call("stroke")
-        next
-      end
-      # Highlight the hovered row OR the row whose submenu is currently open.
-      if i == hover || i == open_sub_idx
-        fill_rect([x + 1, row_y, Menu::WIDTH - 2, row_h], Theme::MENU_HILITE)
-      end
-      text(entry[:label].to_s, x + Menu::PAD_X, row_y + row_h - 8, Theme::MENU_TEXT)
-      if entry[:submenu]
-        # Right-aligned chevron — render with the same MENU_TEXT colour as
-        # the label so it reads cleanly on both the bg and the hilite band.
-        text(">", x + Menu::WIDTH - Menu::PAD_X - 6, row_y + row_h - 8, Theme::MENU_TEXT)
-      end
-    end
-  end
-
+  # Paint the status HUD through the go-widgets binding (render -> RGBA ->
+  # alpha-composited blit) — see draw_hud_widgets in 09_hud_widgets.rb.
   def draw_hud
-    # When Compositor::HUD_WIDGETS is on (see 09_hud_widgets.rb), paint the HUD
-    # through the go-widgets binding (render -> RGBA -> alpha-composited blit)
-    # instead of the raw-ctx fillText below. The flag keeps this hand-drawn path
-    # as the shippable fallback during the live co-edit.
-    if HUD_WIDGETS
-      draw_hud_widgets
-      return
-    end
-    n = @wm.windows.length
-    # @rendered_frames counts COMPOSITED frames (not every rAF tick): with the
-    # dirty-rect gate an idle desktop stops compositing, so the counter — and the
-    # fps reading — hold steady, the honest picture of the work actually done.
-    line = "rbgo compositor — #{n} window#{n == 1 ? '' : 's'} — #{'%.0f' % @fps} fps — frame #{@rendered_frames}"
-    text(line, 10, @height - 12, Theme::HUD_TEXT, 12)
+    draw_hud_widgets
   end
 end
 
