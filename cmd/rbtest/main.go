@@ -2266,5 +2266,102 @@ assert(sb[1] + sb[3] >= frct[1] + frct[3], "sprite_bounds bottom covers frame bo
 # Reset to openbox so downstream state is stable.
 FrameRegistry.select("openbox")
 
+# ---- A11yTree: ARIA projection of the window stack --------------------
+# Stand-in windows built directly so focus / minimize / title are set precisely
+# (the model takes any object answering id/title/role/focused?/minimized?/x/y/w/h).
+aw1 = Window.new(1, "xterm",  40, 40, 500, 320, "#000", "window")
+aw2 = Window.new(2, "editor", 80, 80, 400, 300, "#000", "window")
+aw2.focused = true
+awlist = [aw1, aw2]
+
+# active_id is the focused window's id; nil when nothing is focused.
+assert_eq(A11yTree.active_id(awlist), 2, "active_id is the focused window")
+assert(A11yTree.active_id([aw1]).nil?, "active_id nil when nothing focused")
+
+# build: application root + one node per window, stack order preserved.
+tree = A11yTree.build(awlist)
+assert_eq(tree[:role], "application", "root role is application")
+assert_eq(tree[:label], "wasmbox desktop", "root default label")
+assert_eq(tree[:active_id], 2, "root active_id follows focus")
+assert_eq(tree[:nodes].length, 2, "one node per window")
+assert_eq(tree[:nodes][0][:id], 1, "node order preserved (bottom-to-top)")
+assert_eq(tree[:nodes][1][:id], 2, "second node is the focused window")
+assert_eq(A11yTree.build([aw1], "desk")[:label], "desk", "custom root label honoured")
+
+# window_node fields + geometry.
+n1 = tree[:nodes][0]
+assert_eq(n1[:role], "window", "window node role")
+assert_eq(n1[:label], "xterm", "window node label is the title")
+assert_eq(n1[:focused], false, "unfocused window node not focused")
+assert_eq(n1[:minimized], false, "live window node not minimized")
+assert_eq(n1[:x], 40, "node carries x")
+assert_eq(n1[:y], 40, "node carries y")
+assert_eq(n1[:w], 500, "node carries w")
+assert_eq(n1[:h], 320, "node carries h")
+assert_eq(tree[:nodes][1][:focused], true, "focused window node is focused")
+
+# window_label: title, with a blank-title fallback so no node is nameless.
+blank = Window.new(3, "", 0, 0, 10, 10, "#000", "window")
+assert_eq(A11yTree.window_label(blank), "(untitled)", "blank title -> (untitled)")
+assert_eq(A11yTree.window_label(aw1), "xterm", "non-blank title kept")
+
+# window_actions: a LIVE window offers focus / minimize / close, in that order.
+acts = A11yTree.window_actions(aw1, "xterm")
+assert_eq(acts.length, 3, "live window has 3 actions")
+assert_eq(acts[0][:name], "focus", "first action is focus")
+assert_eq(acts[0][:label], "Activate xterm", "focus action label")
+assert_eq(acts[1][:name], "minimize", "live window offers minimize")
+assert_eq(acts[1][:label], "Minimize xterm", "minimize action label")
+assert_eq(acts[2][:name], "close", "last action is close")
+assert_eq(acts[2][:label], "Close xterm", "close action label")
+
+# a MINIMIZED window offers restore in place of minimize; its node is flagged.
+mini = Window.new(4, "files", 0, 0, 10, 10, "#000", "window")
+mini.minimized = true
+macts = A11yTree.window_actions(mini, "files")
+assert_eq(macts[1][:name], "restore", "minimized window offers restore")
+assert_eq(macts[1][:label], "Restore files", "restore action label")
+assert_eq(A11yTree.window_node(mini)[:minimized], true, "minimized node flagged")
+
+# signature: sensitive to focus / minimize / title, INSENSITIVE to geometry
+# (a drag or resize moves pixels but changes nothing a screen reader announces).
+sig0 = A11yTree.signature(awlist)
+aw1.move_to(aw1.x + 100, aw1.y + 100)
+assert_eq(A11yTree.signature(awlist), sig0, "signature ignores geometry")
+aw1.title = "xterm-2"
+assert(A11yTree.signature(awlist) != sig0, "signature changes on retitle")
+aw1.title = "xterm"
+assert_eq(A11yTree.signature(awlist), sig0, "signature restored when title restored")
+aw2.focused = false
+assert(A11yTree.signature(awlist) != sig0, "signature changes on focus move")
+aw2.focused = true
+aw1.minimized = true
+assert(A11yTree.signature(awlist) != sig0, "signature changes on minimize")
+aw1.minimized = false
+assert_eq(A11yTree.signature(awlist), sig0, "signature returns to baseline")
+
+# to_json: deterministic JSON with booleans, an active_id + null active_id.
+j = A11yTree.to_json(A11yTree.build(awlist))
+assert(j.include?('"role":"application"'), "json has application root")
+assert(j.include?('"active_id":2'), "json carries active_id")
+assert(j.include?('"label":"xterm"'), "json carries a window label")
+assert(j.include?('"name":"focus"'), "json carries an action name")
+assert(j.include?('"minimized":false'), "json serializes booleans")
+assert(j.include?('"w":500'), "json carries geometry")
+jn = A11yTree.to_json(A11yTree.build([aw1]))
+assert(jn.include?('"active_id":null'), "json null active_id when nothing focused")
+
+# esc: quotes, backslashes + the C0 controls that would break a JSON string.
+assert_eq(A11yTree.esc("plain"), "plain", "esc passes plain text")
+assert_eq(A11yTree.esc("a\"b"), "a\\\"b", "esc escapes double-quote")
+assert_eq(A11yTree.esc("a\\b"), "a\\\\b", "esc escapes backslash")
+assert_eq(A11yTree.esc("a\nb"), "a\\nb", "esc escapes newline")
+assert_eq(A11yTree.esc("a\tb\rc"), "a\\tb\\rc", "esc escapes tab + CR")
+# a title needing escaping serializes safely.
+qw = Window.new(5, "a\"q", 0, 0, 10, 10, "#000", "window")
+assert(A11yTree.to_json(A11yTree.build([qw])).include?('a\\"q'), "quoted title escaped in json")
+
+puts "rbtest: ran all A11y model assertions"
+
 puts "rbtest: ran all pure-WM assertions"
 `

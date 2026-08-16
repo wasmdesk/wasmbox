@@ -678,7 +678,7 @@ tasks:
     cmds:
       - rm -rf "{{.SITE_DIR}}" && mkdir -p "{{.SITE_DIR}}"
       # Desktop shell + the worker/loader/bridge + the baked compositor wasm.
-      - cp index.html coi-serviceworker.js bridge.js boot-config.js compositor.worker.js ociapps-loader.js wasm_exec.js wasmbox.wasm "{{.SITE_DIR}}/"
+      - cp index.html coi-serviceworker.js bridge.js a11y-bridge.js boot-config.js compositor.worker.js ociapps-loader.js wasm_exec.js wasmbox.wasm "{{.SITE_DIR}}/"
       # Ship the full client tree so EVERY launch resolves same-origin, exactly
       # like the dev server: the root-menu / dock spawn clients by static path
       # (clients/<app>/worker.js) or DOM path, NOT via the OCI mirror, so those

@@ -216,6 +216,10 @@ jobs:
         working-directory: test
         run: node probe-expose.mjs
 
+      - name: Run headless accessibility probe (ARIA tree read + screen-reader-driven focus/minimize/restore/close round-trip)
+        working-directory: test
+        run: node probe-a11y.mjs
+
       - name: Run headless desktop-background probe (widgets Backdrop fill + grid, cached, z-order)
         working-directory: test
         run: node probe-desktop.mjs
@@ -364,7 +368,7 @@ jobs:
         run: |
           SITE=/tmp/wasmbox-site
           rm -rf "$SITE" && mkdir -p "$SITE/clients/sdk"
-          cp index.html coi-serviceworker.js bridge.js boot-config.js \
+          cp index.html coi-serviceworker.js bridge.js a11y-bridge.js boot-config.js \
              compositor.worker.js ociapps-loader.js wasm_exec.js wasmbox.wasm "$SITE/"
           cp clients/sdk/sdk.js "$SITE/clients/sdk/sdk.js"
           touch "$SITE/.nojekyll"
@@ -454,7 +458,7 @@ jobs:
             -pak /tmp/lite/id1/pak0.pak -music-dir /tmp/empty-music -out /tmp/oci-quake-assets
           SITE=/tmp/quake-site
           rm -rf "$SITE" && mkdir -p "$SITE"
-          cp index.html coi-serviceworker.js bridge.js boot-config.js compositor.worker.js \
+          cp index.html coi-serviceworker.js bridge.js a11y-bridge.js boot-config.js compositor.worker.js \
              ociapps-loader.js wasm_exec.js wasmbox.wasm "$SITE/"
           cp -R clients "$SITE/clients"
           touch "$SITE/.nojekyll"

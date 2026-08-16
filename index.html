@@ -110,6 +110,11 @@
 
 <script src="bridge.js"></script>
 <script src="boot-config.js"></script>
+<!-- Accessibility bridge: maintains a live ARIA element tree mirroring the
+     compositor's window stack so screen readers (VoiceOver / Orca / NVDA) can
+     read + drive the canvas-painted desktop. Self-contained; wired to the
+     worker below via WASMBOX_A11Y.attachWorker. -->
+<script src="a11y-bridge.js"></script>
 <script>
 // ---------------------------------------------------------------------------
 // Step C bootstrap. The main thread is a thin shell:
@@ -252,6 +257,12 @@ try {
 const pageFrame = new URLSearchParams(self.location.search).get("frame");
 const workerURL = pageFrame ? "compositor.worker.js?frame=" + encodeURIComponent(pageFrame) : "compositor.worker.js";
 const worker = new Worker(workerURL, { type: "classic" });
+
+// Wire the accessibility bridge to the compositor worker: it listens for
+// `a11y_update` snapshots (worker->main) and posts `a11y_action` back when a
+// screen reader activates a window control. Guarded so a build that omits
+// a11y-bridge.js still boots.
+if (globalThis.WASMBOX_A11Y) globalThis.WASMBOX_A11Y.attachWorker(worker);
 
 // Boot the compositor: send the canvas + the initial viewport + the current
 // localStorage snapshot so restore_layout sees what survived the reload.

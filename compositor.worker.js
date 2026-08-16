@@ -1544,3 +1544,46 @@ function autoSpawnIfPresent(workerUrl, probeUrl) {
     .then((r) => { if (r.ok) globalThis.wasmboxSpawnExternal(workerUrl); })
     .catch(() => {});
 }
+
+// --- accessibility (a11y) ARIA bridge -------------------------------------
+// The compositor renders the whole desktop into an OffscreenCanvas: a screen
+// reader (VoiceOver / Orca / NVDA) sees NOTHING there — a canvas exposes no
+// accessible text. So Ruby (18_a11y.rb) walks its window stack and, whenever the
+// tree changes, hands us a JSON ARIA snapshot via JS.global.call; we post it to
+// the main thread, where a11y-bridge.js reconciles it into a live ARIA element
+// tree the accessibility API reads. This is the browser twin of go-widgets'
+// AT-SPI bridge — the tree just crosses postMessage instead of D-Bus.
+//
+// Message shapes (plain string literals, NOT bridge.js constants, so this stays
+// a self-contained append that never edits the frozen WASMBOX_BRIDGE object or
+// its cross-file consistency test):
+//   compositor -> main : { type: "a11y_update", tree: <json string> }
+//   main -> compositor : { type: "a11y_action", detail: { action, id } }
+//
+// wasmboxA11yPublish(json): Ruby -> main. Ship the ARIA tree JSON to the page.
+globalThis.wasmboxA11yPublish = function (json) {
+  self.postMessage({ type: "a11y_update", tree: String(json) });
+};
+
+// wasmboxA11yAction(detail): main -> Ruby. A screen reader activated a control
+// (Close / Minimize / Restore / Activate a window). Inject it into the running
+// compositor by dispatching on the Ruby event bus, exactly like the spawn /
+// notify / tray hooks — the compositor's a11y_dispatch then runs the same WM
+// path a mouse click would. Retries until the bus element exists (it is created
+// at boot), so an action that arrives before boot completes is not dropped.
+globalThis.wasmboxA11yAction = function (detail) {
+  function dispatch() {
+    const bus = fakeDocument.getElementById("__wasmbox_bus");
+    if (!bus) { setTimeout(dispatch, 16); return; }
+    bus.dispatchEvent(new CustomEvent("wasmbox-a11y-action", { detail: detail || {} }));
+  }
+  dispatch();
+};
+
+// Separate message listener (added, not merged into the M2C switch above) so
+// this whole feature is an append: it ignores every message type but its own.
+self.addEventListener("message", (ev) => {
+  const m = ev.data;
+  if (!m || m.type !== "a11y_action") return;
+  globalThis.wasmboxA11yAction(m.detail || {});
+});
