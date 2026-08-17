@@ -84,7 +84,12 @@ function btnScreen(geo, btn) {
   return {
     cx: dockX + btn.x + Math.floor(btn.w / 2),
     cy: dockY + btn.y + Math.floor(btn.h / 2),
-    topY: dockY + btn.y + 1, // bevel top-stroke row
+    // Bottom bevel-stroke row: with toolkit.BevelDockStyle a focused (Active)
+    // task button draws a SUNKEN bevel — bright bottom stroke — while an
+    // unfocused one draws a RAISED bevel — dark bottom stroke. (The top stroke
+    // is covered by the toolbar's 1px border, so the focus cue is read at the
+    // bottom edge.)
+    bevelY: dockY + btn.y + btn.h - 1,
   };
 }
 const pix = (png, x, y) => { const i = ((y | 0) * png.width + (x | 0)) * 4; return [png.data[i], png.data[i + 1], png.data[i + 2]]; };
@@ -123,9 +128,9 @@ try {
     if (f && u) {
       const png = await shot(page);
       const fs = btnScreen(geo, f), us = btnScreen(geo, u);
-      const fp = pix(png, fs.cx, fs.topY), up = pix(png, us.cx, us.topY);
+      const fp = pix(png, fs.cx, fs.bevelY), up = pix(png, us.cx, us.bevelY);
       const d = Math.abs(fp[0] - up[0]) + Math.abs(fp[1] - up[1]) + Math.abs(fp[2] - up[2]);
-      if (d > 60) ok(`focus indicator visible: focused top-stroke (${fp}) vs unfocused (${up}), Δ${d}`);
+      if (d > 60) ok(`focus indicator visible: focused bevel-stroke (${fp}) vs unfocused (${up}), Δ${d}`);
       else fail(`focused vs unfocused buttons look identical: (${fp}) vs (${up}), Δ${d}`);
     }
   }

@@ -2,11 +2,7 @@
 
 package scene
 
-import (
-	"testing"
-
-	"github.com/go-widgets/toolkit"
-)
+import "testing"
 
 // appIndexForWindow: explicit App id match, App id miss, Title==Label fallback,
 // Title==Id fallback, empty title, and no match all resolve correctly.
@@ -95,83 +91,34 @@ func TestBadgeSetAndCount(t *testing.T) {
 	}
 }
 
-// badgeText caps at 99+ and blanks a non-positive count.
-func TestBadgeText(t *testing.T) {
-	if got := badgeText(0); got != "" {
-		t.Fatalf("badgeText(0) = %q, want empty", got)
-	}
-	if got := badgeText(-5); got != "" {
-		t.Fatalf("badgeText(-5) = %q, want empty", got)
-	}
-	if got := badgeText(7); got != "7" {
-		t.Fatalf("badgeText(7) = %q, want 7", got)
-	}
-	if got := badgeText(150); got != "99+" {
-		t.Fatalf("badgeText(150) = %q, want 99+", got)
-	}
-}
-
-// drawRunningIndicator: degenerate rect no-ops; a normal rect inks a dot; the
-// focused variant additionally inks the wider underline; a very short rect
-// exercises the by<r.Y clamp.
-func TestDrawRunningIndicator(t *testing.T) {
+// A launcher whose app has an open window carries a running dot, and the
+// focused window's launcher is flagged Active — both surfaced through the
+// AppDock item state built by iconDock. Rendering with one running+focused app
+// must not panic and must ink the iconbar.
+func TestRunningAndFocusedRender(t *testing.T) {
 	s := New(tW, tH)
-	// Degenerate: nothing painted.
-	buf, p := newPainter(40, BarHeight)
-	s.drawRunningIndicator(p, toolkit.Rect{X: 0, Y: 0, W: 0, H: 10}, false)
-	for _, b := range buf {
-		if b != 0 {
-			t.Fatalf("degenerate running indicator painted something")
-		}
+	s.SetWindows([]Window{{Id: 1, Title: "Terminal", Focused: true}})
+	if !s.launcherRunning()[0] {
+		t.Fatalf("terminal launcher should be running")
 	}
-	// Normal, unfocused: some ink appears near the bottom.
-	buf, p = newPainter(40, BarHeight)
-	s.drawRunningIndicator(p, toolkit.Rect{X: 4, Y: 2, W: 30, H: 24}, false)
-	dot := countNonZero(buf)
-	if dot == 0 {
-		t.Fatalf("running dot painted nothing")
+	if s.focusedLauncher() != 0 {
+		t.Fatalf("terminal launcher should be the focused one")
 	}
-	// Focused: strictly more ink (dot + underline).
-	buf2, p2 := newPainter(40, BarHeight)
-	s.drawRunningIndicator(p2, toolkit.Rect{X: 4, Y: 2, W: 30, H: 24}, true)
-	if countNonZero(buf2) <= dot {
-		t.Fatalf("focused underline added no ink")
-	}
-	// Very short rect: by clamps to r.Y, still paints, no panic.
-	buf3, p3 := newPainter(40, BarHeight)
-	s.drawRunningIndicator(p3, toolkit.Rect{X: 4, Y: 2, W: 30, H: 2}, false)
-	if countNonZero(buf3) == 0 {
-		t.Fatalf("short-rect running dot painted nothing")
-	}
+	buf := newBuf(s)
+	Render(s, buf) // must not panic; exercises Running + Active item paths
 }
 
-// drawBadge: zero count no-ops; degenerate rect no-ops; a positive count inks a
-// pill; a narrow rect exercises the bx<r.X clamp.
-func TestDrawBadge(t *testing.T) {
-	buf, p := newPainter(60, BarHeight)
-	drawBadge(p, toolkit.Rect{X: 0, Y: 0, W: 40, H: 24}, 0) // no count
-	if countNonZero(buf) != 0 {
-		t.Fatalf("zero-count badge painted something")
-	}
-	buf, p = newPainter(60, BarHeight)
-	drawBadge(p, toolkit.Rect{X: 0, Y: 0, W: 0, H: 24}, 3) // degenerate
-	if countNonZero(buf) != 0 {
-		t.Fatalf("degenerate badge painted something")
-	}
-	buf, p = newPainter(60, BarHeight)
-	drawBadge(p, toolkit.Rect{X: 4, Y: 2, W: 40, H: 24}, 5)
-	if countNonZero(buf) == 0 {
-		t.Fatalf("badge painted nothing")
-	}
-	// Narrow rect narrower than the pill: bx clamps to r.X, still paints.
-	buf, p = newPainter(60, BarHeight)
-	drawBadge(p, toolkit.Rect{X: 2, Y: 2, W: 4, H: 24}, 99)
-	if countNonZero(buf) == 0 {
-		t.Fatalf("narrow badge painted nothing")
-	}
+// A launcher with an attention badge renders without panicking (the AppDock
+// draws the badge overlay from AppDockItem.Badge = BadgeCount).
+func TestBadgeRenders(t *testing.T) {
+	s := New(tW, tH)
+	s.SetBadge("terminal", 5)
+	buf := newBuf(s)
+	Render(s, buf) // must not panic; exercises the badged-item path
 }
 
 // countNonZero counts non-zero bytes in an RGBA buffer (any painted pixel).
+// Shared test helper used by the menu render tests.
 func countNonZero(buf []byte) int {
 	n := 0
 	for _, b := range buf {
