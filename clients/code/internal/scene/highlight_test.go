@@ -2,250 +2,71 @@
 // Use of this source code is governed by a BSD-3-Clause license that can be
 // found in the LICENSE file at the root of this repository.
 
+// highlight_test.go covers the client-specific highlighting glue that survived
+// the migration to the shared toolkit CodeEditor: the Dark+ palette mapping
+// handed to the rougelex highlighter, and the extension->language selector. The
+// tokenizing itself now lives in (and is tested by) go-widgets/toolkit/rougelex,
+// so there is no per-line lexer to test here anymore.
+
 package scene
 
 import "testing"
 
-// joinText reassembles the Token stream back into the original line. The
-// invariant Tokenize guarantees (no gaps, no overlaps) is asserted by every
-// table case below.
-func joinText(toks []Token) string {
-	out := ""
-	for _, t := range toks {
-		out += t.Text
+// TestDarkPlusPalette pins the exact Dark+ colours the rougelex highlighter is
+// configured with, so `func` stays keyword-blue (#569CD6) the way the render +
+// browser probes sample it, strings salmon, comments green and numbers pale
+// green, with everything else the default editor foreground.
+func TestDarkPlusPalette(t *testing.T) {
+	p := darkPlusPalette()
+	if p.Keyword != rgb(ColorKeyword) {
+		t.Errorf("Keyword = %+v, want %+v", p.Keyword, rgb(ColorKeyword))
 	}
-	return out
-}
-
-func TestTokenize_Empty(t *testing.T) {
-	toks := Tokenize("")
-	if len(toks) != 1 {
-		t.Fatalf("empty line: want 1 token, got %d", len(toks))
+	if p.Type != rgb(ColorKeyword) || p.Builtin != rgb(ColorKeyword) {
+		t.Error("Type + Builtin should share the keyword blue")
 	}
-	if toks[0].Text != "" {
-		t.Fatalf("empty token text: %q", toks[0].Text)
+	if p.String != rgb(ColorString) {
+		t.Errorf("String = %+v, want %+v", p.String, rgb(ColorString))
 	}
-}
-
-func TestTokenize_Keyword(t *testing.T) {
-	toks := Tokenize("func main")
-	if joinText(toks) != "func main" {
-		t.Fatalf("roundtrip: %q", joinText(toks))
+	if p.Comment != rgb(ColorComment) {
+		t.Errorf("Comment = %+v, want %+v", p.Comment, rgb(ColorComment))
 	}
-	if toks[0].Color != ColorKeyword || toks[0].Text != "func" {
-		t.Errorf("keyword tok: %+v", toks[0])
+	if p.Number != rgb(ColorNumber) {
+		t.Errorf("Number = %+v, want %+v", p.Number, rgb(ColorNumber))
+	}
+	// Everything not a keyword/string/comment/number is the editor foreground.
+	text := rgb(ColorEditorText)
+	if p.Default != text || p.Function != text || p.Class != text ||
+		p.Operator != text || p.Punctuation != text {
+		t.Error("Default/Function/Class/Operator/Punctuation should be the editor foreground")
 	}
 }
 
-func TestTokenize_AllKeywords(t *testing.T) {
-	for kw := range keywords {
-		toks := Tokenize(kw + " x")
-		if toks[0].Color != ColorKeyword || toks[0].Text != kw {
-			t.Errorf("kw %q not coloured: %+v", kw, toks[0])
-		}
+func TestLanguageForPath(t *testing.T) {
+	cases := map[string]string{
+		"main.go":           "go",
+		"/src/app.rb":       "ruby",
+		"script.py":         "python",
+		"index.js":          "javascript",
+		"style.CSS":         "css", // case-insensitive extension
+		"page.html":         "html",
+		"page.htm":          "html",
+		"data.json":         "json",
+		"conf.yaml":         "yaml",
+		"conf.yml":          "yaml",
+		"README.md":         "markdown",
+		"notes.markdown":    "markdown",
+		"run.sh":            "bash",
+		"query.sql":         "sql",
+		"Makefile":          "go", // no extension -> default Go
+		"weird.unknownext":  "go", // unknown extension -> default Go
+		"/Documents/notes.": "go", // trailing dot, empty ext -> default
+		"noext":             "go",
+		"archive.tar.gz":    "go", // .gz not mapped -> default
+		"a.b.rb":            "ruby",
 	}
-}
-
-func TestTokenize_String(t *testing.T) {
-	toks := Tokenize(`x := "hello"`)
-	if joinText(toks) != `x := "hello"` {
-		t.Fatalf("roundtrip: %q", joinText(toks))
-	}
-	gotString := false
-	for _, tok := range toks {
-		if tok.Color == ColorString && tok.Text == `"hello"` {
-			gotString = true
-		}
-	}
-	if !gotString {
-		t.Errorf("string token missing: %+v", toks)
-	}
-}
-
-func TestTokenize_String_WithEscapedQuote(t *testing.T) {
-	in := `"a\"b"`
-	toks := Tokenize(in)
-	if len(toks) != 1 || toks[0].Color != ColorString || toks[0].Text != in {
-		t.Errorf("escaped quote: %+v", toks)
-	}
-}
-
-func TestTokenize_String_Unterminated(t *testing.T) {
-	in := `"hello`
-	toks := Tokenize(in)
-	if len(toks) != 1 || toks[0].Color != ColorString || toks[0].Text != in {
-		t.Errorf("unterminated: %+v", toks)
-	}
-}
-
-func TestTokenize_String_BackslashAtEnd(t *testing.T) {
-	in := `"abc\`
-	toks := Tokenize(in)
-	if joinText(toks) != in {
-		t.Errorf("roundtrip: %q", joinText(toks))
-	}
-}
-
-func TestTokenize_LineComment(t *testing.T) {
-	toks := Tokenize("x // hi")
-	if joinText(toks) != "x // hi" {
-		t.Fatalf("roundtrip: %q", joinText(toks))
-	}
-	// Last token should be the comment colour.
-	last := toks[len(toks)-1]
-	if last.Color != ColorComment || last.Text != "// hi" {
-		t.Errorf("comment tok: %+v", last)
-	}
-}
-
-func TestTokenize_Number(t *testing.T) {
-	toks := Tokenize("x := 123")
-	gotNum := false
-	for _, tok := range toks {
-		if tok.Color == ColorNumber && tok.Text == "123" {
-			gotNum = true
-		}
-	}
-	if !gotNum {
-		t.Errorf("number tok missing: %+v", toks)
-	}
-}
-
-func TestTokenize_DecimalNumber(t *testing.T) {
-	toks := Tokenize("3.14")
-	if len(toks) != 1 || toks[0].Color != ColorNumber || toks[0].Text != "3.14" {
-		t.Errorf("decimal tok: %+v", toks)
-	}
-}
-
-func TestTokenize_OperatorsAndPunctuation(t *testing.T) {
-	toks := Tokenize("a + b")
-	if joinText(toks) != "a + b" {
-		t.Fatalf("roundtrip: %q", joinText(toks))
-	}
-}
-
-func TestTokenize_IdentifierAfterDefault(t *testing.T) {
-	// "x" then operators "+ " then "y" -- the default-run terminator must
-	// break at the start of "y".
-	toks := Tokenize("x + y")
-	if joinText(toks) != "x + y" {
-		t.Fatalf("roundtrip: %q", joinText(toks))
-	}
-}
-
-func TestTokenize_DefaultBreaksOnDigitAndString(t *testing.T) {
-	for _, in := range []string{
-		"+ 1",
-		`+ "s"`,
-	} {
-		toks := Tokenize(in)
-		if joinText(toks) != in {
-			t.Errorf("roundtrip %q -> %q", in, joinText(toks))
-		}
-	}
-}
-
-func TestTokenize_DefaultBreaksOnCommentStart(t *testing.T) {
-	// A "/" outside the start should not be eaten by the comment lookahead.
-	toks := Tokenize("a//c")
-	if joinText(toks) != "a//c" {
-		t.Errorf("roundtrip: %q", joinText(toks))
-	}
-	// Last token must be the comment.
-	last := toks[len(toks)-1]
-	if last.Color != ColorComment {
-		t.Errorf("trailing comment colour: %+v", last)
-	}
-}
-
-func TestTokenize_NonKeywordIdentifier(t *testing.T) {
-	toks := Tokenize("foo")
-	if len(toks) != 1 || toks[0].Color != ColorEditorText || toks[0].Text != "foo" {
-		t.Errorf("identifier tok: %+v", toks)
-	}
-}
-
-func TestIsIdentStart_Underscore(t *testing.T) {
-	if !isIdentStart('_') {
-		t.Fatal("underscore should start identifier")
-	}
-	if isIdentStart('1') {
-		t.Fatal("digit should not start identifier")
-	}
-}
-
-func TestIsIdentCont(t *testing.T) {
-	if !isIdentCont('1') || !isIdentCont('A') || !isIdentCont('_') {
-		t.Fatal("isIdentCont true cases")
-	}
-	if isIdentCont('+') {
-		t.Fatal("operator should not continue identifier")
-	}
-}
-
-func TestTokenize_LeadingSlashNotComment(t *testing.T) {
-	// A single "/" at the start should NOT trigger the comment branch.
-	toks := Tokenize("/a")
-	if joinText(toks) != "/a" {
-		t.Errorf("roundtrip: %q", joinText(toks))
-	}
-}
-
-// TestHighlight_KeywordSpanColor asserts the TextView.Highlighter adapter
-// yields a span covering the leading keyword in exactly ColorKeyword -- the
-// same #569CD6 the playwright probe samples in the browser.
-func TestHighlight_KeywordSpanColor(t *testing.T) {
-	spans := Highlight(0, "func main")
-	if len(spans) == 0 {
-		t.Fatal("no spans for non-empty line")
-	}
-	// The first span is the "func" keyword: runes [0,4) in keyword blue.
-	first := spans[0]
-	if first.Start != 0 || first.End != 4 {
-		t.Fatalf("keyword span bounds = [%d,%d), want [0,4)", first.Start, first.End)
-	}
-	if first.Color != rgb(ColorKeyword) {
-		t.Fatalf("keyword span colour = %v, want %v (#569CD6)", first.Color, rgb(ColorKeyword))
-	}
-	// Spans must reassemble to the whole line's rune length with no gaps.
-	total := 0
-	for _, sp := range spans {
-		total += sp.End - sp.Start
-	}
-	if total != len([]rune("func main")) {
-		t.Fatalf("span coverage = %d runes, want %d", total, len([]rune("func main")))
-	}
-}
-
-// TestHighlight_EmptyLine returns no spans (the empty-line sentinel token has
-// zero-length text), so TextView paints the line with its default ink.
-func TestHighlight_EmptyLine(t *testing.T) {
-	if spans := Highlight(0, ""); len(spans) != 0 {
-		t.Fatalf("empty line spans = %d, want 0", len(spans))
-	}
-}
-
-// TestHighlight_MultiTokenColors checks every token role maps to its Dark+
-// colour: keyword, default identifier, string, number, comment.
-func TestHighlight_MultiTokenColors(t *testing.T) {
-	spans := Highlight(0, `var x = "hi" // 3`)
-	want := map[[3]uint8]bool{
-		ColorKeyword:    false, // var
-		ColorString:     false, // "hi"
-		ColorComment:    false, // // 3
-		ColorEditorText: false, // identifiers / operators
-	}
-	for _, sp := range spans {
-		for c := range want {
-			if sp.Color == rgb(c) {
-				want[c] = true
-			}
-		}
-	}
-	for c, seen := range want {
-		if !seen {
-			t.Errorf("colour %v never emitted", c)
+	for path, want := range cases {
+		if got := languageForPath(path); got != want {
+			t.Errorf("languageForPath(%q) = %q, want %q", path, got, want)
 		}
 	}
 }

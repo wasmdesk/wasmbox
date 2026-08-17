@@ -4,11 +4,12 @@ go 1.26.4
 
 require (
 	github.com/go-embedded-ruby/ruby v0.0.0-20260809134646-3ce8c91d38e7
-	github.com/go-opentype/fonts v0.4.2
+	github.com/go-opentype/fonts v0.6.0
 	github.com/go-ruby-parser/parser v0.1.3
 	github.com/go-webengine/browserproxy v0.0.0-20260808195644-0fab95c6c8b8
 	github.com/go-widgets/painter v0.11.0
-	github.com/go-widgets/toolkit v0.114.0
+	github.com/go-widgets/toolkit v0.179.1-0.20260817140909-bc9e11a0e9ad
+	github.com/go-widgets/toolkit/rougelex v0.0.0-20260817140909-bc9e11a0e9ad
 	github.com/grpc-transports/websocket v0.2.0
 	github.com/wasmdesk/coreutils v0.0.0-20260629060422-c37bd87ae249
 	google.golang.org/grpc v1.83.0
@@ -92,7 +93,7 @@ require (
 	github.com/go-gfx/gfx v0.1.0 // indirect
 	github.com/go-hiera/hiera v0.0.0-20260708051558-73bff6edd0e9 // indirect
 	github.com/go-hocon/hocon v0.0.0-20260709172937-6d69e3b57178 // indirect
-	github.com/go-images/images v0.0.0-20260702213524-ea366b42f216 // indirect
+	github.com/go-images/images v0.0.0-20260811115337-bc5d586f8e38 // indirect
 	github.com/go-jose/go-jose/v4 v4.1.4 // indirect
 	github.com/go-kramdown/kramdown v0.1.0 // indirect
 	github.com/go-ldap/ldap/v3 v3.4.14 // indirect
@@ -102,9 +103,9 @@ require (
 	github.com/go-mustache/mustache v0.1.0 // indirect
 	github.com/go-ndarray/ndarray v0.0.0-20260620170009-555bfc31e7a3 // indirect
 	github.com/go-nokogiri/nokogiri v0.1.0 // indirect
-	github.com/go-opentype/bidi v0.2.0 // indirect
+	github.com/go-opentype/bidi v0.2.1 // indirect
 	github.com/go-opentype/opentype v0.5.0 // indirect
-	github.com/go-opentype/shape v0.3.3 // indirect
+	github.com/go-opentype/shape v0.4.0 // indirect
 	github.com/go-pcore/pcore v0.0.0-20260708052910-1416bf219e47 // indirect
 	github.com/go-puppet/puppet v0.0.0-20260710130746-3ef04469bb7e // indirect
 	github.com/go-regexp/engine v0.1.0 // indirect
@@ -295,7 +296,7 @@ require (
 	github.com/go-viper/mapstructure/v2 v2.5.0 // indirect
 	github.com/go-webauthn/webauthn v0.17.4 // indirect
 	github.com/go-webauthn/x v0.2.6 // indirect
-	github.com/go-widgets/mvvm v0.3.0 // indirect
+	github.com/go-widgets/mvvm v0.5.0 // indirect
 	github.com/go-widgets/tui v0.55.0 // indirect
 	github.com/go-xslt/xslt v0.1.0 // indirect
 	github.com/go-zookeeper/zk v1.0.4 // indirect
