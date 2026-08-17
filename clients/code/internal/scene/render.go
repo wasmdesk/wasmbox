@@ -112,8 +112,8 @@ func Paint(rgba []byte, w, h int, s *SceneState) {
 	// widgets over this) and the sidebar band -- the ListBox only paints its
 	// rows, so the empty area below the file list must be filled here so the
 	// sidebar reads as one solid #252526 column top to bottom.
-	p.FillRect(toolkit.Rect{X: 0, Y: 0, W: w, H: h}, rgb(ColorWindowBG))
-	p.FillRect(toolkit.Rect{X: 0, Y: 0, W: SidebarWidth, H: h - StatusBarHeight}, rgb(ColorSidebarBG))
+	fillBox(p, toolkit.Rect{X: 0, Y: 0, W: w, H: h}, rgb(ColorWindowBG))
+	fillBox(p, toolkit.Rect{X: 0, Y: 0, W: SidebarWidth, H: h - StatusBarHeight}, rgb(ColorSidebarBG))
 
 	// Live status-bar segments (path / Ln,Col / mode / Live Server).
 	s.syncStatusSegments()

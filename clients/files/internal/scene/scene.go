@@ -295,11 +295,11 @@ func Render(s *State, buf []byte) {
 	s.table.Selected = s.Browser.Cursor
 
 	// Grounds: window (right pane) white, sidebar grey, header grey, hairlines.
-	p.FillRect(toolkit.Rect{X: 0, Y: 0, W: s.W, H: s.H}, ColorWindowBG)
-	p.FillRect(toolkit.Rect{X: 0, Y: HeaderBarHeight, W: SidebarWidth, H: s.H - HeaderBarHeight}, ColorSidebarBG)
-	p.FillRect(toolkit.Rect{X: SidebarWidth - 1, Y: HeaderBarHeight, W: 1, H: s.H - HeaderBarHeight}, ColorDivider)
-	p.FillRect(toolkit.Rect{X: 0, Y: 0, W: s.W, H: HeaderBarHeight}, ColorHeaderBarBG)
-	p.FillRect(toolkit.Rect{X: 0, Y: HeaderBarHeight - 1, W: s.W, H: 1}, ColorDivider)
+	fillBox(p, toolkit.Rect{X: 0, Y: 0, W: s.W, H: s.H}, ColorWindowBG)
+	fillBox(p, toolkit.Rect{X: 0, Y: HeaderBarHeight, W: SidebarWidth, H: s.H - HeaderBarHeight}, ColorSidebarBG)
+	fillBox(p, toolkit.Rect{X: SidebarWidth - 1, Y: HeaderBarHeight, W: 1, H: s.H - HeaderBarHeight}, ColorDivider)
+	fillBox(p, toolkit.Rect{X: 0, Y: 0, W: s.W, H: HeaderBarHeight}, ColorHeaderBarBG)
+	fillBox(p, toolkit.Rect{X: 0, Y: HeaderBarHeight - 1, W: s.W, H: 1}, ColorDivider)
 
 	// Widget tree.
 	s.root.Draw(p, th)

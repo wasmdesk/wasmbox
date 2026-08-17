@@ -131,10 +131,10 @@ func Render(s *State, buf []byte) {
 	p := painter.NewPixelPainter(buf, s.W, s.H)
 	b := s.Grid.Bounds()
 	// Top, bottom, left, right margins (any of which may be empty).
-	p.FillRect(toolkit.Rect{X: 0, Y: 0, W: s.W, H: b.Y}, panelBG)
-	p.FillRect(toolkit.Rect{X: 0, Y: b.Y + b.H, W: s.W, H: s.H - (b.Y + b.H)}, panelBG)
-	p.FillRect(toolkit.Rect{X: 0, Y: b.Y, W: b.X, H: b.H}, panelBG)
-	p.FillRect(toolkit.Rect{X: b.X + b.W, Y: b.Y, W: s.W - (b.X + b.W), H: b.H}, panelBG)
+	fillBox(p, toolkit.Rect{X: 0, Y: 0, W: s.W, H: b.Y}, panelBG)
+	fillBox(p, toolkit.Rect{X: 0, Y: b.Y + b.H, W: s.W, H: s.H - (b.Y + b.H)}, panelBG)
+	fillBox(p, toolkit.Rect{X: 0, Y: b.Y, W: b.X, H: b.H}, panelBG)
+	fillBox(p, toolkit.Rect{X: b.X + b.W, Y: b.Y, W: s.W - (b.X + b.W), H: b.H}, panelBG)
 	s.Grid.Draw(p, s.theme)
 }
 
