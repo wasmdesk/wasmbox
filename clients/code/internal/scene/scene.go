@@ -9,19 +9,20 @@
 //
 // The editor is built from the go-widgets/toolkit widget + layout model
 // rather than hand-drawn: a Dock shell with a Statusbar docked South over an
-// HBox of a ListBox sidebar + a VBox of a tab strip over a TextView editor,
-// with the "Connect to Live Server" popup as a Dialog. The TextView owns the
-// editing model (lines + cursor + insert/split/backspace + undo/redo +
-// selection), its ShowLineNumbers gutter replaces the old hand-drawn one, and
-// its Highlighter hook is fed by the package's own Tokenize lexer.
+// HBox of a ListBox sidebar + a VBox of a tab strip over a CodeEditor, with the
+// "Connect to Live Server" popup as a Dialog. The CodeEditor (a TextView plus a
+// line-number gutter, multi-language syntax highlighting and a current-line
+// hook) owns the editing model (lines + cursor + insert/split/backspace +
+// undo/redo + selection); its rouge-backed highlighter replaces this client's
+// former hand-rolled Go tokenizer.
 //
 // Files in the package:
 //
 //   - scene.go     : this file, package documentation only.
 //   - state.go     : SceneState + widget tree + dispatchers (HandleKey /
 //     HandleMouse) + OpenFile / SaveCurrent / Live Server popup.
-//   - highlight.go : Tokenize(line) -> []Token (Dark+ palette) + Highlight,
-//     the TextView.Highlighter adapter (Token -> TextSpan).
+//   - highlight.go : the Dark+ palette + darkPlusPalette() (the CodeEditor's
+//     rougelex highlighter colours) + languageForPath (extension -> lexer).
 //   - render.go    : Render(state, buf) + the widget tree paint + tabStrip +
 //     per-region themes + the Dark+ palette.
 //

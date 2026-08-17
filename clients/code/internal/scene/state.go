@@ -21,6 +21,7 @@ import (
 
 	"github.com/go-opentype/fonts/jetbrainsmono"
 	"github.com/go-widgets/toolkit"
+	"github.com/go-widgets/toolkit/rougelex"
 	"github.com/wasmdesk/wasmbox/clients/sharedvfs"
 )
 
@@ -107,9 +108,12 @@ type SceneState struct {
 	// Entry. v0 stores it but does not connect; Connect flashes + closes.
 	LiveServerURL string
 
-	// Editor is the toolkit TextView holding the editable document. Always
-	// non-nil -- the constructor seeds an empty single-line buffer.
-	Editor *toolkit.TextView
+	// Editor is the shared toolkit CodeEditor holding the editable document.
+	// Always non-nil -- the constructor seeds an empty single-line buffer. It
+	// embeds a TextView (so the whole editing model is available directly) and
+	// adds the gutter + rouge-backed multi-language syntax highlighting that
+	// this client used to wire by hand.
+	Editor *toolkit.CodeEditor
 
 	// Widget tree (built by buildLayout).
 	root    *toolkit.Dock
@@ -153,11 +157,22 @@ func NewWithVFS(width, height int, vfs sharedvfs.VFS) *SceneState {
 
 	s := &SceneState{W: width, H: height, VFS: vfs}
 
-	s.Editor = toolkit.NewTextView("")
+	s.Editor = toolkit.NewCodeEditor("")
 	s.Editor.SetFont(mono)
 	s.Editor.ShowLineNumbers = true
 	s.Editor.GutterColor = rgb(ColorGutterText)
-	s.Editor.Highlighter = Highlight
+	// Multi-language highlighting through the SHARED CodeEditor + its rouge
+	// backend, replacing this client's bespoke per-line Go tokenizer. The
+	// palette is pinned to VS Code Dark+ (an explicit palette, not
+	// theme-derived, because the editor theme's Accent is the window
+	// background) so keywords stay #569CD6, strings #CE9178, etc. Language is
+	// re-selected per opened file in OpenFile; the seed default is Go.
+	s.Editor.Language = "go"
+	s.Editor.Syntax = &rougelex.Highlighter{Palette: darkPlusPalette()}
+	// VS Code's current-line highlight is intentionally left off here to keep
+	// the editor pane's backgrounds pixel-identical to the pre-migration
+	// renderer (the native + browser probes sample flat #1E1E1E bands).
+	s.Editor.HighlightCurrentLine = false
 	s.Editor.Focused = true
 
 	s.sidebar = toolkit.NewListBox(nil)
@@ -297,6 +312,7 @@ func (s *SceneState) OpenFile(path string) bool {
 		return false
 	}
 	s.Editor.SetText(string(data))
+	s.Editor.Language = languageForPath(path)
 	s.Editor.Focused = true
 	s.CurrentPath = path
 	s.Flash = FlashNone
