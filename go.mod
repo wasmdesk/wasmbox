@@ -6,9 +6,12 @@ require (
 	github.com/go-embedded-ruby/ruby v0.0.0-20260809134646-3ce8c91d38e7
 	github.com/go-opentype/fonts v0.4.2
 	github.com/go-ruby-parser/parser v0.1.3
+	github.com/go-webengine/browserproxy v0.0.0-20260808195644-0fab95c6c8b8
 	github.com/go-widgets/painter v0.11.0
 	github.com/go-widgets/toolkit v0.114.0
+	github.com/grpc-transports/websocket v0.2.0
 	github.com/wasmdesk/coreutils v0.0.0-20260629060422-c37bd87ae249
+	google.golang.org/grpc v1.83.0
 )
 
 require (
@@ -66,6 +69,7 @@ require (
 	github.com/blevesearch/zapx/v17 v17.1.2 // indirect
 	github.com/cenkalti/backoff/v4 v4.3.0 // indirect
 	github.com/cespare/xxhash/v2 v2.3.0 // indirect
+	github.com/coder/websocket v1.8.15 // indirect
 	github.com/coreos/go-semver v0.3.1 // indirect
 	github.com/coreos/go-systemd/v22 v22.7.0 // indirect
 	github.com/crewjam/saml v0.5.1 // indirect
@@ -382,9 +386,8 @@ require (
 	golang.org/x/term v0.45.0 // indirect
 	golang.org/x/text v0.41.0 // indirect
 	golang.org/x/time v0.15.0 // indirect
-	google.golang.org/genproto/googleapis/api v0.0.0-20260414002931-afd174a4e478 // indirect
-	google.golang.org/genproto/googleapis/rpc v0.0.0-20260414002931-afd174a4e478 // indirect
-	google.golang.org/grpc v1.82.0 // indirect
+	google.golang.org/genproto/googleapis/api v0.0.0-20260526163538-3dc84a4a5aaa // indirect
+	google.golang.org/genproto/googleapis/rpc v0.0.0-20260526163538-3dc84a4a5aaa // indirect
 	google.golang.org/protobuf v1.36.11 // indirect
 	gopkg.in/yaml.v3 v3.0.1 // indirect
 	modernc.org/libc v1.73.4 // indirect
