@@ -40,11 +40,13 @@ import (
 // repaints.
 func exposeGeometry(state *scene.State) {
 	lr := state.LauncherRects()
+	running := state.LauncherRunning()
 	launchers := make([]interface{}, 0, len(lr))
 	for i, r := range lr {
 		launchers = append(launchers, map[string]interface{}{
 			"id": state.Apps[i].Id,
 			"x":  r[0], "y": r[1], "w": r[2], "h": r[3],
+			"running": running[i],
 		})
 	}
 	js.Global().Set("__wasmdockGeometry", js.ValueOf(map[string]interface{}{

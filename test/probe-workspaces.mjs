@@ -6,14 +6,21 @@
 // dock settle, then exercises:
 //
 //   1. The 3 boot windows + hello autoSpawn land on workspace 1 (the default
-//      active workspace). The iconbar reflects them.
+//      active workspace). With the AppDock grouped-window model the open
+//      windows collapse into a RUNNING indicator on their launcher instead of
+//      a per-window iconbar button — so ≥1 launcher shows a running dot.
 //   2. Left-clicking the workspace section on the dock cycles to workspace 2.
 //      The 3 boot windows + hello disappear from the canvas (they live on
 //      workspace 1, not the active one); the dock stays visible (panels
 //      ignore the workspace filter).
-//   3. The iconbar empties on workspace 2 (no windows registered there).
+//   3. On workspace 2 no windows are registered, so NO launcher shows a
+//      running dot (0 running) — the dock reflects the active workspace.
 //   4. Cycling back to workspace 1 (3 more clicks on the workspace section,
-//      wrapping 2->3->4->1) restores all 3 boot windows + hello.
+//      wrapping 2->3->4->1) restores all 3 boot windows + hello and the
+//      running-launcher count is restored to its ws1 reference.
+//
+// The per-launcher running state is read robustly (no pixel counting) from
+// the dock's exposed __wasmdockGeometry.launchers[*].running global.
 //
 // Screenshots:
 //   /tmp/wasmbox-workspace-1a.png  (ws 1 with 3 boot windows + hello)
@@ -95,12 +102,7 @@ function pix(png, x, y) {
 
 // Geometry mirrors compositor.rb + scene.go constants.
 const WORKSPACE_W = 100;
-const CLOCK_W = 80;
-const ICONBAR_BUTTON_W = 120;
-const ICONBAR_BUTTON_GAP = 2;
-const SEPARATOR_W = 8;
 const ICONBAR_VPAD = 2;
-const N_LAUNCHERS = 4;
 const DOCK_H = 28;
 const VIEW_W = 1280;
 const VIEW_H = 800;
@@ -112,7 +114,8 @@ const BOOT_WINS = [
 ];
 // The boot window count evolves as the desktop grows, so this probe asserts
 // workspace behaviour RELATIVELY (isolation + reversibility) rather than against
-// a hardcoded count — the ws1 iconbar count observed at boot is the reference.
+// a hardcoded count — the ws1 running-launcher count observed at boot is the
+// reference.
 const STEP = 28;
 const BASE_X = 60;
 const BASE_Y = 60;
@@ -124,15 +127,7 @@ function workspaceCenter() {
   return { x: WORKSPACE_W / 2, y: dockTop + DOCK_H / 2 };
 }
 
-// Iconbar window button top-mid pixel.
 const ICONBAR_X = WORKSPACE_W;
-const LAUNCHER_ROW_END = ICONBAR_X + N_LAUNCHERS * (ICONBAR_BUTTON_W + ICONBAR_BUTTON_GAP) - ICONBAR_BUTTON_GAP;
-const WINDOWS_X0 = LAUNCHER_ROW_END + SEPARATOR_W;
-function windowBtnTopMid(i) {
-  const x = WINDOWS_X0 + i * (ICONBAR_BUTTON_W + ICONBAR_BUTTON_GAP) + Math.floor(ICONBAR_BUTTON_W / 2);
-  const y = dockTop + ICONBAR_VPAD;
-  return { x, y };
-}
 
 // Body center of a boot window.
 function bodyCenter(b) {
@@ -141,22 +136,27 @@ function bodyCenter(b) {
   return { x, y, b };
 }
 
-// Count how many iconbar window-button slots show a button bevel stroke
-// (either bright "raised" or dark "sunken"). Empty slots show the iconbar
-// background gradient (~196,196,196), so we use stricter thresholds: the
-// bevel highlight is pure (255,255,255); the sunken stroke is (64,64,64).
-// 0xE0 / 0x60 cleanly separates the two from the mid-tone gradient.
-function countIconbarEntries(png) {
-  let n = 0;
-  for (let i = 0; i < 8; i++) { // probe more than the max we expect
-    const p = windowBtnTopMid(i);
-    if (p.x >= VIEW_W - CLOCK_W) break;
-    const [r, g, b] = pix(png, p.x, p.y);
-    const bright = (r > 0xE0 && g > 0xE0 && b > 0xE0);
-    const dark   = (r < 0x60 && g < 0x60 && b < 0x60);
-    if (bright || dark) n++;
+// Read the dock's published launcher geometry (with per-launcher running flag)
+// from the dock WORKER's global — the dock runs in a Web Worker, so its
+// globalThis.__wasmdockGeometry is not visible on the page. Returns the
+// geometry object { w, h, launchers: [{ id, x, y, w, h, running }] } or null.
+async function dockGeometry(page) {
+  for (const worker of page.workers()) {
+    try {
+      const g = await worker.evaluate(() => globalThis.__wasmdockGeometry || null);
+      if (g && Array.isArray(g.launchers)) return g;
+    } catch (_) { /* worker may be navigating / not the dock */ }
   }
-  return n;
+  return null;
+}
+
+// Number of launchers currently showing a RUNNING indicator (grouped-window
+// model). Read robustly from the dock's exposed geometry — no pixel counting —
+// which the dock republishes on every windows_changed.
+async function runningCount(page) {
+  const g = await dockGeometry(page);
+  if (!g) return -1; // dock worker not found — caller treats as a failure
+  return g.launchers.filter((l) => l.running).length;
 }
 
 const { server, base } = await startServer();
@@ -199,15 +199,12 @@ try {
     }
   }
 
-  // Iconbar reflects the windows on the active workspace (ws1). We don't
-  // hardcode the boot count; require ≥1 entry and use it as the reference for
-  // the workspace-switch + restore checks below.
-  const entries1a = countIconbarEntries(png1a);
-  if (entries1a < 1) {
-    fail(`ws1: iconbar shows no window entries (${entries1a})`);
-  } else {
-    ok(`ws1: iconbar shows ${entries1a} window entries`);
-  }
+  // The dock reflects the windows on the active workspace (ws1): with the
+  // grouped-window model, ≥1 launcher shows a running indicator. We don't
+  // hardcode the count; use it as the reference for the switch + restore checks.
+  const r1 = await runningCount(page);
+  if (r1 < 1) fail('ws1: no launcher shows a running indicator');
+  else ok('ws1: '+r1+' launcher(s) running');
 
   // -------- Phase 2: click workspace section -> ws 2 -------------------
   const wsBtn = workspaceCenter();
@@ -260,15 +257,15 @@ try {
     }
   }
 
-  // Iconbar follows the workspace: ws1's windows are hidden here, so ws2 shows
-  // strictly fewer entries than ws1 (a global/unfiltered iconbar would show the
-  // same count — this catches that regression).
-  const entries2a = countIconbarEntries(png2a);
-  if (entries2a >= entries1a) {
-    fail(`ws2: iconbar not workspace-filtered — ${entries2a} entries, ws1 had ${entries1a}`);
-  } else {
-    ok(`ws2: iconbar reflects the workspace (${entries2a} entries vs ${entries1a} on ws1)`);
-  }
+  // The dock follows the workspace: ws2 has no registered windows, so NO
+  // launcher shows a running dot (a global/unfiltered dock would keep ws1's
+  // running launchers — this catches that regression). The compositor has
+  // already sent windows_changed(nil) for ws2 by the time we screenshotted
+  // above; the dock republishes its geometry from that handler, so its worker
+  // global is already settled at 0 running here.
+  const r2 = await runningCount(page);
+  if (r2 !== 0) fail('ws2: iconbar not workspace-filtered — '+r2+' launchers running, want 0');
+  else ok('ws2: iconbar workspace-filtered (0 running)');
 
   // -------- Phase 3: cycle back to ws 1 via 3 more clicks (2->3->4->1) --
   for (let cycle = 0; cycle < 3; cycle++) {
@@ -291,12 +288,9 @@ try {
       ok(`ws1 (after cycle): boot window "${b.title}" restored`);
     }
   }
-  const entries1b = countIconbarEntries(png1b);
-  if (entries1b !== entries1a) {
-    fail(`ws1 (after cycle): iconbar not restored — ${entries1b} entries, was ${entries1a}`);
-  } else {
-    ok(`ws1 (after cycle): iconbar restored to ${entries1b} entries`);
-  }
+  const r1b = await runningCount(page);
+  if (r1b !== r1) fail('ws1 (after cycle): running not restored — '+r1b+', was '+r1);
+  else ok('ws1 (after cycle): running restored ('+r1b+')');
 
   if (pageErrors.length) {
     fail(`pageerror(s): ${pageErrors.join(" | ")}`);

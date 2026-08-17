@@ -48,6 +48,11 @@ func (s *State) appIndexForWindow(w Window) int {
 	return -1
 }
 
+// LauncherRunning reports, per launcher (Apps order), whether it has at least
+// one open window on the active workspace — the running-dot state a host probe
+// reads to check the dock reflects the workspace.
+func (s *State) LauncherRunning() []bool { return s.launcherRunning() }
+
 // launcherRunning reports, per launcher index, whether at least one open (or
 // folded) window maps to it — i.e. whether it should carry a running dot.
 func (s *State) launcherRunning() []bool {
