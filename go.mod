@@ -8,8 +8,8 @@ require (
 	github.com/go-ruby-parser/parser v0.1.3
 	github.com/go-webengine/browserproxy v0.0.0-20260808195644-0fab95c6c8b8
 	github.com/go-widgets/painter v0.11.0
-	github.com/go-widgets/toolkit v0.179.1-0.20260817140909-bc9e11a0e9ad
-	github.com/go-widgets/toolkit/rougelex v0.0.0-20260817140909-bc9e11a0e9ad
+	github.com/go-widgets/toolkit v0.180.0
+	github.com/go-widgets/toolkit/rougelex v0.1.0
 	github.com/grpc-transports/websocket v0.2.0
 	github.com/wasmdesk/coreutils v0.0.0-20260629060422-c37bd87ae249
 	google.golang.org/grpc v1.83.0
