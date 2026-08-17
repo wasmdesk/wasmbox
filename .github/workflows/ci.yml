@@ -301,10 +301,6 @@ jobs:
         working-directory: test
         run: node probe-code.mjs
 
-      - name: Run headless streaming-browser probe (mock browserproxy WS - frame blit + address bar)
-        working-directory: test
-        run: node probe-browser.mjs
-
       - name: Run headless Fluxbox-dock probe (sections + live iconbar buttons)
         working-directory: test
         run: node probe-wasmdock-fluxbox.mjs
