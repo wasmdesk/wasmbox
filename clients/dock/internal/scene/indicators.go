@@ -108,41 +108,6 @@ func badgeText(n int) string {
 	return itoa(n)
 }
 
-// RunningDotPx is the diameter of the "app is running" dot drawn under a
-// launcher glyph.
-const RunningDotPx = 3
-
-// drawRunningIndicator paints the running dot (and, when focused, the wider
-// active underline) along the bottom edge of a launcher slot rectangle r. The
-// dot is centred under the glyph; the active underline is a brighter, wider bar
-// just below it. Colours come from the active theme's title inks so the marks
-// read against the bar in any theme.
-func (s *State) drawRunningIndicator(p painter.Painter, r toolkit.Rect, focused bool) {
-	if r.W <= 0 || r.H <= 0 {
-		return
-	}
-	cx := r.X + r.W/2
-	by := r.Y + r.H - RunningDotPx - 1
-	if by < r.Y {
-		by = r.Y
-	}
-	dot := rgba(s.Theme.Window.Active.Title.Label.Color)
-	for j := 0; j < RunningDotPx; j++ {
-		for i := 0; i < RunningDotPx; i++ {
-			p.PutPixel(cx-RunningDotPx/2+i, by+j, dot)
-		}
-	}
-	if focused {
-		// Brighter, wider underline spanning most of the button width.
-		hl := rgba(s.Theme.Window.Active.Title.Bg.Color)
-		uy := r.Y + r.H - 1
-		half := r.W / 3
-		for i := -half; i <= half; i++ {
-			p.PutPixel(cx+i, uy, hl)
-		}
-	}
-}
-
 // drawBadge paints an attention badge pill in the top-right corner of a
 // launcher slot rectangle r via the toolkit Badge widget, or is a no-op when
 // count is zero. The pill hugs the corner so it overhangs the glyph the way a
@@ -174,6 +139,6 @@ func drawBadge(p painter.Painter, r toolkit.Rect, count int) {
 var badgeTheme = func() *toolkit.Theme {
 	th := toolkit.DefaultLight()
 	th.Accent = toolkit.RGB(0xE0, 0x1B, 0x24)     // alert red pill
-	th.Background = toolkit.RGB(0xFF, 0xFF, 0xFF)  // white ink
+	th.Background = toolkit.RGB(0xFF, 0xFF, 0xFF) // white ink
 	return th
 }()

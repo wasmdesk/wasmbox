@@ -10,22 +10,14 @@
 //     cycles backward/forward. The active workspace is reported by the
 //     compositor through the `workspace_changed` input event (kind:
 //     "workspace_changed", payload {active:int, count:int});
-//   - an iconbar in the middle. Reading left-to-right inside the iconbar:
-//     first the static LAUNCHERS (one button per known app —
-//     terminal / editor / files / hello), then a 1-pixel separator, then
-//     one button per OPEN WINDOW the compositor handed us via the
-//     `windows_changed` input event. Window buttons render in three styles
-//     that match Fluxbox semantics:
-//       - focused window: sunken bevel + active-title background +
-//         active-label ink — reads as the currently selected button;
-//       - unfocused open window: raised bevel + inactive-title background
-//         + active-label ink — reads as a normal button;
-//       - minimized window: raised bevel + inactive-title background +
-//         inactive-label ink + "[*] " accent prefix — reads as a folded
-//         entry;
-//     Left-clicking a window button posts a `focus` message to the
-//     compositor (which raises + focuses it, restoring it first if it was
-//     minimized); right-clicking posts a `close` message;
+//   - an iconbar in the middle: a toolkit.AppDock (the modern, grouped-window
+//     dock) with one icon item per known LAUNCHER (terminal / editor / files /
+//     hello / vscode / loom). Open windows do NOT get their own buttons — they
+//     collapse into indicators on their launcher: a "running" dot when the app
+//     has at least one open window, an accent-filled face for the launcher
+//     whose window holds focus, and an attention badge for the count.
+//     Left-clicking a launcher posts a `launch` message; per-window actions
+//     (focus / close) are reached through the right-click application menu;
 //   - a fixed-width clock ("HH:MM") on the right, kept in sync by a `tick`
 //     event posted by the JS worker every 30 seconds.
 //
@@ -35,25 +27,26 @@
 // sequence of hand-drawn rects: the shell is a toolkit.HBox with two
 // fixed-width ends (the workspace label + the clock) and a flex iconbar in
 // the middle, exactly mirroring the three-section geometry. The workspace /
-// clock ends are `section` leaf widgets; the iconbar is a custom container
-// that owns one `launcherButton` leaf per app and one `windowButton` leaf per
-// open window (the three focus / minimized styles are Draw branches). Every
-// leaf embeds toolkit.Base and paints through the painter.Painter primitive
-// set; text is drawn with the toolkit's active font (toolkit.DrawText) —
-// anti-aliased, shaped OpenType after New calls toolkit.UseOpenTypeText (v0.77.0)
-// — instead of a private 5×7 table. The Fluxbox bevel /
-// gradient section chrome has no stock equivalent, so it is kept as custom
-// Draw over the painter (paintBg / drawBevel), and the app glyphs that are
-// bespoke Fluxbox marks (terminal / hello / code / loom) stay custom Draw
-// while the two that map cleanly onto stock artwork reuse the toolkit icon
-// library (editor → DrawIconNew, files → DrawIconOpen).
+// clock ends are `section` leaf widgets; the iconbar is a thin container that
+// composes a toolkit.AppDock (see buildDock) — the widget owns all the dock
+// chrome (rounded item faces, running dots, active fill, attention badges) and
+// the hover magnification, so there are no hand-drawn Fluxbox button bevels
+// left. Every leaf embeds toolkit.Base and paints through the painter.Painter
+// primitive set; text is drawn with the toolkit's active font
+// (toolkit.DrawText) — anti-aliased, shaped OpenType after New calls
+// toolkit.UseOpenTypeText (v0.77.0) — instead of a private 5×7 table. The
+// workspace / clock ends keep their custom Fluxbox bevel / gradient chrome
+// (paintBg / drawBevel), which has no stock equivalent, and each launcher
+// hands the dock an icon painter; the app glyphs that are bespoke Fluxbox
+// marks (terminal / hello / code / loom) stay custom Draw while the two that
+// map cleanly onto stock artwork reuse the toolkit icon library (editor →
+// DrawIconNew, files → DrawIconOpen).
 //
 // The State value remains the single source of truth for layout: the pure
 // *Rect / HitTest* geometry methods are unchanged, so the wasm main's
-// button/wheel-aware event dispatch and the __wasmdockGeometry probe hook
-// (which reads WindowButtonRect) keep working byte-for-byte. Render rebuilds
-// the (cheap) widget view from the current State each frame, so a direct
-// field mutation is always reflected.
+// button/wheel-aware event dispatch keeps working byte-for-byte. Render
+// rebuilds the (cheap) widget view from the current State each frame, so a
+// direct field mutation is always reflected.
 //
 // scene is pure Go (no syscall/js, no cgo) so it builds for any architecture
 // and is unit-tested natively. The wasm main only hands it a byte slice to
@@ -93,14 +86,15 @@ type App struct {
 	Label string
 }
 
-// Window identifies one open (or folded) compositor window the iconbar
-// surfaces as a button. Id is the compositor's window id (echoed back in
-// `focus` / `close` / `restore` messages); Title is the window title painted
-// inside the button; Minimized is true iff the compositor reports the window
-// as currently folded into the iconbar (rendered with a "[*]" prefix +
-// inactive-label dim ink so the user reads it as a folded entry); Focused is
-// true iff this is the keyboard-focused window (rendered with a sunken bevel
-// + active-title background so the user reads it as the selected button).
+// Window identifies one open (or folded) compositor window. In the grouped-
+// window dock model a window is not surfaced as its own button — it collapses
+// into indicators on its launcher (see indicators.go / buildDock). Id is the
+// compositor's window id (echoed back in `focus` / `close` / `restore`
+// messages, and used by the right-click window menu); Title is the window
+// title (also used to map a window to its launcher when the compositor does
+// not send an explicit App id); Minimized is true iff the compositor reports
+// the window as currently folded; Focused is true iff this is the
+// keyboard-focused window (its launcher gets the accent-filled active face).
 // Role mirrors the compositor's role attribute — panels are filtered out
 // server-side so Role is always "window" in practice, but the field is here
 // so a future iconbar style for non-window roles needs no schema change.
@@ -389,66 +383,6 @@ func (s *State) IconbarRect() (x, y, w, h int) {
 	return x, 0, w, s.H
 }
 
-// IconbarButtonRect returns the rectangle (in surface coordinates) of the
-// i-th iconbar button. Buttons sit one after another, left-to-right,
-// separated by IconbarButtonGap. The button height scales to fill the
-// toolbar (s.H - 2*IconbarVPad) so the toolbar reads cleanly at any
-// granted surface height (the compositor floors panel heights at
-// Theme::MIN_H = 60).
-func (s *State) IconbarButtonRect(i int) (x, y, w, h int) {
-	bx, _, _, _ := s.IconbarRect()
-	x = bx + i*(IconbarButtonW+IconbarButtonGap)
-	y = IconbarVPad
-	w = IconbarButtonW
-	h = s.H - 2*IconbarVPad
-	if h < 1 {
-		h = 1
-	}
-	return
-}
-
-// WindowButtonRect returns the rectangle (in surface coordinates) of the
-// i-th open-window button. The open-window row sits AFTER the launcher row
-// in the same iconbar, separated by SeparatorW pixels of gap so the user
-// reads the two sub-sections as distinct stripes. Same width / gap / height
-// rules as the launcher buttons. The first window button starts at
-// (last_launcher_right + SeparatorW); subsequent buttons cascade with
-// IconbarButtonGap between them.
-func (s *State) WindowButtonRect(i int) (x, y, w, h int) {
-	bx, _, iw, _ := s.IconbarRect()
-	// Anchor past the last launcher slot's right edge (NOT including the
-	// trailing IconbarButtonGap — the SeparatorW replaces it).
-	lastLauncherRight := bx + len(s.Apps)*(IconbarButtonW+IconbarButtonGap) - IconbarButtonGap
-	if len(s.Apps) == 0 {
-		lastLauncherRight = bx - SeparatorW // empty launcher row: window row starts at iconbar left
-	}
-	rowStart := lastLauncherRight + SeparatorW
-	// Shrink the window buttons so N of them always FIT in the space left in the
-	// iconbar (between the launcher row and the clock). At the full IconbarButtonW,
-	// four+ windows overflow past the iconbar's right edge — and HitTestWindow
-	// rejects buttons starting past it, so the rightmost entries (e.g. a
-	// just-minimized window) would become unclickable. Cap at IconbarButtonW so a
-	// nearly-empty desktop keeps the roomy default.
-	bw := IconbarButtonW
-	if n := len(s.Windows); n > 0 {
-		avail := (bx + iw) - rowStart
-		if fit := (avail - (n-1)*IconbarButtonGap) / n; fit < bw {
-			bw = fit
-		}
-		if bw < 1 {
-			bw = 1
-		}
-	}
-	x = rowStart + i*(bw+IconbarButtonGap)
-	y = IconbarVPad
-	w = bw
-	h = s.H - 2*IconbarVPad
-	if h < 1 {
-		h = 1
-	}
-	return
-}
-
 // HitTestWorkspace reports whether (x, y) falls inside the workspace section
 // on the left edge of the toolbar. Used by the dock to recognize a
 // left-click (cycle to next workspace) or scroll-wheel event (cycle
@@ -458,58 +392,17 @@ func (s *State) HitTestWorkspace(x, y int) bool {
 	return x >= wx && x < wx+ww && y >= wy && y < wy+wh
 }
 
-// HitTest returns the iconbar-button index under (x, y) in surface
-// coordinates, or -1 if (x, y) does not fall inside any LAUNCHER button.
-// Clicks on the workspace label or the clock are intentionally inert in v0.
-// Use HitTestWindow to probe the open-window buttons (which sit to the right
-// of the launcher row, past a SeparatorW gap).
+// HitTest returns the launcher index under (x, y) in surface coordinates, or
+// -1 if (x, y) does not fall inside any launcher icon. It defers to the
+// composed toolkit.AppDock so paint and hit-testing read the SAME laid-out
+// geometry (magnified under a hovering cursor, resting otherwise). Clicks on
+// the workspace label or the clock fall outside the dock's bounds and return
+// -1. Open windows collapse into indicators on their launcher, so per-window
+// actions are reached through the right-click menu rather than a separate
+// hit-test.
 func (s *State) HitTest(x, y int) int {
-	// Reject anything outside the iconbar's horizontal range up front so a
-	// click on the workspace label / clock never matches.
-	ix, _, iw, _ := s.IconbarRect()
-	if x < ix || x >= ix+iw {
-		return -1
-	}
-	// Hit-test the LAID-OUT geometry (magnified under a hovering cursor, resting
-	// otherwise) so a click lands on the button where it is actually painted.
-	// The click is already confined to the iconbar by the range guard above, so
-	// a slot that contains it is genuinely visible there — even a magnified
-	// button whose anchor was cursor-shifted just outside the iconbar edge.
-	for _, sl := range s.laidOutSlots() {
-		if sl.isWindow {
-			continue
-		}
-		if x >= sl.x && x < sl.x+sl.w && y >= sl.y && y < sl.y+sl.h {
-			return sl.idx
-		}
-	}
-	return -1
-}
-
-// HitTestWindow returns the open-window button index under (x, y) in surface
-// coordinates, or -1 if (x, y) does not fall inside any window button. The
-// open-window row sits past the launcher row + SeparatorW gap in the same
-// iconbar; we reject anything outside the iconbar's horizontal range and
-// skip window buttons whose anchor falls past the iconbar's right edge (very
-// narrow surface fallback — the iconbar paints what fits, the rest is
-// dropped).
-func (s *State) HitTestWindow(x, y int) int {
-	ix, _, iw, _ := s.IconbarRect()
-	if x < ix || x >= ix+iw {
-		return -1
-	}
-	// Hit-test the LAID-OUT window buttons (magnified under a hovering cursor,
-	// resting otherwise) so a click lands on the button where it is painted.
-	// The range guard above already confines the click to the iconbar.
-	for _, sl := range s.laidOutSlots() {
-		if !sl.isWindow {
-			continue
-		}
-		if x >= sl.x && x < sl.x+sl.w && y >= sl.y && y < sl.y+sl.h {
-			return sl.idx
-		}
-	}
-	return -1
+	d := s.buildDock()
+	return d.HitTest(x, y)
 }
 
 // ---- painting: the toolkit widget tree -----------------------------------
@@ -604,182 +497,57 @@ func (w *section) Draw(p painter.Painter, _ *toolkit.Theme) {
 	toolkit.DrawText(p, tx, ty, w.text, rgba(w.ink))
 }
 
-// iconbar is the flex middle section: it paints the active-title background +
-// bevel over the iconbar rect, then draws its launcher buttons, the launcher/
-// window separator, and its window buttons — clipping + stopping exactly like
-// the surface geometry dictates so a narrow surface degrades gracefully.
+// iconbar is the flex middle section: it composes a toolkit.AppDock over the
+// iconbar rect and paints it. The dock owns all the chrome + hover
+// magnification, so the iconbar leaf is a thin adapter onto State.buildDock.
 type iconbar struct {
 	toolkit.Base
 	s *State
 }
 
-// Draw paints the iconbar background then fans out to the button leaves,
-// iterating the LAID-OUT slots so a hovering cursor's magnification is drawn
-// exactly where HitTest expects it. Launcher buttons additionally carry their
-// running / focused indicators + attention badge; the launcher/window separator
-// is placed at the (possibly magnified) boundary between the two rows.
+// Draw composes the iconbar from a toolkit.AppDock (the modern grouped-window
+// dock) and paints it. buildDock maps each launcher to a dock icon item and
+// folds the running / active / badge state onto it, so the widget owns all the
+// chrome (rounded faces, running dots, active fill, attention badges) and the
+// hover magnification — no hand-drawn Fluxbox bevels here.
 func (ib *iconbar) Draw(p painter.Painter, th *toolkit.Theme) {
-	s := ib.s
-	ix, _, iw, _ := s.IconbarRect()
-	paintBg(p, toolkit.Rect{X: ix, Y: 0, W: iw, H: s.H}, s.Theme.Window.Active.Title.Bg)
-	drawBevel(p, toolkit.Rect{X: ix, Y: 0, W: iw, H: s.H})
+	d := ib.s.buildDock()
+	d.Draw(p, th)
+}
 
+// buildDock assembles the toolkit.AppDock for the current State: one
+// AppDockItem per LAUNCHER (s.Apps). Open windows do NOT get their own button —
+// they collapse into indicators on their launcher: item.Running lights the "app
+// is open" dot, item.Active fills the launcher whose window holds focus, and
+// item.Badge overlays the attention count. The dock is bounded to the iconbar
+// rect and handed the live cursor so its magnification + hit-testing read the
+// same layout the user sees. Cheap enough to rebuild every frame, keeping State
+// the single source of truth.
+func (s *State) buildDock() *toolkit.AppDock {
 	running := s.launcherRunning()
-	focusApp := s.focusedLauncher()
-	slots := s.laidOutSlots()
-
-	// Right edge of the last drawn launcher slot, for the separator placement.
-	lastLauncherRight := -1
-	for _, sl := range slots {
-		// Skip buttons whose anchor falls outside the iconbar (very narrow
-		// surface fallback).
-		if sl.x >= ix+iw {
-			continue
-		}
-		// Clip the right edge of the button to the iconbar's right.
-		cw := sl.w
-		if sl.x+cw > ix+iw {
-			cw = ix + iw - sl.x
-		}
-		r := toolkit.Rect{X: sl.x, Y: sl.y, W: cw, H: sl.h}
-		if sl.isWindow {
-			wb := &windowButton{s: s, win: s.Windows[sl.idx], scale: sl.scale}
-			wb.SetBounds(r)
-			wb.Draw(p, th)
-			continue
-		}
-		lastLauncherRight = sl.x + sl.w
-		lb := &launcherButton{
-			s: s, app: s.Apps[sl.idx], scale: sl.scale,
-			running: running[sl.idx],
-			focused: sl.idx == focusApp,
-			badge:   s.BadgeCount(s.Apps[sl.idx].Id),
-		}
-		lb.SetBounds(r)
-		lb.Draw(p, th)
-	}
-
-	// Separator between the static launcher row and the dynamic open-window
-	// row: a 1-pixel-wide dark vertical line centered inside the SeparatorW
-	// gap past the last launcher's right edge. Skipped entirely when no
-	// launchers were drawn (empty Apps or all clipped away).
-	if len(s.Apps) > 0 && lastLauncherRight >= 0 {
-		sepX := lastLauncherRight + SeparatorW - SeparatorW/2 - 1
-		if sepX >= ix && sepX < ix+iw {
-			sepInk := toolkit.RGB(0x40, 0x40, 0x40)
-			for jj := IconbarVPad; jj < s.H-IconbarVPad; jj++ {
-				p.PutPixel(sepX, jj, sepInk)
-			}
+	focus := s.focusedLauncher()
+	items := make([]toolkit.AppDockItem, len(s.Apps))
+	for i, app := range s.Apps {
+		g := app.Glyph
+		items[i] = toolkit.AppDockItem{
+			Id:    app.Id,
+			Label: app.Label,
+			Icon: func(p painter.Painter, r toolkit.Rect, ink toolkit.RGBA) {
+				drawGlyph(p, g, r, ink)
+			},
+			Running: running[i],
+			Active:  i == focus,
+			Badge:   s.BadgeCount(app.Id),
 		}
 	}
-}
-
-// launcherButton is one static app-launcher leaf: an inactive-title bevelled
-// face, the app glyph at the left, and the truncated app label.
-type launcherButton struct {
-	toolkit.Base
-	s   *State
-	app App
-	// scale is the magnification factor of this button (1 = resting); it grows
-	// the glyph so a hovered launcher's icon swells with its button.
-	scale float64
-	// running / focused drive the running dot + active underline; badge is the
-	// attention count (0 = none).
-	running bool
-	focused bool
-	badge   int
-}
-
-// glyphSize returns the icon side length for a launcher slot: the resting
-// IconGlyphPx scaled by the button's magnification, clamped so it never spills
-// past the button height.
-func (b *launcherButton) glyphSize(r toolkit.Rect) int {
-	g := IconGlyphPx
-	if b.scale > 1 {
-		g = int(float64(IconGlyphPx)*b.scale + 0.5)
-	}
-	if max := r.H - 4; g > max {
-		g = max
-	}
-	if g < 1 {
-		g = 1
-	}
-	return g
-}
-
-// Draw paints the launcher button (bevelled face + glyph + truncated label),
-// then its running / focused indicators and any attention badge on top.
-func (b *launcherButton) Draw(p painter.Painter, _ *toolkit.Theme) {
-	r := b.Bounds()
-	paintBg(p, r, b.s.Theme.Window.Inactive.Title.Bg)
-	drawBevel(p, r)
-	// Glyph at the left, swelling with the button under magnification.
-	gsz := b.glyphSize(r)
-	gy := r.Y + (r.H-gsz)/2
-	gx := r.X + IconGlyphLeftPad
-	drawGlyph(p, b.app.Glyph, toolkit.Rect{X: gx, Y: gy, W: gsz, H: gsz})
-	// Label to the right of the glyph, truncated to the remaining width.
-	tx := gx + gsz + IconLabelGap
-	ty := r.Y + (r.H-toolkit.GlyphHeight())/2
-	maxW := r.X + r.W - tx - 2
-	drawClippedText(p, b.app.Label, tx, ty, rgba(b.s.Theme.Window.Active.Title.Label.Color), maxW)
-	// Running / focused indicators + attention badge overlay.
-	if b.running {
-		b.s.drawRunningIndicator(p, r, b.focused)
-	}
-	drawBadge(p, r, b.badge)
-}
-
-// windowButton is one open-window leaf. Its look follows Fluxbox-style
-// semantics chosen from three Openbox theme states:
-//
-//   - Focused window: sunken bevel + active.title background gradient +
-//     active.label ink — the "this is the current window" look.
-//   - Unfocused open window: raised bevel + inactive.title background +
-//     active.label ink — the "another open window, click to focus" look.
-//   - Minimized window: raised bevel + inactive.title background +
-//     inactive.label (dimmer) ink + "[*] " accent prefix on the label — the
-//     "this window is folded into the iconbar" look.
-type windowButton struct {
-	toolkit.Base
-	s   *State
-	win Window
-	// scale is the magnification factor of this button (1 = resting). The
-	// window button is text-only, so the swell is carried by the button rect
-	// (set by the iconbar from the laid-out slot); the field is kept for parity
-	// with launcherButton and future glyphed window entries.
-	scale float64
-}
-
-// Draw paints the window button in one of the three focus / minimized styles.
-func (b *windowButton) Draw(p painter.Painter, _ *toolkit.Theme) {
-	r := b.Bounds()
-	s := b.s
-	var bg theme.Bg
-	var ink theme.Color
-	label := b.win.Title
-	switch {
-	case b.win.Focused:
-		bg = s.Theme.Window.Active.Title.Bg
-		ink = s.Theme.Window.Active.Title.Label.Color
-	case b.win.Minimized:
-		bg = s.Theme.Window.Inactive.Title.Bg
-		ink = s.Theme.Window.Inactive.Title.Label.Color
-		label = "[*] " + label
-	default:
-		bg = s.Theme.Window.Inactive.Title.Bg
-		ink = s.Theme.Window.Active.Title.Label.Color
-	}
-	paintBg(p, r, bg)
-	if b.win.Focused {
-		drawSunkenBevel(p, r)
-	} else {
-		drawBevel(p, r)
-	}
-	tx := r.X + IconGlyphLeftPad
-	ty := r.Y + (r.H-toolkit.GlyphHeight())/2
-	maxW := r.X + r.W - tx - 2
-	drawClippedText(p, label, tx, ty, rgba(ink), maxW)
+	d := toolkit.NewAppDock(items...)
+	d.Magnify = s.Magnify.On
+	d.MaxScale = s.Magnify.MaxScale
+	d.Radius = s.Magnify.Radius
+	d.SetCursor(s.CursorX, s.CursorInside)
+	ix, _, iw, _ := s.IconbarRect()
+	d.SetBounds(toolkit.Rect{X: ix, Y: 0, W: iw, H: s.H})
+	return d
 }
 
 // ---- painter primitives (Fluxbox chrome) ---------------------------------
@@ -862,66 +630,17 @@ func drawBevel(p painter.Painter, r toolkit.Rect) {
 	}
 }
 
-// drawSunkenBevel paints a 1-pixel sunken bevel around r: dark top + left,
-// bright bottom + right — the inverse of drawBevel. Marks the focused
-// open-window button (a Fluxbox-style "pressed" look).
-func drawSunkenBevel(p painter.Painter, r toolkit.Rect) {
-	if r.W <= 0 || r.H <= 0 {
-		return
-	}
-	hi := toolkit.RGB(0xFF, 0xFF, 0xFF)
-	lo := toolkit.RGB(0x40, 0x40, 0x40)
-	for i := 0; i < r.W; i++ {
-		p.PutPixel(r.X+i, r.Y, lo)
-		p.PutPixel(r.X+i, r.Y+r.H-1, hi)
-	}
-	for j := 0; j < r.H; j++ {
-		p.PutPixel(r.X, r.Y+j, lo)
-		p.PutPixel(r.X+r.W-1, r.Y+j, hi)
-	}
-}
-
-// drawClippedText paints txt at (x, y) in ink but stops once the next rune
-// would extend past maxWidth pixels (relative to x). It measures each whole-rune
-// prefix with toolkit.TextWidth and draws the widest one that still fits, so the
-// clip is exact for the active font — proportional AA/shaped OpenType as well as
-// the fixed-advance bitmap default. (The old maxWidth/charWidth character count
-// assumed a fixed 6px advance and would overflow the button with the wider
-// proportional face.)
-func drawClippedText(p painter.Painter, txt string, x, y int, ink toolkit.RGBA, maxWidth int) {
-	if maxWidth <= 0 || txt == "" {
-		return
-	}
-	if toolkit.TextWidth(txt) <= maxWidth {
-		toolkit.DrawText(p, x, y, txt, ink)
-		return
-	}
-	// Grow the prefix rune by rune until the next rune would overflow.
-	runes := []rune(txt)
-	fit := 0
-	for i := 1; i <= len(runes); i++ {
-		if toolkit.TextWidth(string(runes[:i])) > maxWidth {
-			break
-		}
-		fit = i
-	}
-	if fit == 0 {
-		return
-	}
-	toolkit.DrawText(p, x, y, string(runes[:fit]), ink)
-}
-
 // ---- glyph drawing -------------------------------------------------------
 
-// drawGlyph paints one of the built-in icon marks into r. The two glyphs that
-// map cleanly onto the toolkit's stock icon library reuse it (editor →
-// DrawIconNew, files → DrawIconOpen); the bespoke Fluxbox marks (terminal /
-// hello / code / loom) stay custom Draw.
-func drawGlyph(p painter.Painter, g Glyph, r toolkit.Rect) {
+// drawGlyph paints one of the built-in icon marks into r in ink (handed down by
+// the host — the dock passes its item ink). The two glyphs that map cleanly
+// onto the toolkit's stock icon library reuse it (editor → DrawIconNew, files →
+// DrawIconOpen); the bespoke Fluxbox marks (terminal / hello / code / loom)
+// stay custom Draw.
+func drawGlyph(p painter.Painter, g Glyph, r toolkit.Rect, ink toolkit.RGBA) {
 	if r.W <= 0 || r.H <= 0 {
 		return
 	}
-	ink := toolkit.RGB(0x1a, 0x1a, 0x1a)
 	switch g {
 	case GlyphTerminal:
 		drawGlyphTerminal(p, r, ink)

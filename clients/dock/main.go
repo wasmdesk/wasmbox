@@ -3,9 +3,12 @@
 // Command wasmdock is a Fluxbox-style bottom toolbar implemented as a
 // wasmbox external client. It paints a full-width, 28-pixel-tall bevelled
 // gray bar split into three sections — a workspace label, an iconbar of
-// launcher buttons, and a clock — into the SAB the SDK allocated for it,
-// and dispatches {type:"launch", app:"<id>"} to the compositor when an
-// iconbar button is clicked.
+// launcher buttons (with macOS-style hover magnification, running/active
+// indicators + attention badges), and a clock — into the SAB the SDK
+// allocated for it, and dispatches {type:"launch"/"focus"/"close", ...} to
+// the compositor on clicks. Open windows collapse into indicators on their
+// launcher; a right-click on a launcher opens an application context menu in
+// a child popup surface where per-window focus / close actions live.
 //
 // The pure scene + theme packages do all the layout, hit-testing and
 // painting; this file is the thin JS/SAB/postMessage glue. The worker.js
@@ -27,27 +30,15 @@ import (
 	"github.com/wasmdesk/wasmbox/clients/dock/internal/theme"
 )
 
-// exposeGeometry publishes the dock's current window-button rectangles (surface
-// coordinates) on a worker global so headless probes can locate + click a
-// specific window's iconbar entry without hardcoding the layout. Read it via
-// Playwright's worker.evaluate(() => globalThis.__wasmdockGeometry): the screen
-// position is (VIEW_W - w)/2 + x, (VIEW_H - h) + y (the dock is bottom-center
-// anchored). Cheap; only called when the window set changes.
+// exposeGeometry publishes the dock's current launcher rectangles (MAGNIFIED
+// when the cursor hovers, so a probe clicks where the icon is actually painted)
+// on a worker global for headless probes. Read it via Playwright's
+// worker.evaluate(() => globalThis.__wasmdockGeometry): the screen position of a
+// rect is (VIEW_W - w)/2 + x, (VIEW_H - h) + y (the dock is bottom-center
+// anchored). Open windows collapse into indicators on their launcher, so the
+// probe reads launcher rects only. Cheap; refreshed on window changes + hover
+// repaints.
 func exposeGeometry(state *scene.State) {
-	// Read the LAID-OUT rects (magnified when the cursor hovers) so a probe
-	// clicks the button where it is actually painted, magnification included.
-	wr := state.WindowRects()
-	buttons := make([]interface{}, 0, len(wr))
-	for i, r := range wr {
-		w := state.Windows[i]
-		buttons = append(buttons, map[string]interface{}{
-			"id":        w.Id,
-			"title":     w.Title,
-			"minimized": w.Minimized,
-			"focused":   w.Focused,
-			"x":         r[0], "y": r[1], "w": r[2], "h": r[3],
-		})
-	}
 	lr := state.LauncherRects()
 	launchers := make([]interface{}, 0, len(lr))
 	for i, r := range lr {
@@ -59,7 +50,6 @@ func exposeGeometry(state *scene.State) {
 	js.Global().Set("__wasmdockGeometry", js.ValueOf(map[string]interface{}{
 		"w":         state.W,
 		"h":         state.H,
-		"buttons":   buttons,
 		"launchers": launchers,
 	}))
 }
@@ -109,18 +99,6 @@ func main() {
 	launch := func(app string) {
 		println("wasmdock: launch", app)
 		client.Call("launch", app)
-	}
-
-	// focus asks the compositor to raise + focus a window the user
-	// left-clicked on its iconbar button. Travels over the SDK's MessagePort
-	// just like `launch`; the compositor's WindowManager.handle_client_message
-	// routes the message to its `:focus` arm — which also restores the window
-	// first if it was minimized, matching Fluxbox semantics (one click on an
-	// iconbar entry brings the window to the foreground). The compositor then
-	// pushes a refreshed window list back through `windows_changed`.
-	focusWin := func(id int) {
-		println("wasmdock: focus", id)
-		client.Call("focus", id)
 	}
 
 	// setWorkspace asks the compositor to switch the active workspace to
@@ -192,16 +170,6 @@ func main() {
 					launch(state.Apps[i].Id)
 				}
 				break
-			}
-			if i := state.HitTestWindow(x, y); i >= 0 {
-				if button == 2 {
-					// Right-click on a window button: application context menu.
-					openMenu(client, state.BuildWindowMenu(i), x)
-				} else {
-					// Left-click (or any non-right button): focus + raise
-					// (restoring first if minimized).
-					focusWin(state.Windows[i].Id)
-				}
 			}
 		case "wheel":
 			// Scroll-wheel input: cycle workspaces when the wheel fires over

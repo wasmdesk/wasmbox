@@ -111,40 +111,6 @@ func TestBadgeText(t *testing.T) {
 	}
 }
 
-// drawRunningIndicator: degenerate rect no-ops; a normal rect inks a dot; the
-// focused variant additionally inks the wider underline; a very short rect
-// exercises the by<r.Y clamp.
-func TestDrawRunningIndicator(t *testing.T) {
-	s := New(tW, tH)
-	// Degenerate: nothing painted.
-	buf, p := newPainter(40, BarHeight)
-	s.drawRunningIndicator(p, toolkit.Rect{X: 0, Y: 0, W: 0, H: 10}, false)
-	for _, b := range buf {
-		if b != 0 {
-			t.Fatalf("degenerate running indicator painted something")
-		}
-	}
-	// Normal, unfocused: some ink appears near the bottom.
-	buf, p = newPainter(40, BarHeight)
-	s.drawRunningIndicator(p, toolkit.Rect{X: 4, Y: 2, W: 30, H: 24}, false)
-	dot := countNonZero(buf)
-	if dot == 0 {
-		t.Fatalf("running dot painted nothing")
-	}
-	// Focused: strictly more ink (dot + underline).
-	buf2, p2 := newPainter(40, BarHeight)
-	s.drawRunningIndicator(p2, toolkit.Rect{X: 4, Y: 2, W: 30, H: 24}, true)
-	if countNonZero(buf2) <= dot {
-		t.Fatalf("focused underline added no ink")
-	}
-	// Very short rect: by clamps to r.Y, still paints, no panic.
-	buf3, p3 := newPainter(40, BarHeight)
-	s.drawRunningIndicator(p3, toolkit.Rect{X: 4, Y: 2, W: 30, H: 2}, false)
-	if countNonZero(buf3) == 0 {
-		t.Fatalf("short-rect running dot painted nothing")
-	}
-}
-
 // drawBadge: zero count no-ops; degenerate rect no-ops; a positive count inks a
 // pill; a narrow rect exercises the bx<r.X clamp.
 func TestDrawBadge(t *testing.T) {
