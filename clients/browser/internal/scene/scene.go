@@ -366,11 +366,11 @@ func Render(s *State, buf []byte) {
 	if s.hasFrame || s.showSkeleton() {
 		contentBG = th.Surface
 	}
-	p.FillRect(toolkit.Rect{X: 0, Y: toolbarH, W: s.W, H: s.H - toolbarH}, contentBG)
+	fillBox(p, toolkit.Rect{X: 0, Y: toolbarH, W: s.W, H: s.H - toolbarH}, contentBG)
 
 	// Toolbar band + bottom hairline.
-	p.FillRect(toolkit.Rect{X: 0, Y: 0, W: s.W, H: toolbarH}, headerBG)
-	p.FillRect(toolkit.Rect{X: 0, Y: toolbarH - 1, W: s.W, H: 1}, th.Border)
+	fillBox(p, toolkit.Rect{X: 0, Y: 0, W: s.W, H: toolbarH}, headerBG)
+	fillBox(p, toolkit.Rect{X: 0, Y: toolbarH - 1, W: s.W, H: 1}, th.Border)
 
 	s.root.Draw(p, th)
 }

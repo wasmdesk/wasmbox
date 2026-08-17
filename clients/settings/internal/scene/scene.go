@@ -372,8 +372,8 @@ func (r *settingRowW) OnEvent(ev toolkit.Event) {
 func Render(s *State, buf []byte) {
 	p := painter.NewPixelPainter(buf, s.W, s.H)
 	th := s.theme
-	p.FillRect(toolkit.Rect{X: 0, Y: 0, W: s.W, H: s.H}, th.Background)
-	p.FillRect(toolkit.Rect{X: sidebarW, Y: 0, W: 1, H: s.H}, th.Border)
+	fillBox(p, toolkit.Rect{X: 0, Y: 0, W: s.W, H: s.H}, th.Background)
+	fillBox(p, toolkit.Rect{X: sidebarW, Y: 0, W: 1, H: s.H}, th.Border)
 	toolkit.DrawText(p, sidePad, titleTop, "Settings", th.OnBackground)
 	s.root.Draw(p, th)
 }
