@@ -292,7 +292,7 @@ func Render(s *State, buf []byte) {
 	// at. HandleKey's ArrowUp/ArrowDown move Browser.Cursor without re-listing
 	// (so refreshView isn't called); syncing here means every frame paints the
 	// current selection whichever path mutated the cursor.
-	s.table.Selected = s.Browser.Cursor
+	s.table.Selected().Set(s.Browser.Cursor)
 
 	// Grounds: window (right pane) white, sidebar grey, header grey, hairlines.
 	fillBox(p, toolkit.Rect{X: 0, Y: 0, W: s.W, H: s.H}, ColorWindowBG)
