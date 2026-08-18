@@ -434,90 +434,65 @@ func TestDrawGlyphDegenerate(t *testing.T) {
 	}
 }
 
-// drawBevel with a non-positive size is a no-op; a normal call paints the
-// bright top-left highlight and dark bottom-right.
-func TestDrawBevel(t *testing.T) {
-	buf, p := newPainter(40, BarHeight)
-	drawBevel(p, toolkit.Rect{X: 0, Y: 0, W: 0, H: 10})
-	drawBevel(p, toolkit.Rect{X: 0, Y: 0, W: 10, H: 0})
-	for _, b := range buf {
-		if b != 0 {
-			t.Fatalf("degenerate drawBevel painted something: %d", b)
+// gradientDir maps every Openbox gradient axis onto the toolkit.Backdrop
+// direction, with Flat / unknown collapsing to the vertical default.
+func TestGradientDir(t *testing.T) {
+	cases := []struct {
+		in   theme.GradientType
+		want toolkit.GradientDir
+	}{
+		{theme.GradientVertical, toolkit.GradientVertical},
+		{theme.GradientHorizontal, toolkit.GradientHorizontal},
+		{theme.GradientDiagonal, toolkit.GradientDiagonal},
+		{theme.GradientCrossDiagonal, toolkit.GradientCrossDiagonal},
+		{theme.GradientFlat, toolkit.GradientVertical},
+		{theme.GradientRaisedBevel, toolkit.GradientVertical},
+	}
+	for _, c := range cases {
+		if got := gradientDir(c.in); got != c.want {
+			t.Fatalf("gradientDir(%v) = %v, want %v", c.in, got, c.want)
 		}
-	}
-	drawBevel(p, toolkit.Rect{X: 2, Y: 2, W: 8, H: 8})
-	off := (2*40 + 2) * 4
-	if !(buf[off] == 0xFF && buf[off+1] == 0xFF && buf[off+2] == 0xFF) {
-		t.Fatalf("bevel top-left not bright: %v", buf[off:off+3])
-	}
-	off = ((2+8-1)*40 + (2 + 8 - 1)) * 4
-	if !(buf[off] == 0x40 && buf[off+1] == 0x40 && buf[off+2] == 0x40) {
-		t.Fatalf("bevel bottom-right not dark: %v", buf[off:off+3])
 	}
 }
 
-// gradientAt covers every interpolation axis plus the flat/default fall-through.
-func TestGradientAt(t *testing.T) {
-	c1 := theme.Color{0, 0, 0}
-	c2 := theme.Color{100, 100, 100}
-	if got := gradientAt(theme.GradientVertical, 0, 9, 10, 10, c1, c2); got != c2 {
-		t.Fatalf("vertical bottom = %v, want %v", got, c2)
+// A section composes a toolkit.Backdrop, so its face is NOT a flat fill: the
+// raised bevel makes the top row read brighter than the bottom row and the
+// vertical gradient makes the top differ from the bottom in the interior. This
+// asserts the gradient + bevel actually painted (i.e. the Backdrop composed the
+// chrome the old paintBg / drawBevel used to hand-draw).
+func TestSectionDrawBevelAndGradient(t *testing.T) {
+	const w, h = 100, BarHeight
+	buf, p := newPainter(w, h)
+	sec := &section{
+		bg: theme.Bg{
+			Gradient: theme.GradientVertical,
+			Color:    theme.Color{0x30, 0x30, 0x30},
+			ColorTo:  theme.Color{0xC0, 0xC0, 0xC0},
+		},
+		text: "1 of 4",
+		ink:  theme.Color{0, 0, 0},
 	}
-	if got := gradientAt(theme.GradientHorizontal, 9, 0, 10, 10, c1, c2); got != c2 {
-		t.Fatalf("horizontal right = %v, want %v", got, c2)
-	}
-	if got := gradientAt(theme.GradientDiagonal, 9, 9, 10, 10, c1, c2); got != c2 {
-		t.Fatalf("diagonal corner = %v, want %v", got, c2)
-	}
-	if got := gradientAt(theme.GradientCrossDiagonal, 0, 9, 10, 10, c1, c2); got != c2 {
-		t.Fatalf("cross-diagonal corner = %v, want %v", got, c2)
-	}
-	if got := gradientAt(theme.GradientRaisedBevel, 5, 5, 10, 10, c1, c2); got != c1 {
-		t.Fatalf("default gradient = %v, want %v (c1)", got, c1)
-	}
-}
+	sec.SetBounds(toolkit.Rect{X: 0, Y: 0, W: w, H: h})
+	sec.Draw(p, dockToolkitTheme)
 
-// lerpColor covers the denom<=0 collapse, the step clamps, and the midpoint.
-func TestLerpColor(t *testing.T) {
-	c1 := theme.Color{0, 0, 0}
-	c2 := theme.Color{200, 200, 200}
-	if got := lerpColor(c1, c2, 3, 0); got != c1 {
-		t.Fatalf("denom<=0 = %v, want c1", got)
+	// Sample an interior column away from the centred text so the glyph ink
+	// does not pollute the gradient reading.
+	col := 5
+	lum := func(x, y int) int {
+		off := (y*w + x) * 4
+		return int(buf[off]) + int(buf[off+1]) + int(buf[off+2])
 	}
-	if got := lerpColor(c1, c2, -5, 10); got != c1 {
-		t.Fatalf("step<0 clamp = %v, want c1", got)
+	// The top bevel highlight row must be brighter than the bottom shadow row.
+	if lum(col, 0) <= lum(col, h-1) {
+		t.Fatalf("raised bevel not painted: top-row lum %d <= bottom-row lum %d",
+			lum(col, 0), lum(col, h-1))
 	}
-	if got := lerpColor(c1, c2, 99, 10); got != c2 {
-		t.Fatalf("step>denom clamp = %v, want c2", got)
-	}
-	if got := lerpColor(c1, c2, 5, 10); got != (theme.Color{100, 100, 100}) {
-		t.Fatalf("midpoint = %v, want {100,100,100}", got)
-	}
-}
-
-// paintBg draws a flat fill via FillRect and a per-pixel gradient; both are
-// opaque and a degenerate rect paints nothing.
-func TestPaintBg(t *testing.T) {
-	buf, p := newPainter(20, 20)
-	paintBg(p, toolkit.Rect{X: 0, Y: 0, W: 0, H: 10}, theme.Bg{Gradient: theme.GradientFlat, Color: theme.Color{9, 9, 9}})
-	for _, b := range buf {
-		if b != 0 {
-			t.Fatalf("degenerate paintBg painted something")
-		}
-	}
-	buf, p = newPainter(20, 20)
-	paintBg(p, toolkit.Rect{X: 0, Y: 0, W: 20, H: 20}, theme.Bg{Gradient: theme.GradientFlat, Color: theme.Color{0x11, 0x22, 0x33}})
-	for i := 0; i+3 < len(buf); i += 4 {
-		if buf[i] != 0x11 || buf[i+1] != 0x22 || buf[i+2] != 0x33 || buf[i+3] != 0xFF {
-			t.Fatalf("flat fill wrong at byte %d: %v", i, buf[i:i+4])
-		}
-	}
-	buf, p = newPainter(4, 10)
-	paintBg(p, toolkit.Rect{X: 0, Y: 0, W: 4, H: 10}, theme.Bg{Gradient: theme.GradientVertical, Color: theme.Color{0, 0, 0}, ColorTo: theme.Color{240, 240, 240}})
-	top := buf[0]
-	bottom := buf[(9*4+0)*4]
-	if top == bottom {
-		t.Fatalf("vertical gradient did not vary: top=%d bottom=%d", top, bottom)
+	// The interior gradient must vary top -> bottom (Color -> ColorTo), so a
+	// row just under the top bevel must be darker than one just above the
+	// bottom bevel.
+	if lum(col, 2) >= lum(col, h-3) {
+		t.Fatalf("vertical gradient did not vary: upper lum %d >= lower lum %d",
+			lum(col, 2), lum(col, h-3))
 	}
 }
 
