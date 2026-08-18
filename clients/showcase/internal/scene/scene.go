@@ -220,7 +220,7 @@ func New(w, h int) *State {
 	s.radioB = toolkit.NewRadioButton("Tabs")
 	s.radioGroup.Add(s.radioA)
 	s.radioGroup.Add(s.radioB)
-	s.radioA.Checked = true
+	s.radioA.Checked().Set(true)
 	s.dropdown = toolkit.NewDropDown([]string{"UTF-8", "Latin-1", "Shift-JIS"}, 0)
 
 	s.entry = toolkit.NewEntry("hello, world")

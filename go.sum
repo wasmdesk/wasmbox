@@ -597,8 +597,8 @@ github.com/go-ruby-widgets/mvvm v0.1.0 h1:CJPnZ6MskD0CD4IB3jA6JiQV6gm45jE2kP905h
 github.com/go-ruby-widgets/mvvm v0.1.0/go.mod h1:ay/fCVUstt2cgby2jzbxq4WNTHnalRsNOsjSF1yWHgo=
 github.com/go-ruby-widgets/tui v0.1.0 h1:P1gWq3bXLXJVC2lNxO1Nj5yHferukTN8Fw0+4vFUX0o=
 github.com/go-ruby-widgets/tui v0.1.0/go.mod h1:O+e8BZvq01AqaIaAMb0kYHtmlwxrd5VqJ1Pg4hqvy9I=
-github.com/go-ruby-widgets/widgets v0.10.1 h1:Kr5RD2Pr4AWUvWo/CbyOjR6edHRfsYWCNOR3ROyiIP8=
-github.com/go-ruby-widgets/widgets v0.10.1/go.mod h1:/KsXGGhS2o6HPH7VkOQ3djXUBxsZ6GM+w4HFA5nCa1o=
+github.com/go-ruby-widgets/widgets v0.10.2 h1:hUmaQaFHAXNMAF4M1QTvOI6H93iwboCDxXxJ69N6/2A=
+github.com/go-ruby-widgets/widgets v0.10.2/go.mod h1:ysII5OR/cRxqXtd5L5+R1VVZr91GkHJt06xg5cOX1ko=
 github.com/go-ruby-yaml/yaml v0.0.0-20260706120500-56d458798003 h1:SJ9mY8e11Lv0MbTh9CSxYMhY4AyaDHRmc3mYE+WQOQM=
 github.com/go-ruby-yaml/yaml v0.0.0-20260706120500-56d458798003/go.mod h1:HtbQgnZpSTJBAhPg1jOKgHycZl3tXgf9ZdOu4dnHWjQ=
 github.com/go-ruby-zeitwerk/zeitwerk v0.0.0-20260706163820-cda238c0e98c h1:qrS/rTmpYxW1eXGgv1OcBHL43iNAB8B2EkbvlTyzK5Y=
@@ -634,8 +634,8 @@ github.com/go-widgets/mvvm v0.5.0 h1:o5hh6HAxbApONcbZxmyV9q12pCAPGRd6L24aS3gaCbA
 github.com/go-widgets/mvvm v0.5.0/go.mod h1:Phdrd434RLxXW1D6dL1PPQH1tABwYLIN2X7jQVC4TbY=
 github.com/go-widgets/painter v0.11.0 h1:xsj4zTz8B43rOZnWrx7ZsaUBMgJyvgaE/Pq2FfcG2Sw=
 github.com/go-widgets/painter v0.11.0/go.mod h1:IPRLqdUJuJX8sfuHeYLZCzjoLvA0ApbOlyIAVmguJDQ=
-github.com/go-widgets/toolkit v0.193.0 h1:FEqiYMKXDDq8faA28Y/r2VEIuvr8ifX7QtzGyty5KbM=
-github.com/go-widgets/toolkit v0.193.0/go.mod h1:bejJoX1JvlJXc+FU95Dq2QKBAqd3Rgj95iiTQu9KZXo=
+github.com/go-widgets/toolkit v0.198.0 h1:ody0d9MDzi/3c+n+s2Fmrp081V1Ga7uVqRImX813zZs=
+github.com/go-widgets/toolkit v0.198.0/go.mod h1:bejJoX1JvlJXc+FU95Dq2QKBAqd3Rgj95iiTQu9KZXo=
 github.com/go-widgets/toolkit/rougelex v0.1.0 h1:3WdpaNp8laneKDVqYgaev/4I5SMZTnFa+2UtD8f7vmU=
 github.com/go-widgets/toolkit/rougelex v0.1.0/go.mod h1:zntdpbJrVqLk/JGJ6EMdiZeXHFHtVeV5JXHqhWH1f+s=
 github.com/go-widgets/tui v0.55.0 h1:R0m2F7Q0rtXKSBEjto5g6LhUuxHwRaZcmkJqXQGwtOg=
