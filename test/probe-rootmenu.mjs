@@ -443,6 +443,54 @@ try {
     ok(`ws3: iconbar empty (0 entries) — workspace 3 has no windows`);
   }
 
+  // ----- Step 6: DEEP submenu click activates the RIGHT entry ----------
+  // The click-offset bug grew WORSE further down a menu (it accumulated ~2px
+  // per row, so a low row's painted centre fell into the row ABOVE it — the
+  // failure only bit from row index ~7 down). The Workspaces path above (a
+  // 4-row submenu) is too shallow to have ever exercised it; the Applications
+  // submenu is 14 rows, so a click on a DEEP row is the true end-to-end guard.
+  //
+  // We drive the click at the TOOLKIT-painted geometry (rows of 22px from a 2px
+  // body inset — the real menu.go metrics the compositor now sources its hit
+  // testing from), NOT the coarse ITEM_H=24 the earlier steps use, so the click
+  // lands on the exact centre of a deep row. Applications entries follow
+  // APP_LABELS order (05_menu.rb), every id launchable, so:
+  //   0 Terminal  1 Editor  2 Files  3 Hello (wasm)  4 Quake  5 VS Code
+  //   6 VS Code (code-server)  7 Loom  8 Toolkit Showcase  9 Calculator ...
+  // Row 9 (Calculator, index >= 7 → inside the old bug zone) launches a client
+  // whose window title is a deterministic "Calculator". If the routing drifted
+  // by even one row, a DIFFERENT app (row 8 "Toolkit Showcase") would spawn and
+  // the title assertion would fail — so this proves the deep row resolves to
+  // its OWN entry.
+  const ROW_H = 22;        // toolkit MenuRowH (the painted row height)
+  const MENU_TOP_PAD = 2;  // toolkit body top inset (sc(2))
+  const ROOT3_X = 450, ROOT3_Y = 100; // high enough that the 14-row submenu fits on-screen
+  const ws3Before = await dockWindowCount(page); // 0 on the empty workspace 3
+  await page.mouse.click(ROOT3_X, ROOT3_Y, { button: "right" });
+  await page.waitForTimeout(400);
+  // Open Applications (root row 0) at its true painted centre.
+  await page.mouse.click(ROOT3_X + 20, ROOT3_Y + MENU_TOP_PAD + Math.floor(ROW_H / 2));
+  await page.waitForTimeout(400);
+  // Applications submenu opens at (ROOT3_X + MENU_W - 1, ROOT3_Y + MENU_TOP_PAD);
+  // its own row k centre = submenuTop + MENU_TOP_PAD + k*ROW_H + ROW_H/2.
+  const appSubX = ROOT3_X + MENU_W - 1;
+  const appSubTop = ROOT3_Y + MENU_TOP_PAD;
+  const CALC_ROW = 9;
+  const calcY = appSubTop + MENU_TOP_PAD + CALC_ROW * ROW_H + Math.floor(ROW_H / 2);
+  await page.mouse.click(appSubX + 20, calcY);
+  await page.waitForTimeout(2500); // let the Calculator worker register + commit
+  const shot5 = await page.screenshot({ type: "png", path: "/tmp/wasmbox-rootmenu-deep-calculator.png", fullPage: false });
+  ok("screenshot saved -> /tmp/wasmbox-rootmenu-deep-calculator.png");
+  const g6 = await dockGeo(page);
+  const calcBtn = g6 && g6.buttons.find((b) => (b.title || "").startsWith("Calculator"));
+  const ws3After = await dockWindowCount(page);
+  if (!calcBtn) {
+    fail(`deep-click: no "Calculator" window in the dock after clicking Applications row ${CALC_ROW} ` +
+         `(dock titles: ${g6 ? g6.buttons.map((b) => b.title).join(", ") : "n/a"}) — deep submenu row mis-resolved`);
+  } else {
+    ok(`deep-click: Applications row ${CALC_ROW} launched the RIGHT entry — dock gained "${calcBtn.title}" (${ws3Before} -> ${ws3After} windows)`);
+  }
+
   if (pageErrors.length) {
     fail(`pageerror(s): ${pageErrors.join(" | ")}`);
   } else {

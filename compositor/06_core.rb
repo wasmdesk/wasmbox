@@ -1061,6 +1061,9 @@ class Compositor
         { label: "Raise", action: [:focus, win.id] },
         { label: "Close", action: [:close, win.id] },
       ])
+      # Query the toolkit widget for this menu's row geometry before storing it,
+      # so hit-testing routes against the SAME rows the toolkit paints.
+      layout_menu(menu)
       @menu = { kind: :window, x: mx, y: my, menu: menu, win: win, hover: -1,
                 submenu_idx: -1, submenu: nil, submenu_x: 0, submenu_y: 0,
                 submenu_hover: -1 }
@@ -1070,6 +1073,9 @@ class Compositor
       # Compositor::APPLETS is off, in which case RootMenu omits the entry and the
       # menu is exactly what it was before applets landed.
       menu = RootMenu.build(@wm, applets_for_menu)
+      # Query the toolkit widget for the row geometry before storing, so clicks
+      # route against the painted rows (see Compositor#layout_menu).
+      layout_menu(menu)
       @menu = { kind: :root, x: mx, y: my, menu: menu, hover: -1,
                 submenu_idx: -1, submenu: nil, submenu_x: 0, submenu_y: 0,
                 submenu_hover: -1 }
@@ -1309,6 +1315,9 @@ class Compositor
       # action is idempotent: clicking a parent always leaves its submenu
       # open, ready for the user to dive in.
       if state[:submenu_idx] != res[:idx]
+        # Apply the toolkit row geometry to the submenu as it opens, so its own
+        # hit-testing routes against the rows the toolkit paints.
+        layout_menu(entry[:submenu])
         state[:submenu_idx] = res[:idx]
         state[:submenu] = entry[:submenu]
         state[:submenu_x] = state[:x] + Menu::WIDTH - 1
@@ -1343,6 +1352,9 @@ class Compositor
     if pidx >= 0
       entry = state[:menu].entries[pidx]
       if entry[:submenu] && state[:submenu_idx] != pidx
+        # Apply the toolkit row geometry to the submenu as it slides open, so its
+        # own hit-testing routes against the rows the toolkit paints.
+        layout_menu(entry[:submenu])
         state[:submenu_idx] = pidx
         state[:submenu] = entry[:submenu]
         state[:submenu_x] = state[:x] + Menu::WIDTH - 1
