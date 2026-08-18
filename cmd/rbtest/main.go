@@ -725,20 +725,45 @@ flat = Menu.new([
   { label: "Close", action: [:close, 42] },
 ])
 assert_eq(flat.entries.length, 2, "flat menu has 2 entries")
-assert_eq(flat.height, 2 * Menu::ITEM_H, "flat menu height = 2 * ITEM_H")
-# hit_test inside / outside.
-assert_eq(flat.hit_test(0, 0, 10, 5), 0, "row 0 hit (inside first row)")
-assert_eq(flat.hit_test(0, 0, 10, Menu::ITEM_H + 5), 1, "row 1 hit (inside second row)")
-assert_eq(flat.hit_test(0, 0, 10, -1), -1, "above the menu is -1")
-assert_eq(flat.hit_test(0, 0, 10, 2 * Menu::ITEM_H + 1), -1, "below the menu is -1")
+# Geometry MIRRORS the toolkit that paints the panel (menu.go: rows of ITEM_H
+# from a TOP_PAD inset, total = rows + TOP_PAD + BOT_PAD). Ruby does the click
+# hit-testing, so its zones must line up with the painted rows.
+assert_eq(flat.height, Menu::TOP_PAD + Menu::BOT_PAD + 2 * Menu::ITEM_H,
+          "flat menu height = pads + 2 rows (matches toolkit rows+4)")
+# hit_test inside / outside, honouring the toolkit's top pad.
+assert_eq(flat.hit_test(0, 0, 10, Menu::TOP_PAD + 5), 0, "row 0 hit")
+assert_eq(flat.hit_test(0, 0, 10, Menu::TOP_PAD + Menu::ITEM_H + 5), 1, "row 1 hit")
+assert_eq(flat.hit_test(0, 0, 10, Menu::TOP_PAD - 1), -1, "top pad is not a row")
+assert_eq(flat.hit_test(0, 0, 10, flat.height + 1), -1, "below the menu is -1")
 assert_eq(flat.hit_test(0, 0, -1, 5), -1, "left of menu is -1")
 assert_eq(flat.hit_test(0, 0, Menu::WIDTH, 5), -1, "right of menu is -1 (half-open)")
-assert_eq(flat.hit_test(100, 200, 110, 200 + Menu::ITEM_H + 1), 1,
+assert_eq(flat.hit_test(100, 200, 110, 200 + Menu::TOP_PAD + Menu::ITEM_H + 1), 1,
           "hit_test honours pop-up origin")
-# entry_top tracks cumulative row offsets.
-assert_eq(flat.entry_top(0, 0), 0, "entry_top(0)")
-assert_eq(flat.entry_top(0, 1), Menu::ITEM_H, "entry_top(1) = ITEM_H")
-assert_eq(flat.entry_top(50, 1), 50 + Menu::ITEM_H, "entry_top honours y origin")
+# entry_top tracks cumulative row offsets from the top pad.
+assert_eq(flat.entry_top(0, 0), Menu::TOP_PAD, "entry_top(0) = TOP_PAD")
+assert_eq(flat.entry_top(0, 1), Menu::TOP_PAD + Menu::ITEM_H, "entry_top(1)")
+assert_eq(flat.entry_top(50, 1), 50 + Menu::TOP_PAD + Menu::ITEM_H, "entry_top honours y origin")
+
+# ---- Menu: a click lands on the PAINTED row (offset-bug regression) --------
+# Control: the toolkit (go-widgets/toolkit menu.go) is the drawing AUTHORITY —
+# it paints regular rows of LITERAL 22px from a LITERAL 2px top pad, separators
+# 6px. Assert the Ruby model's constants and hit-testing agree with those raw
+# literals (NOT with the model's own symbols — that would be a vacuous self-
+# check). This is what catches a model<->toolkit drift: with the pre-fix 24px /
+# no-pad model, a painted centre 2+22*i+11 fell into hit zone i-1 for the lower
+# rows (return i-1), the reported "click offset". Keep these literals in step
+# with menu.go if its MenuRowH / MenuSeparatorH / sc(2) body start ever change.
+assert_eq(Menu::ITEM_H, 22, "ITEM_H mirrors toolkit MenuRowH (22)")
+assert_eq(Menu::SEP_H, 6, "SEP_H mirrors toolkit MenuSeparatorH (6)")
+assert_eq(Menu::TOP_PAD, 2, "TOP_PAD mirrors toolkit body start (sc(2))")
+deep = Menu.new((0...10).map { |k| { label: "item #{k}", action: [:noop, k] } })
+di = 0
+while di < 10
+  painted_centre = 2 + di * 22 + 11   # toolkit geometry, LITERAL
+  assert_eq(deep.hit_test(0, 0, 10, painted_centre), di,
+            "toolkit-painted row centre resolves to its own row")
+  di += 1
+end
 
 # ---- Menu: separator ------------------------------------------------
 withsep = Menu.new([
@@ -746,13 +771,13 @@ withsep = Menu.new([
   { separator: true },
   { label: "B", action: [:noop, "b"] },
 ])
-assert_eq(withsep.height, 2 * Menu::ITEM_H + Menu::SEP_H,
+assert_eq(withsep.height, Menu::TOP_PAD + Menu::BOT_PAD + 2 * Menu::ITEM_H + Menu::SEP_H,
           "separator counted as SEP_H not ITEM_H")
 # Hit_test on the separator returns -1 (not selectable); hit on the next row
 # correctly maps to entry index 2 (not 1) because separators consume index slots.
-assert_eq(withsep.hit_test(0, 0, 10, Menu::ITEM_H + 1), -1,
+assert_eq(withsep.hit_test(0, 0, 10, Menu::TOP_PAD + Menu::ITEM_H + 1), -1,
           "hit on separator row is -1")
-assert_eq(withsep.hit_test(0, 0, 10, Menu::ITEM_H + Menu::SEP_H + 1), 2,
+assert_eq(withsep.hit_test(0, 0, 10, Menu::TOP_PAD + Menu::ITEM_H + Menu::SEP_H + 1), 2,
           "row after separator is index 2")
 
 # ---- RootMenu.build: top-level shape --------------------------------
