@@ -4,11 +4,11 @@ go 1.26.4
 
 require (
 	github.com/go-embedded-ruby/ruby v0.0.0-20260809134646-3ce8c91d38e7
-	github.com/go-opentype/fonts v0.6.0
+	github.com/go-opentype/fonts v0.8.0
 	github.com/go-ruby-parser/parser v0.1.3
 	github.com/go-webengine/browserproxy v0.0.0-20260808195644-0fab95c6c8b8
 	github.com/go-widgets/painter v0.11.0
-	github.com/go-widgets/toolkit v0.198.0
+	github.com/go-widgets/toolkit v0.201.0
 	github.com/go-widgets/toolkit/rougelex v0.1.0
 	github.com/grpc-transports/websocket v0.2.0
 	github.com/wasmdesk/coreutils v0.0.0-20260629060422-c37bd87ae249
@@ -90,9 +90,10 @@ require (
 	github.com/go-datetime/dates v0.1.0 // indirect
 	github.com/go-facter/facter v0.0.0-20260708052836-752b1a3edee0 // indirect
 	github.com/go-fft/fft v0.0.0-20260620110530-0e3ca1747acb // indirect
-	github.com/go-gfx/gfx v0.1.0 // indirect
+	github.com/go-gfx/gfx v0.6.0 // indirect
 	github.com/go-hiera/hiera v0.0.0-20260708051558-73bff6edd0e9 // indirect
 	github.com/go-hocon/hocon v0.0.0-20260709172937-6d69e3b57178 // indirect
+	github.com/go-iconoir/iconoir v0.2.0 // indirect
 	github.com/go-images/images v0.0.0-20260811115337-bc5d586f8e38 // indirect
 	github.com/go-jose/go-jose/v4 v4.1.4 // indirect
 	github.com/go-kramdown/kramdown v0.1.0 // indirect
@@ -103,9 +104,8 @@ require (
 	github.com/go-mustache/mustache v0.1.0 // indirect
 	github.com/go-ndarray/ndarray v0.0.0-20260620170009-555bfc31e7a3 // indirect
 	github.com/go-nokogiri/nokogiri v0.1.0 // indirect
-	github.com/go-opentype/bidi v0.2.1 // indirect
-	github.com/go-opentype/opentype v0.5.0 // indirect
-	github.com/go-opentype/shape v0.4.0 // indirect
+	github.com/go-opentype/opentype v0.6.0 // indirect
+	github.com/go-opentype/shape v0.5.0 // indirect
 	github.com/go-pcore/pcore v0.0.0-20260708052910-1416bf219e47 // indirect
 	github.com/go-puppet/puppet v0.0.0-20260710130746-3ef04469bb7e // indirect
 	github.com/go-regexp/engine v0.1.0 // indirect
@@ -215,7 +215,7 @@ require (
 	github.com/go-ruby-openbao/openbao v0.0.0-20260707160751-fcf5670a4d6d // indirect
 	github.com/go-ruby-openstack/openstack v0.0.0-20260710213906-771c80a1b6cf // indirect
 	github.com/go-ruby-opentelemetry/opentelemetry v0.0.0-20260704112350-643c5c130c9c // indirect
-	github.com/go-ruby-opentype/opentype v0.1.0 // indirect
+	github.com/go-ruby-opentype/opentype v0.2.0 // indirect
 	github.com/go-ruby-optparse/optparse v0.0.0-20260629093110-6b69a6b03546 // indirect
 	github.com/go-ruby-ostruct/ostruct v0.0.0-20260630080835-69fcd87e76bf // indirect
 	github.com/go-ruby-pagy/pagy v0.0.0-20260707193354-a84fe1d16a86 // indirect
@@ -283,7 +283,7 @@ require (
 	github.com/go-ruby-webrick/webrick v0.0.0-20260630133907-a1380ee7733b // indirect
 	github.com/go-ruby-widgets/mvvm v0.1.0 // indirect
 	github.com/go-ruby-widgets/tui v0.1.0 // indirect
-	github.com/go-ruby-widgets/widgets v0.10.2 // indirect
+	github.com/go-ruby-widgets/widgets v0.10.3 // indirect
 	github.com/go-ruby-yaml/yaml v0.0.0-20260706120500-56d458798003 // indirect
 	github.com/go-ruby-zeitwerk/zeitwerk v0.0.0-20260706163820-cda238c0e98c // indirect
 	github.com/go-ruby-zlib/zlib v0.0.0-20260704053046-1ff8c43f4f67 // indirect
@@ -293,6 +293,7 @@ require (
 	github.com/go-simd/crc32 v0.0.0-20260703213456-a1976694a16e // indirect
 	github.com/go-simd/hex v0.0.0-20260627054622-d04d429c6aea // indirect
 	github.com/go-sql-driver/mysql v1.10.0 // indirect
+	github.com/go-typeset/bidi v0.3.0 // indirect
 	github.com/go-viper/mapstructure/v2 v2.5.0 // indirect
 	github.com/go-webauthn/webauthn v0.17.4 // indirect
 	github.com/go-webauthn/x v0.2.6 // indirect
