@@ -98,14 +98,14 @@ func TestSidebarSelect(t *testing.T) {
 func TestSwitchToggleViaWidgetBounds(t *testing.T) {
 	s := newState() // Appearance selected; row 0 = "Dark Mode" (off)
 	sw := s.cats[0].rows[0].sw
-	if sw.On {
+	if sw.On().Get() {
 		t.Fatal("precondition: Dark Mode should start off")
 	}
 	b := sw.Bounds()
 	if !s.HandleMouse(b.X+b.W/2, b.Y+b.H/2) {
 		t.Fatal("clicking the switch should request a redraw")
 	}
-	if !sw.On {
+	if !sw.On().Get() {
 		t.Error("Dark Mode switch did not turn on")
 	}
 }
@@ -113,13 +113,13 @@ func TestSwitchToggleViaWidgetBounds(t *testing.T) {
 func TestSwitchToggleAnywhereOnRow(t *testing.T) {
 	s := newState()
 	sw := s.cats[0].rows[1].sw // "Reduce Transparency"
-	was := sw.On
+	was := sw.On().Get()
 	// Click in the row's text region (left of the switch), still toggles.
 	ry := cardTop + 1*rowH
 	if !s.HandleMouse(sidebarW+cardMarginX+40, ry+rowH/2) {
 		t.Fatal("clicking a switch row should request a redraw")
 	}
-	if sw.On == was {
+	if sw.On().Get() == was {
 		t.Error("clicking the row body did not toggle the switch")
 	}
 }
@@ -133,8 +133,8 @@ func TestScaleClickSetsValue(t *testing.T) {
 	if !s.HandleMouse(b.X+b.W-2, b.Y+b.H/2) {
 		t.Fatal("clicking the scale should request a redraw")
 	}
-	if sc.Value < 90 {
-		t.Errorf("scale value after right-edge click = %.1f, want >= 90", sc.Value)
+	if sc.Value().Get() < 90 {
+		t.Errorf("scale value after right-edge click = %.1f, want >= 90", sc.Value().Get())
 	}
 }
 
@@ -227,7 +227,7 @@ func TestClickRoutingRightEdgeSwitch(t *testing.T) {
 	if !s.HandleMouse(b.X+b.W-1, b.Y+1) {
 		t.Fatal("click at the switch's far corner must route + toggle")
 	}
-	if !sw.On {
+	if !sw.On().Get() {
 		t.Error("far-corner click did not toggle the switch")
 	}
 }
@@ -248,8 +248,8 @@ func TestSettingRowNonClickIgnored(t *testing.T) {
 	fired := false
 	row := &settingRowW{title: "X", kind: rowSwitch, sw: sw, notify: func() { fired = true }}
 	row.OnEvent(toolkit.Event{Kind: toolkit.EventKeyDown, Code: "Enter"})
-	if sw.On || fired {
-		t.Errorf("non-click event mutated the row: On=%v notified=%v", sw.On, fired)
+	if sw.On().Get() || fired {
+		t.Errorf("non-click event mutated the row: On=%v notified=%v", sw.On().Get(), fired)
 	}
 }
 
