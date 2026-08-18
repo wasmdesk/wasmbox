@@ -224,6 +224,9 @@ class Compositor
   def open_tray_menu(it, px, py)
     if it.menu.is_a?(Array) && !it.menu.empty?
       menu = Menu.new(it.menu)
+      # Query the toolkit widget for the row geometry before storing, so the
+      # tray menu shares the compositor menu hit-testing (see #layout_menu).
+      layout_menu(menu)
       @menu = { kind: :root, x: px, y: py, menu: menu, hover: -1,
                 submenu_idx: -1, submenu: nil, submenu_x: 0, submenu_y: 0,
                 submenu_hover: -1 }

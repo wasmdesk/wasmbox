@@ -1,94 +1,131 @@
 class Menu
-  # These row/pad metrics MIRROR the toolkit menu that actually PAINTS the
-  # panel (go-widgets/toolkit menu.go: MenuRowH=22, MenuSeparatorH=6, and a
-  # body drawn from `r.Y + sc(2)` with a matching 2px bottom pad). The Ruby
-  # model here does the click hit-testing (routing stays in Ruby — see
-  # 08_menu_widgets.rb), so its geometry MUST match the toolkit's pixel layout
-  # or clicks land on the wrong row. When the menu drawing moved to the toolkit
-  # these had stayed at the old hand-drawn ITEM_H=24 / no-pad, which drifted the
-  # hit zones 2px per row below the painted rows (worse the further down the
-  # menu) — the "click offset" bug. Keep them in lockstep with menu.go.
-  ITEM_H  = 22     # row height (= toolkit MenuRowH)
-  WIDTH   = 170    # default menu width
-  SEP_H   = 6      # separator row height (= toolkit MenuSeparatorH)
-  PAD_X   = 8      # left/right text padding
-  TOP_PAD = 2      # body top inset (= toolkit `r.Y + sc(2)` row start)
-  BOT_PAD = 2      # body bottom inset (toolkit total = rows + sc(4))
+  # WIDTH is the panel width the compositor imposes on every menu: the width it
+  # hands the toolkit at layout time and blits the rendered panel into (see
+  # 08_menu_widgets.rb). It is a compositor CHOICE, not a per-row metric that can
+  # drift, so it stays a constant here.
+  #
+  # Every ROW metric (row height, separator height, body top/bottom pad) now
+  # comes from the go-widgets/toolkit menu widget that actually PAINTS the panel,
+  # queried once when the menu opens via #apply_widget_layout (RowTop/RowHeight).
+  # The Ruby routing (hit_test / entry_top / height) then reads those cached
+  # widget-derived numbers, so it can never diverge from the pixels the toolkit
+  # draws. Previously this file HARDCODED ITEM_H=22 / SEP_H=6 / TOP_PAD=2 /
+  # BOT_PAD=2 as a hand-kept mirror of menu.go — which had earlier sat at the
+  # stale ITEM_H=24 / no-pad and drifted the hit zones 2px/row below the painted
+  # rows (worse the further down the menu): the "click offset" bug. Sourcing the
+  # geometry from the widget removes the mirror, and with it the drift.
+  WIDTH = 170
 
   attr_reader :entries
 
   def initialize(entries)
     @entries = entries
+    # Row geometry is INJECTED by #apply_widget_layout when the menu opens. Until
+    # then the routing methods report "no row" / zero height rather than guess a
+    # metric — the compositor always lays a menu out before it uses or paints it.
+    @row_tops = nil
+    @row_heights = nil
+    @total_h = 0
   end
 
-  # The pixel height required to paint this menu: the top+bottom body pads plus
-  # every entry row (separators are shorter than regular rows). Matches the
-  # toolkit's natural height (rows + sc(4)); sizing the blit buffer to exactly
-  # this keeps the toolkit from scrolling the body (which would re-introduce an
-  # offset), and keeps hit_test's region flush with the painted panel.
-  def height
-    h = TOP_PAD + BOT_PAD
-    @entries.each { |e| h += e[:separator] ? SEP_H : ITEM_H }
-    h
+  # Translate the domain entries into the Array-of-Hashes the toolkit menu
+  # constructor (Widgets.menu) accepts. PURE data — no widgets dependency — so
+  # the painter (08_menu_widgets.rb #build_widget_menu) and the geometry query
+  # (#apply_widget_layout) build the SAME widget, and the queried row bands line
+  # up exactly with the painted rows. Every selectable row carries a non-empty
+  # "action" so the toolkit paints it enabled (and RowAt treats it as a hit
+  # target — it returns -1 for action-less rows); submenu parents get a ">"
+  # chevron via the "shortcut" field. The marker is never dispatched through the
+  # widget; click routing stays in Ruby.
+  def to_widget_items
+    items = []
+    @entries.each do |e|
+      if e[:separator]
+        items << { "separator" => true }
+      else
+        item = { "label" => e[:label].to_s, "action" => "x" }
+        item["shortcut"] = ">" if e[:submenu]
+        items << item
+      end
+    end
+    items
   end
 
-  # Bounding rectangle when popped up at (x, y), as [x, y, w, h].
-  def region(x, y)
-    [x, y, WIDTH, height]
-  end
-
-  # Index of the entry containing the point (mx, my) when the menu is popped
-  # up at (x, y), or -1 if the point falls outside the menu region (or on a
-  # separator, which is not selectable). Separators occupy SEP_H rather than
-  # the full ITEM_H, and they advance the cursor without being targetable.
+  # Query the toolkit menu widget for this menu's row geometry and cache it, so
+  # the Ruby click routing is driven by the SAME numbers the toolkit paints with
+  # — the toolkit is the single source of truth for the hit geometry.
   #
-  # Implementation note: rbgo does NOT propagate a `return` from a block to
-  # the enclosing method (the block-local return only exits the block — see
-  # WindowManager#find for the same workaround). So we walk with a while-loop.
+  # `widgets` is the `Widgets` module (require "widgets"). It is PASSED IN rather
+  # than referenced directly so this pure-WM file (loaded by rbtest as 01..05,
+  # before any `require "widgets"`) stays free of the binding: the compositor
+  # hands it in (08_menu_widgets.rb #layout_menu) and rbtest hands in the same
+  # module. Contract: RowTop/RowHeight need the handle laid out first (as render
+  # already requires), so we lay it out — tall enough that the menu never needs
+  # to scroll, so every reported RowTop is a true, scroll-free content position
+  # (the compositor never scrolls a menu).
+  def apply_widget_layout(widgets)
+    handle = widgets.menu(to_widget_items)
+    n = @entries.length
+    widgets.layout(handle, WIDTH, (n + 4) * 64)
+    tops = []
+    heights = []
+    i = 0
+    while i < n
+      tops << widgets.menu_row_top(handle, i)
+      heights << widgets.menu_row_height(handle, i)
+      i += 1
+    end
+    @row_tops = tops
+    @row_heights = heights
+    # Total painted height = the widget's body bottom edge (RowTop past the last
+    # row) plus the top inset (RowTop(0)) for the matching bottom pad — every
+    # term widget-derived, no hardcoded pad. Sizing the blit buffer to exactly
+    # this keeps the toolkit from scrolling the body (which would re-introduce an
+    # offset) and keeps the hit bands flush with the painted panel.
+    @total_h = widgets.menu_row_top(handle, n) + widgets.menu_row_top(handle, 0)
+    self
+  end
+
+  # The pixel height required to paint this menu, from the toolkit geometry
+  # cached by #apply_widget_layout (0 before the menu has been laid out).
+  def height
+    @total_h
+  end
+
+  # Index of the entry whose widget row band contains (mx, my) when the menu is
+  # popped up at (x, y), or -1 outside the menu / on a separator (whose band the
+  # toolkit reports but which is not selectable). Mirrors toolkit RowAt: the
+  # point is mapped into widget-local space (mx - x, my - y) and tested against
+  # the cached [top, top + height) band of each row. Returns -1 until the
+  # geometry has been applied (defensive).
+  #
+  # Implementation note: rbgo does NOT propagate a `return` from a block to the
+  # enclosing method (see WindowManager#find), so we walk with a while-loop.
   def hit_test(x, y, mx, my)
+    return -1 if @row_tops.nil?
     return -1 if mx < x || mx >= x + WIDTH
-    return -1 if my < y + TOP_PAD
-    cy = y + TOP_PAD
+    ly = my - y
     i = 0
     n = @entries.length
     while i < n
-      e = @entries[i]
-      row_h = e[:separator] ? SEP_H : ITEM_H
-      if my < cy + row_h
-        return -1 if e[:separator]
+      top = @row_tops[i]
+      if ly >= top && ly < top + @row_heights[i]
+        return -1 if @entries[i][:separator]
         return i
       end
-      cy += row_h
       i += 1
     end
     -1
   end
 
-  # Top-y of entry i when the menu starts at y. Needed by the Compositor to
-  # position a sub-menu flush with the parent entry it opens from. Walks with
-  # an indexed while-loop because rbgo block-return does not unwind the
-  # enclosing method.
+  # Top-y of entry i when the menu starts at y, from the toolkit's per-row top
+  # (RowTop) cached by #apply_widget_layout. Needed by the Compositor to position
+  # a sub-menu flush with the parent entry it opens from. Falls back to y for an
+  # unlaid menu or an out-of-range index (defensive — callers always pass a valid
+  # parent index on a laid-out menu).
   def entry_top(y, idx)
-    cy = y + TOP_PAD
-    i = 0
-    n = @entries.length
-    while i < n
-      return cy if i == idx
-      cy += @entries[i][:separator] ? SEP_H : ITEM_H
-      i += 1
-    end
-    cy
-  end
-
-  # Convenience for the renderer: walk entries with their (y, h) row metrics.
-  # Yields [entry, row_y, row_h, index] for each entry.
-  def each_row(y)
-    cy = y + TOP_PAD
-    @entries.each_with_index do |e, i|
-      row_h = e[:separator] ? SEP_H : ITEM_H
-      yield e, cy, row_h, i
-      cy += row_h
-    end
+    return y if @row_tops.nil? || idx < 0 || idx >= @row_tops.length
+    y + @row_tops[idx]
   end
 end
 

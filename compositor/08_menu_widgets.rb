@@ -27,6 +27,19 @@ require "base64"
 Widgets.set_theme("dark")
 
 class Compositor
+  # Apply the toolkit-widget row geometry to a menu the moment it opens, so the
+  # Ruby click routing (menu_resolve / handle_menu_click / handle_menu_hover in
+  # 06_core.rb) is driven by the SAME numbers the toolkit paints with — the
+  # single source of truth for the menu's hit geometry. Every site that pops a
+  # menu (root / window / tray in 06_core.rb + 13_tray.rb) and every site that
+  # opens a submenu calls this before storing or hit-testing it. It just hands
+  # the `Widgets` module to Menu#apply_widget_layout (which keeps the pure Menu
+  # domain model free of the binding — see 05_menu.rb). Returns the menu.
+  def layout_menu(menu)
+    menu.apply_widget_layout(Widgets)
+    menu
+  end
+
   # Paint the open menu (and its open submenu, if any) via the widgets binding.
   # Mirrors draw_menu's two-panel structure. Called from draw_menu when the
   # flag is on.
@@ -65,28 +78,14 @@ class Compositor
     JS.global.call("wasmboxBlitRGBA", @ctx, b64, w, h, x, y, key)
   end
 
-  # Translate a Menu's entries into the Ruby Array-of-Hashes the Widgets.menu
-  # constructor accepts (keys: "label" / "separator" / "shortcut" / "action").
-  #
-  # Every selectable row carries a non-empty "action" marker so the toolkit
-  # paints it enabled — the toolkit greys out action-less rows, and our submenu
-  # parents (Applications / Workspaces / Theme / Frame) carry a :submenu rather
-  # than an :action. The marker is never dispatched through the widget event
-  # seam; click routing stays in Ruby. Submenu parents get a ">" shortcut as a
-  # right-edge chevron approximation (the adapter's menu constructor exposes no
-  # submenu/chevron field — see the pilot gap notes).
+  # Build the toolkit menu widget for `menu` from its domain entries. The
+  # entries → Widgets.menu item-hash translation lives on the pure Menu model
+  # (Menu#to_widget_items in 05_menu.rb) so the painter here and the geometry
+  # query (Menu#apply_widget_layout) build the IDENTICAL widget — the queried
+  # row bands then line up exactly with these painted rows. See
+  # Menu#to_widget_items for the marker/chevron conventions.
   def build_widget_menu(menu)
-    items = []
-    menu.entries.each do |e|
-      if e[:separator]
-        items << { "separator" => true }
-      else
-        item = { "label" => e[:label].to_s, "action" => "x" }
-        item["shortcut"] = ">" if e[:submenu]
-        items << item
-      end
-    end
-    Widgets.menu(items)
+    Widgets.menu(menu.to_widget_items)
   end
 
   # A cheap content signature for a menu panel: its key, pixel size, and the

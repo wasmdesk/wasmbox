@@ -719,49 +719,93 @@ assert(wmw9.focused.nil?, "minimize on a workspace with only one window leaves n
 wmw9.set_workspace(1)
 assert(wmw9.focused.equal?(mb), "ws 1 still has mb focused after the round trip")
 
-# ---- Menu: shape + hit_test + entry_top ------------------------------
+# ---- Menu: geometry now comes from the toolkit widget (single source) ------
+# The Menu domain model keeps entries / actions / submenu structure, but its ROW
+# GEOMETRY (row tops, heights, total height) is queried from the go-widgets
+# toolkit menu that actually PAINTS the panel — via Widgets.menu_row_top /
+# menu_row_height, applied by Menu#apply_widget_layout(Widgets). That is the SAME
+# query the compositor runs when a menu opens (08_menu_widgets.rb #layout_menu),
+# so the routing exercised here is exactly the routing that ships. The model no
+# longer hardcodes ITEM_H / SEP_H / TOP_PAD / BOT_PAD, so there is no mirror to
+# drift — the old "click offset" bug is now structurally impossible.
+#
+# rbtest runs on native rbgo, whose require "widgets" binds the same
+# go-ruby-widgets/widgets adapter (over go-widgets/toolkit) the wasm build uses,
+# so a real toolkit menu can be built and measured right here.
+require "widgets"
+
 flat = Menu.new([
   { label: "Raise", action: [:focus, 42] },
   { label: "Close", action: [:close, 42] },
 ])
 assert_eq(flat.entries.length, 2, "flat menu has 2 entries")
-# Geometry MIRRORS the toolkit that paints the panel (menu.go: rows of ITEM_H
-# from a TOP_PAD inset, total = rows + TOP_PAD + BOT_PAD). Ruby does the click
-# hit-testing, so its zones must line up with the painted rows.
-assert_eq(flat.height, Menu::TOP_PAD + Menu::BOT_PAD + 2 * Menu::ITEM_H,
-          "flat menu height = pads + 2 rows (matches toolkit rows+4)")
-# hit_test inside / outside, honouring the toolkit's top pad.
-assert_eq(flat.hit_test(0, 0, 10, Menu::TOP_PAD + 5), 0, "row 0 hit")
-assert_eq(flat.hit_test(0, 0, 10, Menu::TOP_PAD + Menu::ITEM_H + 5), 1, "row 1 hit")
-assert_eq(flat.hit_test(0, 0, 10, Menu::TOP_PAD - 1), -1, "top pad is not a row")
+# Before layout the geometry is unset: nothing resolves, height is 0 (defensive
+# — the compositor always lays a menu out before it is used or painted).
+assert_eq(flat.height, 0, "unlaid menu reports 0 height")
+assert_eq(flat.hit_test(0, 0, 10, 10), -1, "unlaid menu hit_test is -1")
+flat.apply_widget_layout(Widgets)
+
+# CONTROL RUN (feedback: validate a new probe vs a known-good control first):
+# build the SAME toolkit widget the compositor paints and read its geometry
+# DIRECTLY, then assert the toolkit reports the row metrics we expect — 22px
+# rows from a 2px top inset. Because the Menu model no longer hardcodes these,
+# THIS control is what would catch a toolkit MenuRowH / body-inset change.
+ctl = Widgets.menu([
+  { "label" => "Raise", "action" => "x" },
+  { "label" => "Close", "action" => "x" },
+])
+Widgets.layout(ctl, Menu::WIDTH, 6 * 64)
+assert_eq(Widgets.menu_row_height(ctl, 0), 22, "toolkit paints a 22px row (MenuRowH)")
+assert_eq(Widgets.menu_row_top(ctl, 0), 2, "toolkit body starts at a 2px inset")
+assert_eq(Widgets.menu_row_top(ctl, 1), 24, "toolkit row 1 top = inset + one 22px row")
+# The Menu model's height equals the widget's total (body bottom edge + top
+# inset for the matching bottom pad), all widget-derived.
+assert_eq(flat.height, Widgets.menu_row_top(ctl, 2) + Widgets.menu_row_top(ctl, 0),
+          "Menu#height = widget body bottom edge + top inset")
+assert_eq(flat.height, 48, "flat 2-row menu is 2*22 + 4 = 48 px tall")
+
+# Routing: a click at the WIDGET-painted centre of each row resolves to that row
+# through the SAME hit_test the compositor uses. Driving the expected centre from
+# the widget (not from a Ruby constant) is what makes this a real model<->toolkit
+# AGREEMENT check rather than a vacuous self-check.
+[0, 1].each do |i|
+  cy = Widgets.menu_row_top(ctl, i) + Widgets.menu_row_height(ctl, i) / 2
+  assert_eq(flat.hit_test(0, 0, 10, cy), i,
+            "widget-painted row #{i} centre resolves to row #{i}")
+end
+assert_eq(flat.hit_test(0, 0, 10, Widgets.menu_row_top(ctl, 0) - 1), -1,
+          "the top inset is not a row")
 assert_eq(flat.hit_test(0, 0, 10, flat.height + 1), -1, "below the menu is -1")
 assert_eq(flat.hit_test(0, 0, -1, 5), -1, "left of menu is -1")
 assert_eq(flat.hit_test(0, 0, Menu::WIDTH, 5), -1, "right of menu is -1 (half-open)")
-assert_eq(flat.hit_test(100, 200, 110, 200 + Menu::TOP_PAD + Menu::ITEM_H + 1), 1,
-          "hit_test honours pop-up origin")
-# entry_top tracks cumulative row offsets from the top pad.
-assert_eq(flat.entry_top(0, 0), Menu::TOP_PAD, "entry_top(0) = TOP_PAD")
-assert_eq(flat.entry_top(0, 1), Menu::TOP_PAD + Menu::ITEM_H, "entry_top(1)")
-assert_eq(flat.entry_top(50, 1), 50 + Menu::TOP_PAD + Menu::ITEM_H, "entry_top honours y origin")
+# hit_test honours the pop-up origin (x, y): shift the menu and the same widget
+# row centre shifts with it.
+oy = 200
+c1 = Widgets.menu_row_top(ctl, 1) + Widgets.menu_row_height(ctl, 1) / 2
+assert_eq(flat.hit_test(100, oy, 110, oy + c1), 1, "hit_test honours pop-up origin")
 
-# ---- Menu: a click lands on the PAINTED row (offset-bug regression) --------
-# Control: the toolkit (go-widgets/toolkit menu.go) is the drawing AUTHORITY —
-# it paints regular rows of LITERAL 22px from a LITERAL 2px top pad, separators
-# 6px. Assert the Ruby model's constants and hit-testing agree with those raw
-# literals (NOT with the model's own symbols — that would be a vacuous self-
-# check). This is what catches a model<->toolkit drift: with the pre-fix 24px /
-# no-pad model, a painted centre 2+22*i+11 fell into hit zone i-1 for the lower
-# rows (return i-1), the reported "click offset". Keep these literals in step
-# with menu.go if its MenuRowH / MenuSeparatorH / sc(2) body start ever change.
-assert_eq(Menu::ITEM_H, 22, "ITEM_H mirrors toolkit MenuRowH (22)")
-assert_eq(Menu::SEP_H, 6, "SEP_H mirrors toolkit MenuSeparatorH (6)")
-assert_eq(Menu::TOP_PAD, 2, "TOP_PAD mirrors toolkit body start (sc(2))")
-deep = Menu.new((0...10).map { |k| { label: "item #{k}", action: [:noop, k] } })
+# entry_top tracks the widget's per-row top (used to anchor a sub-menu).
+assert_eq(flat.entry_top(0, 0), Widgets.menu_row_top(ctl, 0), "entry_top(0) = widget RowTop(0)")
+assert_eq(flat.entry_top(0, 1), Widgets.menu_row_top(ctl, 1), "entry_top(1) = widget RowTop(1)")
+assert_eq(flat.entry_top(50, 1), 50 + Widgets.menu_row_top(ctl, 1), "entry_top honours y origin")
+
+# ---- Menu: a DEEP click lands on the PAINTED row (offset-bug regression) ----
+# The offset bug grew WORSE further down the menu (it accumulated ~2px/row, so a
+# lower row's painted centre fell into the row ABOVE it — the pre-fix 24px/no-pad
+# model mis-resolved rows from index ~7 down). Build a DEEP menu, lay it out from
+# the widget, and assert EVERY row's widget-painted centre resolves to its OWN
+# row. Driving both the layout and the expected centres from the widget is what
+# keeps this regression's teeth: if the Ruby routing ever re-hardcoded a metric
+# that drifted from the toolkit, a deep row here would resolve to its neighbour.
+deep = Menu.new((0...12).map { |k| { label: "item #{k}", action: [:noop, k] } })
+deep.apply_widget_layout(Widgets)
+dctl = Widgets.menu((0...12).map { |k| { "label" => "item #{k}", "action" => "x" } })
+Widgets.layout(dctl, Menu::WIDTH, 16 * 64)
 di = 0
-while di < 10
-  painted_centre = 2 + di * 22 + 11   # toolkit geometry, LITERAL
+while di < 12
+  painted_centre = Widgets.menu_row_top(dctl, di) + Widgets.menu_row_height(dctl, di) / 2
   assert_eq(deep.hit_test(0, 0, 10, painted_centre), di,
-            "toolkit-painted row centre resolves to its own row")
+            "deep menu: widget-painted row #{di} centre resolves to its own row")
   di += 1
 end
 
@@ -771,14 +815,23 @@ withsep = Menu.new([
   { separator: true },
   { label: "B", action: [:noop, "b"] },
 ])
-assert_eq(withsep.height, Menu::TOP_PAD + Menu::BOT_PAD + 2 * Menu::ITEM_H + Menu::SEP_H,
-          "separator counted as SEP_H not ITEM_H")
-# Hit_test on the separator returns -1 (not selectable); hit on the next row
-# correctly maps to entry index 2 (not 1) because separators consume index slots.
-assert_eq(withsep.hit_test(0, 0, 10, Menu::TOP_PAD + Menu::ITEM_H + 1), -1,
-          "hit on separator row is -1")
-assert_eq(withsep.hit_test(0, 0, 10, Menu::TOP_PAD + Menu::ITEM_H + Menu::SEP_H + 1), 2,
-          "row after separator is index 2")
+withsep.apply_widget_layout(Widgets)
+sctl = Widgets.menu([
+  { "label" => "A", "action" => "x" },
+  { "separator" => true },
+  { "label" => "B", "action" => "x" },
+])
+Widgets.layout(sctl, Menu::WIDTH, 6 * 64)
+# The separator counts at its shorter widget band (6px), not a full row.
+assert_eq(Widgets.menu_row_height(sctl, 1), 6, "toolkit paints a 6px separator (MenuSeparatorH)")
+assert_eq(withsep.height, Widgets.menu_row_top(sctl, 3) + Widgets.menu_row_top(sctl, 0),
+          "height counts the separator at its widget band, not a full row")
+# A click on the separator band is not selectable (-1); the row after it maps to
+# entry index 2 (not 1) because separators consume an index slot.
+sep_centre = Widgets.menu_row_top(sctl, 1) + Widgets.menu_row_height(sctl, 1) / 2
+assert_eq(withsep.hit_test(0, 0, 10, sep_centre), -1, "hit on the separator band is -1")
+b_centre = Widgets.menu_row_top(sctl, 2) + Widgets.menu_row_height(sctl, 2) / 2
+assert_eq(withsep.hit_test(0, 0, 10, b_centre), 2, "row after separator is index 2")
 
 # ---- RootMenu.build: top-level shape --------------------------------
 wmr = WindowManager.new
