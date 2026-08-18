@@ -1,8 +1,19 @@
 class Menu
-  ITEM_H = 24      # row height, per spec
-  WIDTH  = 170     # default menu width
-  SEP_H  = 6       # separator row height (a thin divider, not a full row)
-  PAD_X  = 8       # left/right text padding
+  # These row/pad metrics MIRROR the toolkit menu that actually PAINTS the
+  # panel (go-widgets/toolkit menu.go: MenuRowH=22, MenuSeparatorH=6, and a
+  # body drawn from `r.Y + sc(2)` with a matching 2px bottom pad). The Ruby
+  # model here does the click hit-testing (routing stays in Ruby — see
+  # 08_menu_widgets.rb), so its geometry MUST match the toolkit's pixel layout
+  # or clicks land on the wrong row. When the menu drawing moved to the toolkit
+  # these had stayed at the old hand-drawn ITEM_H=24 / no-pad, which drifted the
+  # hit zones 2px per row below the painted rows (worse the further down the
+  # menu) — the "click offset" bug. Keep them in lockstep with menu.go.
+  ITEM_H  = 22     # row height (= toolkit MenuRowH)
+  WIDTH   = 170    # default menu width
+  SEP_H   = 6      # separator row height (= toolkit MenuSeparatorH)
+  PAD_X   = 8      # left/right text padding
+  TOP_PAD = 2      # body top inset (= toolkit `r.Y + sc(2)` row start)
+  BOT_PAD = 2      # body bottom inset (toolkit total = rows + sc(4))
 
   attr_reader :entries
 
@@ -10,10 +21,13 @@ class Menu
     @entries = entries
   end
 
-  # The pixel height required to paint this menu, summed over every entry
-  # (separators are shorter than regular rows).
+  # The pixel height required to paint this menu: the top+bottom body pads plus
+  # every entry row (separators are shorter than regular rows). Matches the
+  # toolkit's natural height (rows + sc(4)); sizing the blit buffer to exactly
+  # this keeps the toolkit from scrolling the body (which would re-introduce an
+  # offset), and keeps hit_test's region flush with the painted panel.
   def height
-    h = 0
+    h = TOP_PAD + BOT_PAD
     @entries.each { |e| h += e[:separator] ? SEP_H : ITEM_H }
     h
   end
@@ -33,8 +47,8 @@ class Menu
   # WindowManager#find for the same workaround). So we walk with a while-loop.
   def hit_test(x, y, mx, my)
     return -1 if mx < x || mx >= x + WIDTH
-    return -1 if my < y
-    cy = y
+    return -1 if my < y + TOP_PAD
+    cy = y + TOP_PAD
     i = 0
     n = @entries.length
     while i < n
@@ -55,7 +69,7 @@ class Menu
   # an indexed while-loop because rbgo block-return does not unwind the
   # enclosing method.
   def entry_top(y, idx)
-    cy = y
+    cy = y + TOP_PAD
     i = 0
     n = @entries.length
     while i < n
@@ -69,7 +83,7 @@ class Menu
   # Convenience for the renderer: walk entries with their (y, h) row metrics.
   # Yields [entry, row_y, row_h, index] for each entry.
   def each_row(y)
-    cy = y
+    cy = y + TOP_PAD
     @entries.each_with_index do |e, i|
       row_h = e[:separator] ? SEP_H : ITEM_H
       yield e, cy, row_h, i
