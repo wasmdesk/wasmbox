@@ -141,7 +141,7 @@ func (m DockMenu) toolkitMenu(hover int) *toolkit.Menu {
 		items = append(items, toolkit.MenuItem{Label: e.Label, Action: func() {}})
 	}
 	tm := toolkit.NewMenu(items)
-	tm.Hover = hover
+	tm.Hover().Set(hover)
 	return tm
 }
 
