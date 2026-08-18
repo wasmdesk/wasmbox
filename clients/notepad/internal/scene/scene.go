@@ -131,7 +131,7 @@ func New(w, h int) *State {
 		items[i] = d.Title
 	}
 	s.docs = toolkit.NewListBox(items)
-	s.docs.Selected = 0
+	s.docs.Selected().Set(0)
 	s.docs.OnActivate = func(idx int) { s.switchDoc(idx) }
 
 	// Editor on the right.
@@ -252,7 +252,7 @@ func (s *State) newDoc() {
 	s.docSet = append(s.docSet, Doc{Title: title, Content: ""})
 	s.activeIdx = len(s.docSet) - 1
 	s.docs.Items = append(s.docs.Items, title)
-	s.docs.Selected = s.activeIdx
+	s.docs.Selected().Set(s.activeIdx)
 	s.editor.SetText("")
 	s.updateStatus()
 	s.notif("New doc: " + title)
@@ -274,7 +274,7 @@ func (s *State) switchDoc(idx int) {
 	s.docSet[s.activeIdx].Content = s.editor.Text()
 	// Switch.
 	s.activeIdx = idx
-	s.docs.Selected = idx
+	s.docs.Selected().Set(idx)
 	s.editor.SetText(s.docSet[idx].Content)
 	s.updateStatus()
 }
