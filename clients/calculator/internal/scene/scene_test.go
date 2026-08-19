@@ -24,30 +24,30 @@ func TestNewAndRender(t *testing.T) {
 func TestDigitEntry(t *testing.T) {
 	s := New(surfaceW, surfaceH)
 	// Initial display is "0".
-	if s.display.Text != "0" {
-		t.Fatalf("initial display want 0, got %q", s.display.Text)
+	if s.display.Text().Get() != "0" {
+		t.Fatalf("initial display want 0, got %q", s.display.Text().Get())
 	}
 	// Typing "1" replaces the "0" (freshOp/zero replacement rule).
 	s.press("1")
-	if s.display.Text != "1" {
-		t.Fatalf("after 1: %q", s.display.Text)
+	if s.display.Text().Get() != "1" {
+		t.Fatalf("after 1: %q", s.display.Text().Get())
 	}
 	// Typing more digits appends.
 	s.press("2")
 	s.press("3")
-	if s.display.Text != "123" {
-		t.Fatalf("after 123: %q", s.display.Text)
+	if s.display.Text().Get() != "123" {
+		t.Fatalf("after 123: %q", s.display.Text().Get())
 	}
 	// Decimal appends when absent.
 	s.press(".")
 	s.press("4")
-	if s.display.Text != "123.4" {
-		t.Fatalf("after 123.4: %q", s.display.Text)
+	if s.display.Text().Get() != "123.4" {
+		t.Fatalf("after 123.4: %q", s.display.Text().Get())
 	}
 	// Second decimal is a no-op (only one dot per number).
 	s.press(".")
-	if s.display.Text != "123.4" {
-		t.Fatalf("second dot should be ignored: %q", s.display.Text)
+	if s.display.Text().Get() != "123.4" {
+		t.Fatalf("second dot should be ignored: %q", s.display.Text().Get())
 	}
 }
 
@@ -67,8 +67,8 @@ func TestArithmetic(t *testing.T) {
 		for _, k := range c.keys {
 			s.press(k)
 		}
-		if s.display.Text != c.want {
-			t.Fatalf("keys=%v want %q got %q", c.keys, c.want, s.display.Text)
+		if s.display.Text().Get() != c.want {
+			t.Fatalf("keys=%v want %q got %q", c.keys, c.want, s.display.Text().Get())
 		}
 	}
 }
@@ -80,18 +80,18 @@ func TestClearNegatePercent(t *testing.T) {
 	s.press("0")
 	// Percent: 100 → 1.
 	s.press("%")
-	if s.display.Text != "1" {
-		t.Fatalf("100%% want 1, got %q", s.display.Text)
+	if s.display.Text().Get() != "1" {
+		t.Fatalf("100%% want 1, got %q", s.display.Text().Get())
 	}
 	// Negate: 1 → -1.
 	s.press("+/-")
-	if s.display.Text != "-1" {
-		t.Fatalf("negate want -1, got %q", s.display.Text)
+	if s.display.Text().Get() != "-1" {
+		t.Fatalf("negate want -1, got %q", s.display.Text().Get())
 	}
 	// Clear resets everything.
 	s.press("C")
-	if s.display.Text != "0" || s.op != 0 || s.accum != 0 {
-		t.Fatalf("after C: display=%q op=%v accum=%v", s.display.Text, s.op, s.accum)
+	if s.display.Text().Get() != "0" || s.op != 0 || s.accum != 0 {
+		t.Fatalf("after C: display=%q op=%v accum=%v", s.display.Text().Get(), s.op, s.accum)
 	}
 }
 
@@ -101,8 +101,8 @@ func TestEqualsWithoutOp(t *testing.T) {
 	s.press("4")
 	s.press("2")
 	s.press("=")
-	if s.display.Text != "42" {
-		t.Fatalf("= without op should be no-op, got %q", s.display.Text)
+	if s.display.Text().Get() != "42" {
+		t.Fatalf("= without op should be no-op, got %q", s.display.Text().Get())
 	}
 }
 
@@ -118,8 +118,8 @@ func TestChainedOps(t *testing.T) {
 	// which is still "3" — accum has 2, but a chained op doesn't
 	// auto-compute in this simple model. Just verify the display shows
 	// "3" and the pending op is now '*'.
-	if s.display.Text != "3" {
-		t.Fatalf("after 2+3*: display %q", s.display.Text)
+	if s.display.Text().Get() != "3" {
+		t.Fatalf("after 2+3*: display %q", s.display.Text().Get())
 	}
 	if s.op != '*' {
 		t.Fatalf("after 2+3*: op %v", s.op)
@@ -143,8 +143,8 @@ func TestHandleMouseHitsButton(t *testing.T) {
 	if !s.HandleMouse(r.X+r.W/2, r.Y+r.H/2) {
 		t.Fatal("HandleMouse on 7 must return true")
 	}
-	if s.display.Text != "7" {
-		t.Fatalf("after click 7: display %q", s.display.Text)
+	if s.display.Text().Get() != "7" {
+		t.Fatalf("after click 7: display %q", s.display.Text().Get())
 	}
 }
 
@@ -258,17 +258,17 @@ func TestClickInterButtonGapMisses(t *testing.T) {
 }
 
 func TestPressAfterOpWithBadDisplay(t *testing.T) {
-	// Defensive: if display.Text is garbage when '+' is pressed,
+	// Defensive: if display.Text().Get() is garbage when '+' is pressed,
 	// accum stays at its default (0) — no panic.
 	s := New(surfaceW, surfaceH)
-	s.display.Text = "not-a-number"
+	s.display.SetText("not-a-number")
 	s.press("+")
 	if s.op != '+' {
 		t.Fatal("op should still register")
 	}
 	// Same for =: right operand parse-fail early-returns.
 	s.press("=")
-	if s.display.Text != "not-a-number" {
+	if s.display.Text().Get() != "not-a-number" {
 		t.Fatal("bad-parse = should leave display alone")
 	}
 }
@@ -277,13 +277,13 @@ func TestPressAfterOpNegateNoOp(t *testing.T) {
 	// Negate/Percent with unparseable display: strconv.ParseFloat errors
 	// early — display stays put, no crash.
 	s := New(surfaceW, surfaceH)
-	s.display.Text = "garbage"
+	s.display.SetText("garbage")
 	s.press("+/-")
-	if s.display.Text != "garbage" {
+	if s.display.Text().Get() != "garbage" {
 		t.Fatal("negate on garbage should be no-op")
 	}
 	s.press("%")
-	if s.display.Text != "garbage" {
+	if s.display.Text().Get() != "garbage" {
 		t.Fatal("percent on garbage should be no-op")
 	}
 }
@@ -295,8 +295,8 @@ func TestHandleKeyDigits(t *testing.T) {
 			t.Fatalf("HandleKey(%q) should return true", k)
 		}
 	}
-	if s.display.Text != "123" {
-		t.Fatalf("after 1,2,3 digits: %q", s.display.Text)
+	if s.display.Text().Get() != "123" {
+		t.Fatalf("after 1,2,3 digits: %q", s.display.Text().Get())
 	}
 }
 
@@ -306,15 +306,15 @@ func TestHandleKeyOps(t *testing.T) {
 	s.HandleKey("+")
 	s.HandleKey("3")
 	s.HandleKey("Enter") // Enter = "="
-	if s.display.Text != "5" {
-		t.Fatalf("2+3<Enter>: %q", s.display.Text)
+	if s.display.Text().Get() != "5" {
+		t.Fatalf("2+3<Enter>: %q", s.display.Text().Get())
 	}
 	// "=" also works.
 	s.HandleKey("*")
 	s.HandleKey("4")
 	s.HandleKey("=")
-	if s.display.Text != "20" {
-		t.Fatalf("5*4=: %q", s.display.Text)
+	if s.display.Text().Get() != "20" {
+		t.Fatalf("5*4=: %q", s.display.Text().Get())
 	}
 }
 
@@ -325,8 +325,8 @@ func TestHandleKeyClearAliases(t *testing.T) {
 		s.HandleKey("4")
 		s.HandleKey("2")
 		s.HandleKey(k)
-		if s.display.Text != "0" {
-			t.Fatalf("clear via %q: display=%q, want 0", k, s.display.Text)
+		if s.display.Text().Get() != "0" {
+			t.Fatalf("clear via %q: display=%q, want 0", k, s.display.Text().Get())
 		}
 	}
 }
@@ -336,16 +336,16 @@ func TestHandleKeyPercentAndDecimal(t *testing.T) {
 	s.HandleKey("5")
 	s.HandleKey("0")
 	s.HandleKey("%")
-	if s.display.Text != "0.5" {
-		t.Fatalf("50%%: %q", s.display.Text)
+	if s.display.Text().Get() != "0.5" {
+		t.Fatalf("50%%: %q", s.display.Text().Get())
 	}
 	// Decimal directly.
 	s2 := New(surfaceW, surfaceH)
 	s2.HandleKey("3")
 	s2.HandleKey(".")
 	s2.HandleKey("1")
-	if s2.display.Text != "3.1" {
-		t.Fatalf("3.1: %q", s2.display.Text)
+	if s2.display.Text().Get() != "3.1" {
+		t.Fatalf("3.1: %q", s2.display.Text().Get())
 	}
 }
 
@@ -364,8 +364,8 @@ func TestHandleCharForwards(t *testing.T) {
 	if !s.HandleChar("7") {
 		t.Fatal("HandleChar(7) should return true")
 	}
-	if s.display.Text != "7" {
-		t.Fatalf("after char 7: %q", s.display.Text)
+	if s.display.Text().Get() != "7" {
+		t.Fatalf("after char 7: %q", s.display.Text().Get())
 	}
 	if s.HandleChar("") {
 		t.Fatal("HandleChar empty should return false")
@@ -455,7 +455,7 @@ func TestPressDotAfterFreshOp(t *testing.T) {
 	s.press("5")
 	s.press("+")
 	s.press(".")
-	if s.display.Text != "0." {
-		t.Fatalf("after 5+. want 0., got %q", s.display.Text)
+	if s.display.Text().Get() != "0." {
+		t.Fatalf("after 5+. want 0., got %q", s.display.Text().Get())
 	}
 }
