@@ -498,7 +498,7 @@ func (s *State) HandleMouse(x, y int) bool {
 // was consumed), false otherwise.
 func (s *State) HandleKey(code string) bool {
 	if s.cardLayout.Active == inputCard {
-		s.textView.Focused = true
+		s.textView.Focused().Set(true)
 		s.textView.OnEvent(toolkit.Event{Kind: toolkit.EventKeyDown, Code: code})
 		return true
 	}

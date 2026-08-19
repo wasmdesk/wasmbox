@@ -192,8 +192,8 @@ github.com/go-composites/result v0.0.0-20260621164801-bc2eac479381 h1:lefnD/dZIN
 github.com/go-composites/result v0.0.0-20260621164801-bc2eac479381/go.mod h1:U8jOcQwbbSwQ3E5geccvv0lkwNv89piHYG/Jj1w18JQ=
 github.com/go-composites/time v0.0.0-20260727203506-b0e9511265ce h1:s6sem+/vqY6ckwdCpuaxxfH9aZ0o9dvGfkC5RvJk6xg=
 github.com/go-composites/time v0.0.0-20260727203506-b0e9511265ce/go.mod h1:1VK0+gCw8h5qSeMcDt0pKujvEBR99f3j+xtfJ8KQSG4=
-github.com/go-crdt/crdt v0.19.0 h1:uReT74OxAw4dmONY/PlLUhehH6XuAxjYKToH9sR3/zA=
-github.com/go-crdt/crdt v0.19.0/go.mod h1:vbfvns9B9FUaMi2sPKzMYttKmbxfgO7EK3Yu82SrlYw=
+github.com/go-crdt/crdt v0.22.0 h1:BwLTqFMu3ktLSl9yp32Ws0R6+K611UsrEZ67oIYN850=
+github.com/go-crdt/crdt v0.22.0/go.mod h1:vbfvns9B9FUaMi2sPKzMYttKmbxfgO7EK3Yu82SrlYw=
 github.com/go-datetime/dates v0.1.0 h1:Uj8TaTZ09DXdq75EGQ/teFdrXpfVAC3ZDHAPQvPTnaA=
 github.com/go-datetime/dates v0.1.0/go.mod h1:KeZ1wUeMScJD6HOvj3hINwbsB+GCSFjJLWcJhrBlwIo=
 github.com/go-embedded-ruby/ruby v0.0.0-20260809134646-3ce8c91d38e7 h1:DLGlqgh5xYrJ+2Nme/4IfaT5/i2licr/yZmA9XP5SYg=
@@ -599,8 +599,8 @@ github.com/go-ruby-widgets/mvvm v0.1.0 h1:CJPnZ6MskD0CD4IB3jA6JiQV6gm45jE2kP905h
 github.com/go-ruby-widgets/mvvm v0.1.0/go.mod h1:ay/fCVUstt2cgby2jzbxq4WNTHnalRsNOsjSF1yWHgo=
 github.com/go-ruby-widgets/tui v0.1.0 h1:P1gWq3bXLXJVC2lNxO1Nj5yHferukTN8Fw0+4vFUX0o=
 github.com/go-ruby-widgets/tui v0.1.0/go.mod h1:O+e8BZvq01AqaIaAMb0kYHtmlwxrd5VqJ1Pg4hqvy9I=
-github.com/go-ruby-widgets/widgets v0.10.5 h1:kQxo13lKLxX8Xh4yTihFJ4T0xRvWqSaY/OIsjxDEQt0=
-github.com/go-ruby-widgets/widgets v0.10.5/go.mod h1:XDKyMfxewz6llfwtDrqgbZ9Mg30xokG61wWphfs3V5g=
+github.com/go-ruby-widgets/widgets v0.10.6 h1:HiyK8u5leGRl0jq4WDDvmZXJ4vL2J72s839LNsHTU/g=
+github.com/go-ruby-widgets/widgets v0.10.6/go.mod h1:SrIUBHFmcj2m6y3RW/GUSwjNY/jaTR9y34xv4PpGrB4=
 github.com/go-ruby-yaml/yaml v0.0.0-20260706120500-56d458798003 h1:SJ9mY8e11Lv0MbTh9CSxYMhY4AyaDHRmc3mYE+WQOQM=
 github.com/go-ruby-yaml/yaml v0.0.0-20260706120500-56d458798003/go.mod h1:HtbQgnZpSTJBAhPg1jOKgHycZl3tXgf9ZdOu4dnHWjQ=
 github.com/go-ruby-zeitwerk/zeitwerk v0.0.0-20260706163820-cda238c0e98c h1:qrS/rTmpYxW1eXGgv1OcBHL43iNAB8B2EkbvlTyzK5Y=
@@ -638,8 +638,8 @@ github.com/go-widgets/mvvm v0.8.0 h1:DqyNiNNTdITkMOdAwGvWFuCd6xpTaDRS2S+LNxd8inA
 github.com/go-widgets/mvvm v0.8.0/go.mod h1:GuGxC1kVTiPWANsAfKBPFb2YlmoG55J3NmZauvyqJ6w=
 github.com/go-widgets/painter v0.11.0 h1:xsj4zTz8B43rOZnWrx7ZsaUBMgJyvgaE/Pq2FfcG2Sw=
 github.com/go-widgets/painter v0.11.0/go.mod h1:IPRLqdUJuJX8sfuHeYLZCzjoLvA0ApbOlyIAVmguJDQ=
-github.com/go-widgets/toolkit v0.210.0 h1:w1mCC/l3R44WOQFKMJZ8UZ/gpQ72CuUo41v+HIlWFl4=
-github.com/go-widgets/toolkit v0.210.0/go.mod h1:CgKorv767ex8Jh4QNoQVUNIQZMBQDdpJCFtpgA5lJGY=
+github.com/go-widgets/toolkit v0.213.0 h1:ykTAMiVPTyTA4OEzrvvQQ0vE2ovS46VniqFEH5nv0to=
+github.com/go-widgets/toolkit v0.213.0/go.mod h1:fZ0lk6kVNSRaiaZbJeq5INiA/vxUt8Mi8XMHao3odBM=
 github.com/go-widgets/toolkit/rougelex v0.1.0 h1:3WdpaNp8laneKDVqYgaev/4I5SMZTnFa+2UtD8f7vmU=
 github.com/go-widgets/toolkit/rougelex v0.1.0/go.mod h1:zntdpbJrVqLk/JGJ6EMdiZeXHFHtVeV5JXHqhWH1f+s=
 github.com/go-widgets/tui v0.55.0 h1:R0m2F7Q0rtXKSBEjto5g6LhUuxHwRaZcmkJqXQGwtOg=

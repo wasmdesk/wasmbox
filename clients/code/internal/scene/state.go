@@ -17,6 +17,7 @@ package scene
 
 import (
 	"strconv"
+	"strings"
 	"sync"
 
 	"github.com/go-opentype/fonts/jetbrainsmono"
@@ -173,7 +174,7 @@ func NewWithVFS(width, height int, vfs sharedvfs.VFS) *SceneState {
 	// the editor pane's backgrounds pixel-identical to the pre-migration
 	// renderer (the native + browser probes sample flat #1E1E1E bands).
 	s.Editor.HighlightCurrentLine = false
-	s.Editor.Focused = true
+	s.Editor.Focused().Set(true)
 
 	s.sidebar = toolkit.NewListBox(nil)
 	s.sidebar.RowHeight = SidebarRowHeight
@@ -313,7 +314,7 @@ func (s *SceneState) OpenFile(path string) bool {
 	}
 	s.Editor.SetText(string(data))
 	s.Editor.Language = languageForPath(path)
-	s.Editor.Focused = true
+	s.Editor.Focused().Set(true)
 	s.CurrentPath = path
 	s.Flash = FlashNone
 	s.LiveServerPopupOpen = false
@@ -326,7 +327,7 @@ func (s *SceneState) SaveCurrent() bool {
 	if s.CurrentPath == "" {
 		return false
 	}
-	if err := s.VFS.Write(s.CurrentPath, []byte(s.Editor.Text())); err != nil {
+	if err := s.VFS.Write(s.CurrentPath, []byte(s.Editor.Text().Get())); err != nil {
 		return false
 	}
 	s.Flash = FlashSaveOK
@@ -338,7 +339,7 @@ func (s *SceneState) SaveCurrent() bool {
 // whether a key actually changed anything (a non-moving arrow returns false,
 // preserving the old MoveCursor-driven re-render gate).
 func (s *SceneState) editorSig() string {
-	return s.Editor.Text() + "\x00" + strconv.Itoa(s.Editor.CursorLine) + "," + strconv.Itoa(s.Editor.CursorCol)
+	return s.Editor.Text().Get() + "\x00" + strconv.Itoa(s.Editor.CursorLine().Get()) + "," + strconv.Itoa(s.Editor.CursorCol().Get())
 }
 
 // HandleKey routes one DOM-style keydown into the editor. Returns true when
@@ -427,11 +428,12 @@ func (s *SceneState) handlePopupMouse(x, y int) bool {
 // column). Row + col are clamped into the buffer's shape.
 func (s *SceneState) placeCursorAt(x, y int) {
 	r := s.Editor.Bounds()
+	edLines := strings.Split(s.Editor.Text().Get(), "\n")
 	lineH := toolkit.GlyphHeight() + 4
 	adv := toolkit.TextWidth(" ")
 	gutterW := 0
 	if s.Editor.ShowLineNumbers {
-		gutterW = toolkit.TextWidth(strconv.Itoa(len(s.Editor.Lines))) + 8
+		gutterW = toolkit.TextWidth(strconv.Itoa(len(edLines))) + 8
 	}
 	textX := r.X + 4 + gutterW
 
@@ -442,8 +444,8 @@ func (s *SceneState) placeCursorAt(x, y int) {
 	if row < 0 {
 		row = 0
 	}
-	if row >= len(s.Editor.Lines) {
-		row = len(s.Editor.Lines) - 1
+	if row >= len(edLines) {
+		row = len(edLines) - 1
 	}
 	col := 0
 	if adv > 0 {
@@ -452,10 +454,10 @@ func (s *SceneState) placeCursorAt(x, y int) {
 	if col < 0 {
 		col = 0
 	}
-	if rl := len([]rune(s.Editor.Lines[row])); col > rl {
+	if rl := len([]rune(edLines[row])); col > rl {
 		col = rl
 	}
-	s.Editor.CursorLine = row
-	s.Editor.CursorCol = col
-	s.Editor.Focused = true
+	s.Editor.CursorLine().Set(row)
+	s.Editor.CursorCol().Set(col)
+	s.Editor.Focused().Set(true)
 }

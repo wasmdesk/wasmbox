@@ -57,7 +57,7 @@ var aaOnce sync.Once
 // re-centres itself and no widget rect moves.
 func enableAAText() { aaOnce.Do(func() { _ = toolkit.UseOpenTypeText() }) }
 
-// Doc is one open document. Content persists via TextView.Text() when
+// Doc is one open document. Content persists via TextView.Text().Get() when
 // the user switches docs; Notepad restores it on switch-back.
 type Doc struct {
 	Title   string
@@ -136,8 +136,8 @@ func New(w, h int) *State {
 
 	// Editor on the right.
 	s.editor = toolkit.NewTextView(s.docSet[s.activeIdx].Content)
-	s.editor.Focused = true
-	s.editor.OnChange = func() { s.updateStatus() }
+	s.editor.Focused().Set(true)
+	s.editor.Text().Subscribe(func(string) { s.updateStatus() })
 
 	// Status bar.
 	s.status = toolkit.NewStatusbar([]string{"", "", "utf-8", "Notepad"})
@@ -247,7 +247,7 @@ func (s *State) Tick() { s.notify.Tick() }
 
 func (s *State) newDoc() {
 	// Persist current before switching.
-	s.docSet[s.activeIdx].Content = s.editor.Text()
+	s.docSet[s.activeIdx].Content = s.editor.Text().Get()
 	title := "Untitled " + strconv.Itoa(len(s.docSet)+1)
 	s.docSet = append(s.docSet, Doc{Title: title, Content: ""})
 	s.activeIdx = len(s.docSet) - 1
@@ -259,7 +259,7 @@ func (s *State) newDoc() {
 }
 
 func (s *State) saveDoc() {
-	s.docSet[s.activeIdx].Content = s.editor.Text()
+	s.docSet[s.activeIdx].Content = s.editor.Text().Get()
 	s.notif("Saved (in-memory only)")
 }
 
@@ -271,7 +271,7 @@ func (s *State) switchDoc(idx int) {
 		return
 	}
 	// Persist current.
-	s.docSet[s.activeIdx].Content = s.editor.Text()
+	s.docSet[s.activeIdx].Content = s.editor.Text().Get()
 	// Switch.
 	s.activeIdx = idx
 	s.docs.Selected().Set(idx)
@@ -281,8 +281,8 @@ func (s *State) switchDoc(idx int) {
 
 func (s *State) updateStatus() {
 	s.status.SetSegment(0, strconv.Itoa(len(s.docSet))+" docs")
-	s.status.SetSegment(1, "ln "+strconv.Itoa(s.editor.CursorLine+1)+
-		", col "+strconv.Itoa(s.editor.CursorCol+1))
+	s.status.SetSegment(1, "ln "+strconv.Itoa(s.editor.CursorLine().Get()+1)+
+		", col "+strconv.Itoa(s.editor.CursorCol().Get()+1))
 }
 
 // notif shows a transient toast.
