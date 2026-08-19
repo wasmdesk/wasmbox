@@ -251,17 +251,17 @@ func (s *State) press(key string) {
 		s.accum = 0
 		s.op = 0
 		s.freshOp = false
-		s.display.Text = "0"
+		s.display.SetText("0")
 	case "+/-":
-		if v, err := strconv.ParseFloat(s.display.Text, 64); err == nil {
-			s.display.Text = formatNumber(-v)
+		if v, err := strconv.ParseFloat(s.display.Text().Get(), 64); err == nil {
+			s.display.SetText(formatNumber(-v))
 		}
 	case "%":
-		if v, err := strconv.ParseFloat(s.display.Text, 64); err == nil {
-			s.display.Text = formatNumber(v / 100)
+		if v, err := strconv.ParseFloat(s.display.Text().Get(), 64); err == nil {
+			s.display.SetText(formatNumber(v / 100))
 		}
 	case "+", "-", "*", "/":
-		if v, err := strconv.ParseFloat(s.display.Text, 64); err == nil {
+		if v, err := strconv.ParseFloat(s.display.Text().Get(), 64); err == nil {
 			s.accum = v
 		}
 		s.op = key[0]
@@ -270,35 +270,35 @@ func (s *State) press(key string) {
 		if s.op == 0 {
 			return
 		}
-		right, err := strconv.ParseFloat(s.display.Text, 64)
+		right, err := strconv.ParseFloat(s.display.Text().Get(), 64)
 		if err != nil {
 			return
 		}
 		result := apply(s.accum, right, s.op)
-		s.display.Text = formatNumber(result)
+		s.display.SetText(formatNumber(result))
 		s.accum = result
 		s.op = 0
 		s.freshOp = false
 	default:
 		// A digit or "."
-		if s.freshOp || s.display.Text == "0" {
+		if s.freshOp || s.display.Text().Get() == "0" {
 			if key == "." {
-				s.display.Text = "0."
+				s.display.SetText("0.")
 			} else {
-				s.display.Text = key
+				s.display.SetText(key)
 			}
 			s.freshOp = false
 			return
 		}
 		if key == "." {
 			// Only one decimal per number.
-			for i := 0; i < len(s.display.Text); i++ {
-				if s.display.Text[i] == '.' {
+			for i := 0; i < len(s.display.Text().Get()); i++ {
+				if s.display.Text().Get()[i] == '.' {
 					return
 				}
 			}
 		}
-		s.display.Text += key
+		s.display.SetText(s.display.Text().Get() + key)
 	}
 }
 

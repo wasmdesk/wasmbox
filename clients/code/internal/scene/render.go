@@ -125,7 +125,7 @@ func Paint(rgba []byte, w, h int, s *SceneState) {
 
 	if s.LiveServerPopupOpen {
 		s.layoutDialog()
-		s.urlEntry.Text = s.LiveServerURL
+		s.urlEntry.SetText(s.LiveServerURL)
 		s.dialog.Draw(p, s.popupTheme)
 	}
 }
