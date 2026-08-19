@@ -34,18 +34,18 @@ func TestSwitchDoc(t *testing.T) {
 	if s.activeIdx != 1 {
 		t.Fatalf("switchDoc(1): activeIdx=%d", s.activeIdx)
 	}
-	if !strings.Contains(s.editor.Text(), "milk") {
-		t.Fatalf("switch to doc 1 didn't load its content: %q", s.editor.Text())
+	if !strings.Contains(s.editor.Text().Get(), "milk") {
+		t.Fatalf("switch to doc 1 didn't load its content: %q", s.editor.Text().Get())
 	}
 	// Switch back to 0 — the edit must persist.
 	s.switchDoc(0)
-	if s.editor.Text() != "edited-0" {
-		t.Fatalf("switch back to doc 0 lost the edit: %q", s.editor.Text())
+	if s.editor.Text().Get() != "edited-0" {
+		t.Fatalf("switch back to doc 0 lost the edit: %q", s.editor.Text().Get())
 	}
 	// Switching to the current index is a no-op.
-	before := s.editor.Text()
+	before := s.editor.Text().Get()
 	s.switchDoc(0)
-	if s.editor.Text() != before {
+	if s.editor.Text().Get() != before {
 		t.Fatal("switch to current index should be a no-op")
 	}
 	// Switching to an out-of-range index is a no-op.
@@ -69,8 +69,8 @@ func TestNewDoc(t *testing.T) {
 	if s.activeIdx != before {
 		t.Fatalf("newDoc: activeIdx should point at the new doc; got %d, want %d", s.activeIdx, before)
 	}
-	if s.editor.Text() != "" {
-		t.Fatalf("newDoc: editor should be empty, got %q", s.editor.Text())
+	if s.editor.Text().Get() != "" {
+		t.Fatalf("newDoc: editor should be empty, got %q", s.editor.Text().Get())
 	}
 	if !strings.HasPrefix(s.docs.Items[s.activeIdx], "Untitled ") {
 		t.Fatalf("newDoc title should start with 'Untitled ', got %q", s.docs.Items[s.activeIdx])
@@ -100,8 +100,8 @@ func TestNotifShowsToast(t *testing.T) {
 
 func TestUpdateStatus(t *testing.T) {
 	s := New(surfaceW, surfaceH)
-	s.editor.CursorLine = 4
-	s.editor.CursorCol = 11
+	s.editor.CursorLine().Set(4)
+	s.editor.CursorCol().Set(11)
 	s.updateStatus()
 	if s.status.Segments[1] != "ln 5, col 12" {
 		t.Fatalf("status[1] = %q", s.status.Segments[1])
@@ -125,7 +125,7 @@ func TestHandleMouseRoutes(t *testing.T) {
 	// Click on the editor (right pane) — focuses it.
 	er := s.editor.Bounds()
 	s.HandleMouse(er.X+10, er.Y+10)
-	if !s.editor.Focused {
+	if !s.editor.Focused().Get() {
 		t.Fatal("editor click should focus")
 	}
 	// Click on the status bar — no widget path, no-op.
@@ -190,11 +190,11 @@ func TestNextPrevDocIdxWrap(t *testing.T) {
 func TestHandleKeyRoutesToEditor(t *testing.T) {
 	s := New(surfaceW, surfaceH)
 	// Place cursor mid-buffer so Backspace actually deletes something.
-	s.editor.CursorLine = 0
-	s.editor.CursorCol = 3
-	before := s.editor.Text()
+	s.editor.CursorLine().Set(0)
+	s.editor.CursorCol().Set(3)
+	before := s.editor.Text().Get()
 	s.HandleKey("Backspace")
-	if s.editor.Text() == before {
+	if s.editor.Text().Get() == before {
 		t.Fatal("Backspace should have modified the editor buffer")
 	}
 	// Ctrl+S saves.
@@ -206,11 +206,11 @@ func TestHandleKeyRoutesToEditor(t *testing.T) {
 
 func TestHandleCharAppends(t *testing.T) {
 	s := New(surfaceW, surfaceH)
-	before := s.editor.Text()
-	s.editor.CursorLine = 0
-	s.editor.CursorCol = 0
+	before := s.editor.Text().Get()
+	s.editor.CursorLine().Set(0)
+	s.editor.CursorCol().Set(0)
 	s.HandleChar("Z")
-	if s.editor.Text() == before {
+	if s.editor.Text().Get() == before {
 		t.Fatal("HandleChar should insert into the buffer")
 	}
 }
@@ -292,12 +292,12 @@ func TestGoldenLayoutRects(t *testing.T) {
 // the container translates the surface point into the editor's local space.
 func TestClickRoutesToEditorCenter(t *testing.T) {
 	s := New(surfaceW, surfaceH)
-	s.editor.Focused = false
+	s.editor.Focused().Set(false)
 	er := s.editor.Bounds()
 	if !s.HandleMouse(er.X+20, er.Y+20) {
 		t.Fatal("HandleMouse in the editor region must return true")
 	}
-	if !s.editor.Focused {
+	if !s.editor.Focused().Get() {
 		t.Fatal("a click in the Center region should focus the editor")
 	}
 }
@@ -314,8 +314,8 @@ func TestClickRoutesToDocsWest(t *testing.T) {
 	if s.activeIdx != 1 {
 		t.Fatalf("click on docs row 1 should switch to doc 1; activeIdx=%d", s.activeIdx)
 	}
-	if !strings.Contains(s.editor.Text(), "milk") {
-		t.Fatalf("switching to doc 1 via click didn't load its content: %q", s.editor.Text())
+	if !strings.Contains(s.editor.Text().Get(), "milk") {
+		t.Fatalf("switching to doc 1 via click didn't load its content: %q", s.editor.Text().Get())
 	}
 }
 

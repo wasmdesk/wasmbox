@@ -5,6 +5,7 @@
 package scene
 
 import (
+	"strings"
 	"testing"
 
 	"github.com/go-widgets/toolkit"
@@ -95,7 +96,7 @@ func TestOpenFile_SuccessAndMissing(t *testing.T) {
 	if s.CurrentPath != "/about.txt" {
 		t.Fatalf("CurrentPath: %q", s.CurrentPath)
 	}
-	if s.Editor.Text() == "" {
+	if s.Editor.Text().Get() == "" {
 		t.Fatal("editor not loaded")
 	}
 	if s.tabLabel() != "about.txt" {
@@ -137,7 +138,8 @@ func TestSaveCurrent_Success(t *testing.T) {
 	if !s.OpenFile("/about.txt") {
 		t.Fatal("open")
 	}
-	s.Editor.CursorLine, s.Editor.CursorCol = 0, 0
+	s.Editor.CursorLine().Set(0)
+	s.Editor.CursorCol().Set(0)
 	s.Editor.OnEvent(toolkit.Event{Kind: toolkit.EventChar, Code: "X"})
 	if !s.SaveCurrent() {
 		t.Fatal("save")
@@ -169,12 +171,13 @@ func TestHandleKey_CursorMovement(t *testing.T) {
 	s := newTestState(t)
 	s.Editor.SetText("ab\ncd")
 
-	s.Editor.CursorLine, s.Editor.CursorCol = 0, 0
+	s.Editor.CursorLine().Set(0)
+	s.Editor.CursorCol().Set(0)
 	if !s.HandleKey("ArrowRight") {
 		t.Fatal("ArrowRight should report change")
 	}
-	if s.Editor.CursorCol != 1 {
-		t.Fatalf("col: %d", s.Editor.CursorCol)
+	if s.Editor.CursorCol().Get() != 1 {
+		t.Fatalf("col: %d", s.Editor.CursorCol().Get())
 	}
 	if !s.HandleKey("ArrowLeft") {
 		t.Fatal("ArrowLeft should report change")
@@ -182,19 +185,19 @@ func TestHandleKey_CursorMovement(t *testing.T) {
 	if !s.HandleKey("ArrowDown") {
 		t.Fatal("ArrowDown should report change")
 	}
-	if s.Editor.CursorLine != 1 {
-		t.Fatalf("row: %d", s.Editor.CursorLine)
+	if s.Editor.CursorLine().Get() != 1 {
+		t.Fatalf("row: %d", s.Editor.CursorLine().Get())
 	}
 	if !s.HandleKey("ArrowUp") {
 		t.Fatal("ArrowUp should report change")
 	}
 	// Home / End move within the line.
-	s.Editor.CursorCol = 1
+	s.Editor.CursorCol().Set(1)
 	if !s.HandleKey("Home") {
 		t.Fatal("Home should report change")
 	}
-	if s.Editor.CursorCol != 0 {
-		t.Fatalf("Home col: %d", s.Editor.CursorCol)
+	if s.Editor.CursorCol().Get() != 0 {
+		t.Fatalf("Home col: %d", s.Editor.CursorCol().Get())
 	}
 	if !s.HandleKey("End") {
 		t.Fatal("End should report change")
@@ -204,7 +207,8 @@ func TestHandleKey_CursorMovement(t *testing.T) {
 func TestHandleKey_NonMovingArrowReturnsFalse(t *testing.T) {
 	s := newTestState(t)
 	s.Editor.SetText("ab")
-	s.Editor.CursorLine, s.Editor.CursorCol = 0, 0
+	s.Editor.CursorLine().Set(0)
+	s.Editor.CursorCol().Set(0)
 	// ArrowLeft at buffer start does not move -> no visible change.
 	if s.HandleKey("ArrowLeft") {
 		t.Fatal("ArrowLeft at (0,0) should return false")
@@ -222,24 +226,26 @@ func TestHandleKey_BackspaceAtOrigin(t *testing.T) {
 func TestHandleKey_BackspaceEffective(t *testing.T) {
 	s := newTestState(t)
 	s.Editor.SetText("ab")
-	s.Editor.CursorLine, s.Editor.CursorCol = 0, 2
+	s.Editor.CursorLine().Set(0)
+	s.Editor.CursorCol().Set(2)
 	if !s.HandleKey("Backspace") {
 		t.Fatal("Backspace should return true")
 	}
-	if s.Editor.Text() != "a" {
-		t.Fatalf("after BS: %q", s.Editor.Text())
+	if s.Editor.Text().Get() != "a" {
+		t.Fatalf("after BS: %q", s.Editor.Text().Get())
 	}
 }
 
 func TestHandleKey_EnterSplits(t *testing.T) {
 	s := newTestState(t)
 	s.Editor.SetText("abc")
-	s.Editor.CursorLine, s.Editor.CursorCol = 0, 2
+	s.Editor.CursorLine().Set(0)
+	s.Editor.CursorCol().Set(2)
 	if !s.HandleKey("Enter") {
 		t.Fatal("Enter should return true")
 	}
-	if len(s.Editor.Lines) != 2 {
-		t.Fatalf("split: %q", s.Editor.Lines)
+	if len(strings.Split(s.Editor.Text().Get(), "\n")) != 2 {
+		t.Fatalf("split: %q", strings.Split(s.Editor.Text().Get(), "\n"))
 	}
 }
 
@@ -249,8 +255,8 @@ func TestHandleKey_TabInserts4Spaces(t *testing.T) {
 	if !s.HandleKey("Tab") {
 		t.Fatal("Tab should return true")
 	}
-	if s.Editor.Lines[0] != "    " {
-		t.Fatalf("Tab body: %q", s.Editor.Lines[0])
+	if strings.Split(s.Editor.Text().Get(), "\n")[0] != "    " {
+		t.Fatalf("Tab body: %q", strings.Split(s.Editor.Text().Get(), "\n")[0])
 	}
 }
 
@@ -260,8 +266,8 @@ func TestHandleKey_PrintableInsert(t *testing.T) {
 	if !s.HandleKey("a") {
 		t.Fatal("printable should return true")
 	}
-	if s.Editor.Lines[0] != "a" {
-		t.Fatalf("body: %q", s.Editor.Lines[0])
+	if strings.Split(s.Editor.Text().Get(), "\n")[0] != "a" {
+		t.Fatalf("body: %q", strings.Split(s.Editor.Text().Get(), "\n")[0])
 	}
 }
 
@@ -376,8 +382,8 @@ func TestHandleMouse_EditorCursorJump(t *testing.T) {
 	if !s.HandleMouse(x, y) {
 		t.Fatal("editor click should report change")
 	}
-	if s.Editor.CursorLine != 0 || s.Editor.CursorCol != 2 {
-		t.Fatalf("cursor: (%d,%d)", s.Editor.CursorLine, s.Editor.CursorCol)
+	if s.Editor.CursorLine().Get() != 0 || s.Editor.CursorCol().Get() != 2 {
+		t.Fatalf("cursor: (%d,%d)", s.Editor.CursorLine().Get(), s.Editor.CursorCol().Get())
 	}
 }
 
@@ -458,16 +464,16 @@ func TestPlaceCursorAt_Clamps(t *testing.T) {
 	ed := s.Editor.Bounds()
 	// Row above the first line + col left of the text -> clamps to (0,0).
 	s.placeCursorAt(ed.X, ed.Y-100)
-	if s.Editor.CursorLine != 0 || s.Editor.CursorCol != 0 {
-		t.Fatalf("clamp low: (%d,%d)", s.Editor.CursorLine, s.Editor.CursorCol)
+	if s.Editor.CursorLine().Get() != 0 || s.Editor.CursorCol().Get() != 0 {
+		t.Fatalf("clamp low: (%d,%d)", s.Editor.CursorLine().Get(), s.Editor.CursorCol().Get())
 	}
 	// Row + col far past the buffer -> clamps to the last line / its end.
 	s.placeCursorAt(ed.X+10000, ed.Y+10000)
-	if s.Editor.CursorLine != len(s.Editor.Lines)-1 {
-		t.Fatalf("clamp row high: %d", s.Editor.CursorLine)
+	if s.Editor.CursorLine().Get() != len(strings.Split(s.Editor.Text().Get(), "\n"))-1 {
+		t.Fatalf("clamp row high: %d", s.Editor.CursorLine().Get())
 	}
-	if s.Editor.CursorCol != len([]rune(s.Editor.Lines[s.Editor.CursorLine])) {
-		t.Fatalf("clamp col high: %d", s.Editor.CursorCol)
+	if s.Editor.CursorCol().Get() != len([]rune(strings.Split(s.Editor.Text().Get(), "\n")[s.Editor.CursorLine().Get()])) {
+		t.Fatalf("clamp col high: %d", s.Editor.CursorCol().Get())
 	}
 }
 

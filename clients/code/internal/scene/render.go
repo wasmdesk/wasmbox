@@ -158,7 +158,7 @@ func (s *SceneState) syncStatusSegments() {
 	if path == "" {
 		path = "[no file]"
 	}
-	lnCol := "Ln " + strconv.Itoa(s.Editor.CursorLine+1) + ", Col " + strconv.Itoa(s.Editor.CursorCol+1)
+	lnCol := "Ln " + strconv.Itoa(s.Editor.CursorLine().Get()+1) + ", Col " + strconv.Itoa(s.Editor.CursorCol().Get()+1)
 	s.status.Segments = []string{path, lnCol, "TEXT", "Live Server: Not connected"}
 }
 
