@@ -208,10 +208,10 @@ func New(w, h int) *State {
 
 	// Card widgets.
 	s.helloButton = toolkit.NewButton("Click me", nil)
-	s.clickLabel = &toolkit.Label{Text: "clicked 0 times"}
+	s.clickLabel = toolkit.NewLabel("clicked 0 times")
 	s.helloButton.OnClick = func() {
 		s.clickCount++
-		s.clickLabel.Text = "clicked " + itoa(s.clickCount) + " times"
+		s.clickLabel.Text().Set("clicked " + itoa(s.clickCount) + " times")
 	}
 	s.check1 = toolkit.NewCheckButton("Wrap long lines", true)
 	s.check2 = toolkit.NewCheckButton("Show line numbers", false)

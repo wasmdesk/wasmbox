@@ -8,7 +8,7 @@ require (
 	github.com/go-ruby-parser/parser v0.1.3
 	github.com/go-webengine/browserproxy v0.0.0-20260808195644-0fab95c6c8b8
 	github.com/go-widgets/painter v0.11.0
-	github.com/go-widgets/toolkit v0.213.0
+	github.com/go-widgets/toolkit v0.223.0
 	github.com/go-widgets/toolkit/rougelex v0.1.0
 	github.com/grpc-transports/websocket v0.2.0
 	github.com/wasmdesk/coreutils v0.0.0-20260629060422-c37bd87ae249
@@ -23,7 +23,7 @@ require (
 	github.com/BurntSushi/toml v1.6.0 // indirect
 	github.com/RoaringBitmap/roaring/v2 v2.14.5 // indirect
 	github.com/abtreece/confd v0.41.2 // indirect
-	github.com/andybalholm/brotli v1.2.1 // indirect
+	github.com/andybalholm/brotli v1.2.2 // indirect
 	github.com/apache/arrow-go/v18 v18.6.0 // indirect
 	github.com/apache/thrift v0.22.0 // indirect
 	github.com/armon/go-metrics v0.4.1 // indirect
@@ -87,6 +87,7 @@ require (
 	github.com/go-composites/null v0.0.0-20260621061849-c8074799d5aa // indirect
 	github.com/go-composites/result v0.0.0-20260621164801-bc2eac479381 // indirect
 	github.com/go-composites/time v0.0.0-20260727203506-b0e9511265ce // indirect
+	github.com/go-crdt/collab v0.18.0 // indirect
 	github.com/go-crdt/crdt v0.22.0 // indirect
 	github.com/go-datetime/dates v0.1.0 // indirect
 	github.com/go-facter/facter v0.0.0-20260708052836-752b1a3edee0 // indirect
@@ -110,6 +111,7 @@ require (
 	github.com/go-pcore/pcore v0.0.0-20260708052910-1416bf219e47 // indirect
 	github.com/go-puppet/puppet v0.0.0-20260710130746-3ef04469bb7e // indirect
 	github.com/go-regexp/engine v0.1.0 // indirect
+	github.com/go-richdoc/richdoc v0.1.0 // indirect
 	github.com/go-rouge/rouge v0.1.0 // indirect
 	github.com/go-ruby-aasm/aasm v0.0.0-20260707193337-00a96ee353d7 // indirect
 	github.com/go-ruby-abbrev/abbrev v0.0.0-20260629150957-97117892cd38 // indirect
@@ -284,7 +286,7 @@ require (
 	github.com/go-ruby-webrick/webrick v0.0.0-20260630133907-a1380ee7733b // indirect
 	github.com/go-ruby-widgets/mvvm v0.1.0 // indirect
 	github.com/go-ruby-widgets/tui v0.1.0 // indirect
-	github.com/go-ruby-widgets/widgets v0.10.6 // indirect
+	github.com/go-ruby-widgets/widgets v0.10.7 // indirect
 	github.com/go-ruby-yaml/yaml v0.0.0-20260706120500-56d458798003 // indirect
 	github.com/go-ruby-zeitwerk/zeitwerk v0.0.0-20260706163820-cda238c0e98c // indirect
 	github.com/go-ruby-zlib/zlib v0.0.0-20260704053046-1ff8c43f4f67 // indirect
@@ -391,7 +393,7 @@ require (
 	golang.org/x/time v0.15.0 // indirect
 	google.golang.org/genproto/googleapis/api v0.0.0-20260526163538-3dc84a4a5aaa // indirect
 	google.golang.org/genproto/googleapis/rpc v0.0.0-20260526163538-3dc84a4a5aaa // indirect
-	google.golang.org/protobuf v1.36.11 // indirect
+	google.golang.org/protobuf v1.36.12 // indirect
 	gopkg.in/yaml.v3 v3.0.1 // indirect
 	modernc.org/libc v1.73.4 // indirect
 	modernc.org/mathutil v1.7.1 // indirect

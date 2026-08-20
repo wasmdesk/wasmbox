@@ -131,7 +131,7 @@ func TestHandleMouseHitsButton(t *testing.T) {
 	// Locate the "7" button + click its centre.
 	var seven *toolkit.Button
 	for _, b := range s.buttons {
-		if b.Label == "7" {
+		if b.Label().Get() == "7" {
 			seven = b
 			break
 		}
@@ -223,7 +223,7 @@ func TestGoldenLayoutRects(t *testing.T) {
 	}
 	for i, b := range s.buttons {
 		if got := b.Bounds(); got != want[i] {
-			t.Fatalf("button %d (%q) bounds = %+v, want %+v", i, b.Label, got, want[i])
+			t.Fatalf("button %d (%q) bounds = %+v, want %+v", i, b.Label().Get(), got, want[i])
 		}
 	}
 }
@@ -426,9 +426,9 @@ func TestAAButtonLabelsFitCells(t *testing.T) {
 		t.Fatalf("AA face height = %d, want %d (retune rowH/displayH if this changes)", got, h)
 	}
 	for _, b := range s.buttons {
-		w := toolkit.TextWidth(b.Label)
+		w := toolkit.TextWidth(b.Label().Get())
 		if w > colW {
-			t.Fatalf("label %q width %d overflows colW %d", b.Label, w, colW)
+			t.Fatalf("label %q width %d overflows colW %d", b.Label().Get(), w, colW)
 		}
 		if h > rowH {
 			t.Fatalf("AA height %d overflows rowH %d", h, rowH)
