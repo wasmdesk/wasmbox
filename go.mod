@@ -8,7 +8,7 @@ require (
 	github.com/go-ruby-parser/parser v0.1.3
 	github.com/go-webengine/browserproxy v0.0.0-20260808195644-0fab95c6c8b8
 	github.com/go-widgets/painter v0.11.0
-	github.com/go-widgets/toolkit v0.223.0
+	github.com/go-widgets/toolkit v0.224.0
 	github.com/go-widgets/toolkit/rougelex v0.1.0
 	github.com/grpc-transports/websocket v0.2.0
 	github.com/wasmdesk/coreutils v0.0.0-20260629060422-c37bd87ae249
@@ -88,7 +88,7 @@ require (
 	github.com/go-composites/result v0.0.0-20260621164801-bc2eac479381 // indirect
 	github.com/go-composites/time v0.0.0-20260727203506-b0e9511265ce // indirect
 	github.com/go-crdt/collab v0.18.0 // indirect
-	github.com/go-crdt/crdt v0.22.0 // indirect
+	github.com/go-crdt/crdt v0.25.0 // indirect
 	github.com/go-datetime/dates v0.1.0 // indirect
 	github.com/go-facter/facter v0.0.0-20260708052836-752b1a3edee0 // indirect
 	github.com/go-fft/fft v0.0.0-20260620110530-0e3ca1747acb // indirect
