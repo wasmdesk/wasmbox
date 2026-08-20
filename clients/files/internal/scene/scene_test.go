@@ -447,7 +447,7 @@ func TestRightClickRowMenu(t *testing.T) {
 	if !s.HandleMouseButton(SidebarWidth+50, rowCenterY(0), 2, 1) {
 		t.Fatal("right-click on row returned false")
 	}
-	if !s.ctxMenu.Open {
+	if !s.ctxMenu.Open().Get() {
 		t.Fatal("context menu not open")
 	}
 	if s.ctxTarget != "/Documents" {
@@ -463,7 +463,7 @@ func TestRightClickRowMenu(t *testing.T) {
 	if !s.HandleMouseButton(mx, my, 0, 1) {
 		t.Fatal("menu Open click returned false")
 	}
-	if s.ctxMenu.Open {
+	if s.ctxMenu.Open().Get() {
 		t.Error("menu still open after activation")
 	}
 	if s.Browser.CurrentPath != "/Documents" {
@@ -496,7 +496,7 @@ func TestMenuRenameAndNewFolderViaMenu(t *testing.T) {
 	_ = s.HandleMouseButton(SidebarWidth+50, rowCenterY(3), 2, 1) // about.txt
 	mx, my := menuItemPoint(s, 1)
 	_ = s.HandleMouseButton(mx, my, 0, 1)
-	if s.ctxMenu.Open {
+	if s.ctxMenu.Open().Get() {
 		t.Error("menu still open after Rename")
 	}
 	if _, err := s.VFS.Stat("/about.txt"); err != nil {
@@ -517,7 +517,7 @@ func TestRightClickOutsideListNoMenu(t *testing.T) {
 	if s.HandleMouseButton(300, 20, 2, 1) {
 		t.Error("right-click in header opened a menu")
 	}
-	if s.ctxMenu.Open {
+	if s.ctxMenu.Open().Get() {
 		t.Error("menu open after header right-click")
 	}
 }
@@ -542,13 +542,13 @@ func TestMenuDeleteAndDismiss(t *testing.T) {
 	}
 	// Outside-click dismissal.
 	_ = s.HandleMouseButton(SidebarWidth+50, rowCenterY(0), 2, 1)
-	if !s.ctxMenu.Open {
+	if !s.ctxMenu.Open().Get() {
 		t.Fatal("menu should be open")
 	}
 	if !s.HandleMouseButton(5, 5, 0, 1) {
 		t.Error("outside click returned false")
 	}
-	if s.ctxMenu.Open {
+	if s.ctxMenu.Open().Get() {
 		t.Error("menu not dismissed by outside click")
 	}
 }

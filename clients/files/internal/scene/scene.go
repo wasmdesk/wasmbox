@@ -305,7 +305,7 @@ func Render(s *State, buf []byte) {
 	s.root.Draw(p, th)
 
 	// Overlays on top of the navigation chrome.
-	if s.ctxMenu.Open {
+	if s.ctxMenu.Open().Get() {
 		s.ctxMenu.Draw(p, th)
 	}
 	if s.Preview != nil {
@@ -376,7 +376,7 @@ func (s *State) HandleMouseButton(x, y, button, clickCount int) bool {
 
 	// An open menu intercepts the next click: its OnEvent activates the hit
 	// row's Action (which mutates the model) or dismisses on an outside click.
-	if s.ctxMenu.Open {
+	if s.ctxMenu.Open().Get() {
 		s.ctxMenu.OnEvent(toolkit.Event{Kind: toolkit.EventClick, X: x, Y: y})
 		return true
 	}
