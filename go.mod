@@ -8,7 +8,7 @@ require (
 	github.com/go-ruby-parser/parser v0.1.3
 	github.com/go-webengine/browserproxy v0.0.0-20260808195644-0fab95c6c8b8
 	github.com/go-widgets/painter v0.11.0
-	github.com/go-widgets/toolkit v0.230.0
+	github.com/go-widgets/toolkit v0.234.0
 	github.com/go-widgets/toolkit/rougelex v0.1.0
 	github.com/grpc-transports/websocket v0.2.0
 	github.com/wasmdesk/coreutils v0.0.0-20260629060422-c37bd87ae249
@@ -111,7 +111,7 @@ require (
 	github.com/go-pcore/pcore v0.0.0-20260708052910-1416bf219e47 // indirect
 	github.com/go-puppet/puppet v0.0.0-20260710130746-3ef04469bb7e // indirect
 	github.com/go-regexp/engine v0.1.0 // indirect
-	github.com/go-richdoc/richdoc v0.1.0 // indirect
+	github.com/go-richdoc/richdoc v0.2.0 // indirect
 	github.com/go-rouge/rouge v0.1.0 // indirect
 	github.com/go-ruby-aasm/aasm v0.0.0-20260707193337-00a96ee353d7 // indirect
 	github.com/go-ruby-abbrev/abbrev v0.0.0-20260629150957-97117892cd38 // indirect

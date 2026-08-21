@@ -251,8 +251,8 @@ github.com/go-puppet/puppet v0.0.0-20260710130746-3ef04469bb7e h1:5CU5wIZJpj5eW/
 github.com/go-puppet/puppet v0.0.0-20260710130746-3ef04469bb7e/go.mod h1:AaqsDdZnb05OGpLo4iZpZzf243+L4I0dxCZ71gfyKU0=
 github.com/go-regexp/engine v0.1.0 h1:DnQjXFwUldJOcyau/0TAjhl244xC5nFfWy6YJ5aUlVY=
 github.com/go-regexp/engine v0.1.0/go.mod h1:8rju5lq5OkskQh9+m+FjBP6965giMPUdIOdrvFrbqn4=
-github.com/go-richdoc/richdoc v0.1.0 h1:77dh0m2/Q6cHIgDMY63zy9cUTsGKTdbszT1gtrZUFz4=
-github.com/go-richdoc/richdoc v0.1.0/go.mod h1:aCX8ulqg5CoKqSWgWeEWul1Oj0d2VxQeaQNI0+jsm7c=
+github.com/go-richdoc/richdoc v0.2.0 h1:z9cLox9MoInZL6fIlweMzgDT/VqgnB2ZucSIEaRFglY=
+github.com/go-richdoc/richdoc v0.2.0/go.mod h1:aCX8ulqg5CoKqSWgWeEWul1Oj0d2VxQeaQNI0+jsm7c=
 github.com/go-rouge/rouge v0.1.0 h1:Ne+YRqsm1JloOKCYDs63scI0QzPUVw61y+vUn0+P6BY=
 github.com/go-rouge/rouge v0.1.0/go.mod h1:0AXSe8OuYrzYSEMdoXX0jDazGDc/jC2eS9I4y0Q0w9I=
 github.com/go-ruby-aasm/aasm v0.0.0-20260707193337-00a96ee353d7 h1:HwLm63AUG9F4jwWpUbMz4gocvFbpvmw/v+XgLXPOsx4=
@@ -642,8 +642,8 @@ github.com/go-widgets/mvvm v0.8.0 h1:DqyNiNNTdITkMOdAwGvWFuCd6xpTaDRS2S+LNxd8inA
 github.com/go-widgets/mvvm v0.8.0/go.mod h1:GuGxC1kVTiPWANsAfKBPFb2YlmoG55J3NmZauvyqJ6w=
 github.com/go-widgets/painter v0.11.0 h1:xsj4zTz8B43rOZnWrx7ZsaUBMgJyvgaE/Pq2FfcG2Sw=
 github.com/go-widgets/painter v0.11.0/go.mod h1:IPRLqdUJuJX8sfuHeYLZCzjoLvA0ApbOlyIAVmguJDQ=
-github.com/go-widgets/toolkit v0.230.0 h1:6Z0x8QgYZDGmWyJTCWd7UuzRn46uIvx8mwiAChRz78g=
-github.com/go-widgets/toolkit v0.230.0/go.mod h1:dtu0LE6KVnV7U9R85LkCMiZ5bUL1vRT++OSGAUp8IEQ=
+github.com/go-widgets/toolkit v0.234.0 h1:NwgGzVY1u4hqPL7lou3QnI++ysCa3Jt5u9Wfznj1evo=
+github.com/go-widgets/toolkit v0.234.0/go.mod h1:KmLIi/12B6E/+wAA0xbGvQWmKMVSzvFv6Y7WwhEr29o=
 github.com/go-widgets/toolkit/rougelex v0.1.0 h1:3WdpaNp8laneKDVqYgaev/4I5SMZTnFa+2UtD8f7vmU=
 github.com/go-widgets/toolkit/rougelex v0.1.0/go.mod h1:zntdpbJrVqLk/JGJ6EMdiZeXHFHtVeV5JXHqhWH1f+s=
 github.com/go-widgets/tui v0.55.0 h1:R0m2F7Q0rtXKSBEjto5g6LhUuxHwRaZcmkJqXQGwtOg=

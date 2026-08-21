@@ -136,7 +136,7 @@ func NewGrid(cols, rows int) *Grid {
 	tv.SetCellSize(cellW, cellH)
 	tv.DefaultFG = inkGreen
 	tv.DefaultBG = panelBG
-	tv.CursorVisible = true
+	tv.CursorVisible().Set(true)
 	return &Grid{TerminalView: tv}
 }
 
@@ -158,7 +158,7 @@ func (g *Grid) PrintString(s string) {
 	for i := 0; i < len(s); i++ {
 		switch s[i] {
 		case '\r':
-			g.CursorCol = 0
+			g.CursorCol().Set(0)
 		case '\n':
 			g.CRLF()
 		case 0x08:
@@ -173,22 +173,22 @@ func (g *Grid) PrintString(s string) {
 // of a row it is a no-op (real terminals likewise do not wrap a BS across a
 // line boundary by default).
 func (g *Grid) Backspace() {
-	if g.CursorCol == 0 {
+	if g.CursorCol().Get() == 0 {
 		return
 	}
-	g.CursorCol--
-	g.SetCell(g.CursorCol, g.CursorRow, 0, toolkit.RGBA{}, toolkit.RGBA{})
+	g.CursorCol().Set(g.CursorCol().Get() - 1)
+	g.SetCell(g.CursorCol().Get(), g.CursorRow().Get(), 0, toolkit.RGBA{}, toolkit.RGBA{})
 }
 
 // CRLF moves the cursor to column 0 of the next row, scrolling one row when it
 // would leave the bottom. Named CRLF (not NewLine) because it does both the
 // carriage return and the line feed in one step -- TTY-style.
 func (g *Grid) CRLF() {
-	g.CursorCol = 0
-	g.CursorRow++
-	if g.CursorRow >= g.Rows {
+	g.CursorCol().Set(0)
+	g.CursorRow().Set(g.CursorRow().Get() + 1)
+	if g.CursorRow().Get() >= g.Rows {
 		g.ScrollUp(1)
-		g.CursorRow = g.Rows - 1
+		g.CursorRow().Set(g.Rows - 1)
 	}
 }
 
@@ -197,6 +197,6 @@ func (g *Grid) Clear() {
 	for i := range g.Cells {
 		g.Cells[i] = toolkit.TermCell{}
 	}
-	g.CursorCol = 0
-	g.CursorRow = 0
+	g.CursorCol().Set(0)
+	g.CursorRow().Set(0)
 }
