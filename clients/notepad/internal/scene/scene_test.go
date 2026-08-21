@@ -85,7 +85,7 @@ func TestSaveDocPersistsToDocSet(t *testing.T) {
 		t.Fatalf("save didn't persist to docSet[0]: %q", s.docSet[0].Content)
 	}
 	// Notification was shown.
-	if !s.notify.Visible {
+	if !s.notify.Visible().Get() {
 		t.Fatal("save should show a notification")
 	}
 }
@@ -93,8 +93,8 @@ func TestSaveDocPersistsToDocSet(t *testing.T) {
 func TestNotifShowsToast(t *testing.T) {
 	s := New(surfaceW, surfaceH)
 	s.notif("hello")
-	if !s.notify.Visible || s.notify.Text != "hello" {
-		t.Fatalf("notif: visible=%v text=%q", s.notify.Visible, s.notify.Text)
+	if !s.notify.Visible().Get() || s.notify.Text != "hello" {
+		t.Fatalf("notif: visible=%v text=%q", s.notify.Visible().Get(), s.notify.Text)
 	}
 }
 
@@ -199,7 +199,7 @@ func TestHandleKeyRoutesToEditor(t *testing.T) {
 	}
 	// Ctrl+S saves.
 	s.HandleKey("Ctrl+S")
-	if !s.notify.Visible {
+	if !s.notify.Visible().Get() {
 		t.Fatal("Ctrl+S should show the save notification")
 	}
 }

@@ -244,7 +244,7 @@ func New(w, h int) *State {
 	s.colorPick = toolkit.NewColorChooser(toolkit.RGB(0x35, 0x84, 0xE4))
 
 	s.progress = toolkit.NewProgressBar()
-	s.progress.Fraction = 0.66
+	s.progress.Fraction().Set(0.66)
 	s.scale = toolkit.NewScale(0, 100, 50)
 	s.spin = toolkit.NewSpinButton(0, 100, 42, 1)
 
