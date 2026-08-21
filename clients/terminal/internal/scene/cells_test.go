@@ -21,7 +21,7 @@ func TestNewGridDims(t *testing.T) {
 	if g.Cols != 40 || g.Rows != 25 || len(g.Cells) != 40*25 {
 		t.Fatalf("NewGrid(40,25): cols=%d rows=%d cells=%d", g.Cols, g.Rows, len(g.Cells))
 	}
-	if !g.CursorVisible {
+	if !g.CursorVisible().Get() {
 		t.Fatal("NewGrid should make the block cursor visible")
 	}
 	if g.DefaultFG != inkGreen || g.DefaultBG != panelBG {
@@ -48,9 +48,9 @@ func TestNewGridPanicsOnZero(t *testing.T) {
 func TestPrintWrapsAtEndOfRow(t *testing.T) {
 	g := NewGrid(3, 2)
 	g.PrintString("abc")
-	if g.CursorRow != 1 || g.CursorCol != 0 {
+	if g.CursorRow().Get() != 1 || g.CursorCol().Get() != 0 {
 		t.Fatalf("after 'abc' on 3-col grid, cursor = (%d,%d), want (1,0)",
-			g.CursorCol, g.CursorRow)
+			g.CursorCol().Get(), g.CursorRow().Get())
 	}
 	g.Print('d')
 	if at(g, 0, 1) != 'd' {
@@ -90,9 +90,9 @@ func TestPrintScrollsOnOverflow(t *testing.T) {
 	g := NewGrid(2, 2)
 	// Fill four cells -- exhausts the grid. The next Print scrolls.
 	g.PrintString("abcd")
-	if g.CursorRow != 1 || g.CursorCol != 0 {
+	if g.CursorRow().Get() != 1 || g.CursorCol().Get() != 0 {
 		t.Fatalf("expected cursor at (0,1) after wrap-onto-row-2, got (%d,%d)",
-			g.CursorCol, g.CursorRow)
+			g.CursorCol().Get(), g.CursorRow().Get())
 	}
 	g.Print('e')
 	// After scroll, the original row 1 (c,d) sits at row 0 and 'e' lands at (0,1).
@@ -123,8 +123,8 @@ func TestPrintStringControlBytes(t *testing.T) {
 func TestBackspaceAtColumnZero(t *testing.T) {
 	g := NewGrid(4, 2)
 	g.Backspace()
-	if g.CursorCol != 0 || g.CursorRow != 0 {
-		t.Fatalf("Backspace at (0,0) moved cursor to (%d,%d)", g.CursorCol, g.CursorRow)
+	if g.CursorCol().Get() != 0 || g.CursorRow().Get() != 0 {
+		t.Fatalf("Backspace at (0,0) moved cursor to (%d,%d)", g.CursorCol().Get(), g.CursorRow().Get())
 	}
 }
 
@@ -136,8 +136,8 @@ func TestBackspaceClearsCell(t *testing.T) {
 	if at(g, 1, 0) != 0 {
 		t.Fatalf("Backspace left cell (1,0) = %q, want cleared", at(g, 1, 0))
 	}
-	if g.CursorCol != 1 {
-		t.Fatalf("cursor col = %d after Backspace, want 1", g.CursorCol)
+	if g.CursorCol().Get() != 1 {
+		t.Fatalf("cursor col = %d after Backspace, want 1", g.CursorCol().Get())
 	}
 }
 
@@ -148,9 +148,9 @@ func TestCRLFScrolls(t *testing.T) {
 	g.CRLF() // cursor at (0,1)
 	g.PrintString("zw")
 	g.CRLF() // overflow: scroll, cursor parks at (0, Rows-1)
-	if g.CursorRow != g.Rows-1 || g.CursorCol != 0 {
+	if g.CursorRow().Get() != g.Rows-1 || g.CursorCol().Get() != 0 {
 		t.Fatalf("after CRLF-overflow, cursor = (%d,%d), want (0,%d)",
-			g.CursorCol, g.CursorRow, g.Rows-1)
+			g.CursorCol().Get(), g.CursorRow().Get(), g.Rows-1)
 	}
 }
 
@@ -164,8 +164,8 @@ func TestClear(t *testing.T) {
 			t.Fatalf("cell[%d] = %q after Clear, want 0", i, c.Rune)
 		}
 	}
-	if g.CursorCol != 0 || g.CursorRow != 0 {
-		t.Fatalf("cursor after Clear = (%d,%d)", g.CursorCol, g.CursorRow)
+	if g.CursorCol().Get() != 0 || g.CursorRow().Get() != 0 {
+		t.Fatalf("cursor after Clear = (%d,%d)", g.CursorCol().Get(), g.CursorRow().Get())
 	}
 }
 
@@ -190,8 +190,8 @@ func TestResizeShrink(t *testing.T) {
 			g.SetCell(c, r, rune('A'+r*4+c), inkGreen, panelBG)
 		}
 	}
-	g.CursorCol = 3
-	g.CursorRow = 3
+	g.CursorCol().Set(3)
+	g.CursorRow().Set(3)
 	g.Resize(2, 2)
 	// Top-left 2x2 retained.
 	if at(g, 0, 0) != 'A' || at(g, 1, 0) != 'B' ||
@@ -199,8 +199,8 @@ func TestResizeShrink(t *testing.T) {
 		t.Fatalf("Resize shrink lost top-left: %q%q%q%q",
 			at(g, 0, 0), at(g, 1, 0), at(g, 0, 1), at(g, 1, 1))
 	}
-	if g.CursorCol != 1 || g.CursorRow != 1 {
-		t.Fatalf("cursor not clamped: (%d,%d)", g.CursorCol, g.CursorRow)
+	if g.CursorCol().Get() != 1 || g.CursorRow().Get() != 1 {
+		t.Fatalf("cursor not clamped: (%d,%d)", g.CursorCol().Get(), g.CursorRow().Get())
 	}
 }
 
