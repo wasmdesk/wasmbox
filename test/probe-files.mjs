@@ -344,14 +344,17 @@ try {
     };
 
     // (a) Folder RowIcon on a non-selected list row (row 1 in png1 = Pictures).
-    //     drawFolderIconRect fills the ICON_SIZE box with ColorFolderFill; we
-    //     scan the icon's gutter box -- if drawing fails, this is 0.
+    //     The row icon is now the iconoir "folder" LINE glyph stroked in
+    //     ColorFolderFill (replacing the old hand-drawn drawFolderIconRect that
+    //     FILLED the box). An outline inks far fewer pixels than a filled box, so
+    //     the threshold checks the glyph is painting (its strokes are present),
+    //     not that a solid box is filled -- "not painting" would be ~0.
     const listY0 = surface.y + HEADER_BAR_HEIGHT + COLUMN_HEADER_HEIGHT;
     const iconRowY = listY0 + ROW_HEIGHT + (ROW_HEIGHT - ICON_SIZE) / 2;
     const iconRowX = surface.x + NAME_COL_X;
     const folderPixels = countIn(png1, iconRowX, iconRowY, ICON_SIZE, ICON_SIZE, COLOR_FOLDER_FILL);
-    if (folderPixels < 30) {
-      fail(`folder-icon pixels on list row 1 = ${folderPixels} (need >= 30 of ${COLOR_FOLDER_FILL}); icons not painting`);
+    if (folderPixels < 8) {
+      fail(`folder-icon pixels on list row 1 = ${folderPixels} (need >= 8 of ${COLOR_FOLDER_FILL} for the iconoir folder outline); icons not painting`);
     } else {
       console.log(`ok  list-row folder icon: ${folderPixels} ColorFolderFill pixels in ${ICON_SIZE}x${ICON_SIZE} box`);
     }

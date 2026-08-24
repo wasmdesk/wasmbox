@@ -41,8 +41,10 @@
 package scene
 
 import (
+	"strings"
 	"sync"
 
+	"github.com/go-iconoir/iconoir"
 	"github.com/go-widgets/painter"
 	"github.com/go-widgets/toolkit"
 )
@@ -126,18 +128,10 @@ var (
 	ColorAccent = toolkit.RGB(8, 96, 242)
 	// ColorOnAccent is the text/icon ink on top of the accent fill (white).
 	ColorOnAccent = toolkit.RGB(255, 255, 255)
-	// ColorFolderFill / ColorFolderTab / ColorFolderStroke paint the
-	// Nautilus-style two-tone folder icon.
-	ColorFolderFill   = toolkit.RGB(74, 134, 246)
-	ColorFolderTab    = toolkit.RGB(120, 174, 250)
-	ColorFolderStroke = toolkit.RGB(8, 80, 210)
-	// ColorFilePaper / ColorFileBorder paint the page-with-folded-corner icon.
-	ColorFilePaper  = toolkit.RGB(255, 255, 255)
-	ColorFileBorder = toolkit.RGB(200, 203, 208)
-	// colorStar is the Home bookmark's star glyph.
-	colorStar = toolkit.RGB(240, 180, 70)
-	// colorSelectedStroke is the icon stroke on the accent fill.
-	colorSelectedStroke = toolkit.RGB(220, 230, 250)
+	// ColorFolderFill is the ink the iconoir "folder" glyph is stroked in on an
+	// unselected row (WhiteSur folder blue); a selected row inverts it to
+	// ColorOnAccent so the line icon reads on the accent strip.
+	ColorFolderFill = toolkit.RGB(74, 134, 246)
 )
 
 // State bundles the navigation model, the persistent widget tree, and the
@@ -162,7 +156,8 @@ type State struct {
 	backBtn     *toolkit.IconButton
 	fwdBtn      *toolkit.IconButton
 	sidebar     *toolkit.VBox
-	sidebarRows []*sidebarRow
+	sidebarList *sidebarList
+	sbLabel     *toolkit.Label
 	table       *fileTable
 
 	// Overlays.
@@ -230,20 +225,27 @@ func (s *State) buildTree() {
 	band.AddFixed(row, headerBtnH)
 	band.AddFixed(spacer(), HeaderBarHeight-headerBtnH-headerBtnY)
 
-	// --- sidebar (sectioned) ---------------------------------------------
+	// --- sidebar (sectioned toolkit.ListBox) -----------------------------
+	// The navigation pane is a real toolkit.ListBox in sectioned mode: the
+	// toolkit owns the section-header bands, the row backgrounds, the accent
+	// selection highlight, virtual scrolling and click hit-testing. A per-row
+	// ItemRenderer fills each row's content -- an iconoir kind glyph plus a
+	// toolkit.Label for the label -- so no custom sidebarRow / sectionLabel leaf
+	// hand-draws the pane any more. Selection is the ListBox's own Selected
+	// Observable (kept in sync with SidebarSelected at Draw time); a click fires
+	// OnActivate, which routes into clickSidebar exactly as before.
+	s.sbLabel = toolkit.NewLabel("")
+	s.sbLabel.VAlign = toolkit.VMiddle
+	lb := toolkit.NewSectionedListBox(sidebarSections(s.Sidebar)...)
+	lb.RowHeight = SidebarRowHeight
+	lb.OnActivate = func(i int) { s.clickSidebar(i) }
+	lb.ItemRenderer = s.drawSidebarItem
+	s.sidebarList = &sidebarList{ListBox: lb, theme: newSidebarTheme()}
+
 	s.sidebar = toolkit.NewVBox()
 	s.sidebar.Spacing = 0
 	s.sidebar.AddFixed(spacer(), SidebarTopPadding)
-	prevSection := ""
-	for i, e := range s.Sidebar {
-		if e.Section != prevSection {
-			s.sidebar.AddFixed(&sectionLabel{text: e.Section}, SidebarSectionHeaderHeight)
-			prevSection = e.Section
-		}
-		r := &sidebarRow{s: s, i: i, e: e}
-		s.sidebarRows = append(s.sidebarRows, r)
-		s.sidebar.AddFixed(r, SidebarRowHeight)
-	}
+	s.sidebar.AddFlex(s.sidebarList, 1)
 
 	// --- content (Name / Size Table with a per-row icon gutter) ----------
 	s.table = newFileTable(s)
@@ -261,7 +263,7 @@ func (s *State) buildTree() {
 	// --- overlays ---------------------------------------------------------
 	s.ctxMenu = toolkit.NewContextMenu(toolkit.NewMenu(nil))
 	s.ctxMenu.SetBounds(toolkit.Rect{X: 0, Y: 0, W: s.W, H: s.H})
-	s.previewBody = &previewText{}
+	s.previewBody = newPreviewText()
 	s.previewDialog = toolkit.NewDialog("", s.previewBody)
 }
 
@@ -293,6 +295,10 @@ func Render(s *State, buf []byte) {
 	// (so refreshView isn't called); syncing here means every frame paints the
 	// current selection whichever path mutated the cursor.
 	s.table.Selected().Set(s.Browser.Cursor)
+	// Keep the sidebar ListBox's accent highlight on the navigation location.
+	// SidebarSelected is the flat item index (headers excluded); -1 leaves no
+	// row highlighted (the browser is somewhere no bookmark points at).
+	s.sidebarList.Selected().Set(s.SidebarSelected)
 
 	// Grounds: window (right pane) white, sidebar grey, header grey, hairlines.
 	fillBox(p, toolkit.Rect{X: 0, Y: 0, W: s.W, H: s.H}, ColorWindowBG)
@@ -532,7 +538,7 @@ func (s *State) openPreview(path string) {
 		lines = []string{"(empty file)"}
 	}
 	s.Preview = &PreviewOverlay{Path: path, Lines: lines}
-	s.previewBody.lines = lines
+	s.previewBody.SetText(strings.Join(lines, "\n"))
 	s.previewDialog.Title = Basename(path)
 	s.layoutPreview()
 }
@@ -633,10 +639,11 @@ func newFileTable(s *State) *fileTable {
 		{Title: "Size", Width: SizeColWidth, Align: toolkit.AlignRight},
 	}, nil)
 	t := &fileTable{Table: tbl, s: s, theme: newTableTheme()}
-	// RowIcon paints the two-tone folder / folded-page file glyph in the Name
-	// column's reserved gutter. The closure decides the selected variant from
-	// Browser.Cursor (rather than the ink Draw hands it) so the folder keeps its
-	// blue fill on unselected rows and inverts to white on the accent row.
+	// RowIcon paints the iconoir kind glyph (a "folder" line icon for a
+	// directory, a "page" line icon for a file) in the Name column's reserved
+	// gutter. The closure decides the ink from Browser.Cursor (rather than the
+	// ink Draw hands it) so the folder keeps its WhiteSur blue on unselected rows
+	// and both glyphs invert to white on the accent row.
 	tbl.RowIcon = func(row int) (toolkit.TableIconFunc, bool) {
 		if row < 0 || row >= len(s.Browser.Entries) {
 			return nil, false
@@ -644,11 +651,16 @@ func newFileTable(s *State) *fileTable {
 		e := s.Browser.Entries[row]
 		selected := row == s.Browser.Cursor
 		return func(p painter.Painter, r toolkit.Rect, _ toolkit.RGBA) {
+			stem := "page"
+			ink := ColorTextSecondary
 			if e.IsDir {
-				drawFolderIconRect(p, r, selected)
-			} else {
-				drawFileIconRect(p, r, selected)
+				stem = "folder"
+				ink = ColorFolderFill
 			}
+			if selected {
+				ink = ColorOnAccent
+			}
+			iconoir.Draw(p, r, stem, ink)
 		}, true
 	}
 	return t
@@ -740,190 +752,119 @@ func (t *fileTable) bodyContains(sx, sy int) bool {
 	return b.Contains(sx, sy) && sy >= b.Y+toolkit.TableHeaderHeight
 }
 
-// sidebarRow is one navigation row: a kind glyph + a label. The selected row
-// (SidebarSelected) fills the accent across the pane (minus the 1px divider)
-// with white ink.
-type sidebarRow struct {
-	toolkit.Base
-	s *State
-	i int
-	e SidebarEntry
+// sidebarList wraps a sectioned toolkit.ListBox so the navigation pane draws
+// with the Files WhiteSur sidebar palette (a grey pane, the #0860F2 accent
+// selection, white-on-accent ink) rather than the chrome theme the container
+// hands down -- the same theme-substitution seam fileTable uses for the Table.
+// Every other behaviour (selection, sectioned layout, hit-testing, scrolling)
+// is the embedded ListBox's own.
+type sidebarList struct {
+	*toolkit.ListBox
+	theme *toolkit.Theme
 }
 
-func (r *sidebarRow) Draw(p painter.Painter, _ *toolkit.Theme) {
-	b := r.Bounds()
-	selected := r.i == r.s.SidebarSelected
-	fg := ColorTextPrimary
-	if selected {
-		p.FillRect(toolkit.Rect{X: b.X, Y: b.Y, W: SidebarWidth - 1, H: b.H}, ColorAccent)
-		fg = ColorOnAccent
-	}
-	iconY := b.Y + (SidebarRowHeight-12)/2
-	drawSidebarIcon(p, b.X+12, iconY, r.e.Kind, selected)
-	labelY := b.Y + (SidebarRowHeight-toolkit.GlyphHeight())/2
-	toolkit.DrawText(p, b.X+32, labelY, r.e.Name, fg)
-}
+// Draw paints the ListBox with the Files sidebar palette instead of the chrome
+// theme the container passes down.
+func (l *sidebarList) Draw(p painter.Painter, _ *toolkit.Theme) { l.ListBox.Draw(p, l.theme) }
 
-func (r *sidebarRow) OnEvent(ev toolkit.Event) {
-	if ev.Kind == toolkit.EventClick {
-		r.s.clickSidebar(r.i)
-	}
-}
-
-// sectionLabel is a non-interactive sidebar section header ("BOOKMARKS").
-type sectionLabel struct {
-	toolkit.Base
-	text string
-}
-
-func (l *sectionLabel) Draw(p painter.Painter, _ *toolkit.Theme) {
-	b := l.Bounds()
-	y := b.Y + (SidebarSectionHeaderHeight-toolkit.GlyphHeight())/2
-	toolkit.DrawText(p, b.X+12, y, l.text, ColorTextSecondary)
-}
-
-// HitTest is false so a click on the section band passes through (the label is
-// not interactive).
-func (l *sectionLabel) HitTest(_, _ int) bool { return false }
-
-// previewText draws the preview overlay's body lines (the Dialog's content).
-type previewText struct {
-	toolkit.Base
-	lines []string
-}
-
-func (t *previewText) Draw(p painter.Painter, _ *toolkit.Theme) {
-	b := t.Bounds()
-	y := b.Y + PreviewPadding
-	lh := toolkit.GlyphHeight() + 4
-	for _, ln := range t.lines {
-		if y+toolkit.GlyphHeight() > b.Y+b.H-PreviewPadding {
-			break
+// sidebarSections groups the flat Sidebar slice into the ListBox's sectioned
+// model: one toolkit.ListSection per contiguous run of a Section, its Items the
+// entry Names in order. Because the entries are already grouped by Section, the
+// flat selectable-item index the ListBox addresses (headers excluded) lines up
+// one-to-one with the Sidebar slice index, so OnActivate(i) maps straight back
+// to Sidebar[i] / clickSidebar(i).
+func sidebarSections(entries []SidebarEntry) []toolkit.ListSection {
+	var out []toolkit.ListSection
+	for _, e := range entries {
+		if len(out) == 0 || out[len(out)-1].Title != e.Section {
+			out = append(out, toolkit.ListSection{Title: e.Section})
 		}
-		toolkit.DrawText(p, b.X+PreviewPadding, y, ln, ColorTextPrimary)
-		y += lh
+		last := &out[len(out)-1]
+		last.Items = append(last.Items, e.Name)
 	}
+	return out
 }
 
-// --- file-type icon glyphs (painter primitives) --------------------------
-
-// drawFolderIconRect paints a Nautilus-style two-tone folder inside the square
-// icon rect r (the toolkit.TableIconSize gutter box). Selected rows flip the
-// fill to white so the icon reads on the accent strip. It ignores the ink Draw
-// passes -- the folder is deliberately two-tone blue, not a single-ink glyph --
-// taking the selected variant from the caller instead.
-func drawFolderIconRect(p painter.Painter, r toolkit.Rect, selected bool) {
-	face, tab, stroke := ColorFolderFill, ColorFolderTab, ColorFolderStroke
-	if selected {
-		face, tab, stroke = ColorOnAccent, ColorOnAccent, colorSelectedStroke
-	}
-	x, w := r.X, r.W
-	bodyY, bodyH := r.Y+3, r.H-3            // body sits below the tab
-	fill(p, x, r.Y, 6, 2, tab)              // tab
-	fill(p, x, bodyY, w, bodyH, face)       // body
-	fill(p, x, bodyY, w, 1, stroke)         // top edge
-	fill(p, x, bodyY+bodyH-1, w, 1, stroke) // bottom edge
-	fill(p, x, bodyY, 1, bodyH, stroke)     // left edge
-	fill(p, x+w-1, bodyY, 1, bodyH, stroke) // right edge
-	fill(p, x, r.Y, 6, 1, stroke)           // tab top
-	fill(p, x, r.Y, 1, 3, stroke)           // tab left
-	fill(p, x+5, r.Y, 1, 3, stroke)         // tab right
+// drawSidebarItem is the ListBox ItemRenderer: it paints one navigation row's
+// content -- the iconoir kind glyph followed by the label -- into the row rect
+// rc. The ListBox has already filled the row background (the accent strip on the
+// selected row) and resolved ink to the label/glyph ink for the row's state
+// (ColorTextPrimary normally, ColorOnAccent white on the accent strip), so a
+// single-ink iconoir line icon + a toolkit.Label in that ink is all that's left.
+// index is the flat selectable-item index, which equals the Sidebar slice index.
+func (s *State) drawSidebarItem(p painter.Painter, theme *toolkit.Theme, rc toolkit.Rect, index int, item string, _ bool, ink toolkit.RGBA) {
+	const icon = 16
+	iconoir.Draw(p, toolkit.Rect{X: rc.X + 12, Y: rc.Y + (rc.H-icon)/2, W: icon, H: icon}, sidebarStem(s.Sidebar[index].Kind), ink)
+	s.sbLabel.Text().Set(item)
+	s.sbLabel.Ink = ink
+	s.sbLabel.SetBounds(toolkit.Rect{X: rc.X + 32, Y: rc.Y, W: rc.W - 32, H: rc.H})
+	s.sbLabel.Draw(p, theme)
 }
 
-// drawFileIconRect paints a page with a folded top-right corner, centred inside
-// the square icon rect r. Selected rows flip the paper to white so it reads on
-// the accent strip.
-func drawFileIconRect(p painter.Painter, r toolkit.Rect, selected bool) {
-	paper, stroke := ColorFilePaper, ColorFileBorder
-	if selected {
-		paper, stroke = ColorOnAccent, colorSelectedStroke
-	}
-	w, h := 12, r.H
-	x := r.X + (r.W-w)/2
-	y := r.Y
-	fill(p, x, y, w, h, paper)
-	fill(p, x, y, w, 1, stroke)     // top
-	fill(p, x, y+h-1, w, 1, stroke) // bottom
-	fill(p, x, y, 1, h, stroke)     // left
-	fill(p, x+w-1, y, 1, h, stroke) // right
-	for i := 0; i < 5; i++ {        // folded corner
-		fill(p, x+w-5+i, y, 5-i, 1, stroke)
-	}
-	for i := 0; i < 5; i++ { // fold diagonal
-		fill(p, x+w-5+i, y+4-i, 1, 1, stroke)
-	}
-}
-
-// drawSidebarIcon dispatches to the mini glyph for the entry kind.
-func drawSidebarIcon(p painter.Painter, x, y int, kind string, selected bool) {
+// sidebarStem maps a SidebarEntry.Kind to its iconoir stem: the Home star, the
+// Computer monitor, the Trash bin, or a folder for every bookmark.
+func sidebarStem(kind string) string {
 	switch kind {
 	case "home":
-		drawStarIcon(p, x, y, selected)
+		return "star"
 	case "computer":
-		drawComputerIcon(p, x, y, selected)
+		return "computer"
 	case "trash":
-		drawTrashIcon(p, x, y, selected)
+		return "trash"
 	default:
-		drawMiniFolder(p, x, y, selected)
+		return "folder"
 	}
 }
 
-// drawMiniFolder is a small (14x10) folder glyph for the Bookmarks section.
-func drawMiniFolder(p painter.Painter, x, y int, selected bool) {
-	face, tab, stroke := ColorFolderFill, ColorFolderTab, ColorFolderStroke
-	if selected {
-		face, tab, stroke = ColorOnAccent, ColorOnAccent, colorSelectedStroke
+// newSidebarTheme maps the WhiteSur sidebar palette onto the roles the sectioned
+// ListBox reads: a grey pane (Surface) with grey section-header bands (SurfaceAlt
+// matches the pane so a header reads as a caption, not a raised strip),
+// primary-ink item labels (OnSurface), the #0860F2 accent selection carrying
+// white ink (Accent + Extra["OnAccent"]).
+func newSidebarTheme() *toolkit.Theme {
+	return &toolkit.Theme{
+		Background:   ColorSidebarBG,
+		Surface:      ColorSidebarBG,
+		SurfaceAlt:   ColorSidebarBG,
+		OnBackground: ColorTextSecondary,
+		OnSurface:    ColorTextPrimary,
+		Accent:       ColorAccent,
+		Border:       ColorDivider,
+		Extra:        map[string]toolkit.RGBA{"OnAccent": ColorOnAccent},
 	}
-	fill(p, x, y, 6, 2, tab)
-	fill(p, x, y+2, 14, 8, face)
-	fill(p, x, y+9, 14, 1, stroke)
-	fill(p, x, y+2, 1, 8, stroke)
-	fill(p, x+13, y+2, 1, 8, stroke)
 }
 
-// drawStarIcon draws a small star (a filled diamond + legs) for the Home entry.
-func drawStarIcon(p painter.Painter, x, y int, selected bool) {
-	ink := colorStar
-	if selected {
-		ink = ColorOnAccent
-	}
-	fill(p, x+5, y, 4, 2, ink)
-	fill(p, x+3, y+2, 8, 2, ink)
-	fill(p, x+1, y+4, 12, 2, ink)
-	fill(p, x+3, y+6, 8, 2, ink)
-	fill(p, x+2, y+8, 3, 2, ink)
-	fill(p, x+9, y+8, 3, 2, ink)
+// previewText wraps a toolkit.TextView so the text-file preview overlay's body
+// is a real multi-line text widget (with the toolkit's own windowed line
+// clipping) rather than a hand-drawn line stack. Draw substitutes a white-pane
+// preview theme so the body reads as a document regardless of the chrome theme
+// the Dialog passes down.
+type previewText struct {
+	*toolkit.TextView
+	theme *toolkit.Theme
 }
 
-// drawComputerIcon draws a small monitor for the Computer entry.
-func drawComputerIcon(p painter.Painter, x, y int, selected bool) {
-	face := ColorTextPrimary
-	inside := ColorSidebarBG
-	if selected {
-		face, inside = ColorOnAccent, ColorOnAccent
-	}
-	fill(p, x, y, 14, 8, face)
-	fill(p, x+1, y+1, 12, 6, inside)
-	fill(p, x+5, y+8, 4, 2, face)
-	fill(p, x+3, y+10, 8, 1, face)
+// newPreviewText builds the preview body TextView. It is never focused (the
+// overlay is read-only and the next click dismisses it at the scene level), so
+// no caret is painted.
+func newPreviewText() *previewText {
+	return &previewText{TextView: toolkit.NewTextView(""), theme: newPreviewTheme()}
 }
 
-// drawTrashIcon draws a small bin for the Trash entry.
-func drawTrashIcon(p painter.Painter, x, y int, selected bool) {
-	face := ColorTextPrimary
-	if selected {
-		face = ColorOnAccent
-	}
-	fill(p, x+1, y, 12, 1, face)
-	fill(p, x+5, y-1, 4, 1, face)
-	fill(p, x+2, y+1, 1, 9, face)
-	fill(p, x+11, y+1, 1, 9, face)
-	fill(p, x+2, y+9, 10, 1, face)
-	fill(p, x+5, y+2, 1, 6, face)
-	fill(p, x+8, y+2, 1, 6, face)
-}
+// Draw paints the TextView with the preview palette instead of the Dialog's
+// chrome theme.
+func (t *previewText) Draw(p painter.Painter, _ *toolkit.Theme) { t.TextView.Draw(p, t.theme) }
 
-// fill is a shorthand for an opaque rectangle in surface coordinates.
-func fill(p painter.Painter, x, y, w, h int, c toolkit.RGBA) {
-	p.FillRect(toolkit.Rect{X: x, Y: y, W: w, H: h}, c)
+// newPreviewTheme is a white document pane carrying primary-ink body text and a
+// #d3d3d3 hairline border, matching the file view.
+func newPreviewTheme() *toolkit.Theme {
+	return &toolkit.Theme{
+		Background:   ColorWindowBG,
+		Surface:      ColorWindowBG,
+		SurfaceAlt:   ColorWindowBG,
+		OnBackground: ColorTextPrimary,
+		OnSurface:    ColorTextPrimary,
+		Accent:       ColorAccent,
+		Border:       ColorDivider,
+	}
 }

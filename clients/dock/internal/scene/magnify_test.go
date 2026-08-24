@@ -134,7 +134,7 @@ func TestWindowButtonsShrinkToFit(t *testing.T) {
 	// Narrow iconbar (width = 300 - 100 - 80 = 120) and NO launchers, so the
 	// window row alone must be shrunk to fit inside the iconbar's right edge.
 	s := New(300, BarHeight)
-	s.Apps = nil
+	s.SetApps(nil)
 	s.SetWindows([]Window{
 		{Id: 1, Title: "one"}, {Id: 2, Title: "two"}, {Id: 3, Title: "three"},
 	})
@@ -152,7 +152,7 @@ func TestWindowButtonsShrinkToFit(t *testing.T) {
 // the render never divides by or paints a zero-width slot.
 func TestWindowButtonsShrinkCapFloor(t *testing.T) {
 	s := New(190, BarHeight) // iconbar width = 190 - 100 - 80 = 10
-	s.Apps = nil
+	s.SetApps(nil)
 	s.SetWindows([]Window{
 		{Id: 1, Title: "a"}, {Id: 2, Title: "b"}, {Id: 3, Title: "c"},
 		{Id: 4, Title: "d"}, {Id: 5, Title: "e"},

@@ -5,6 +5,7 @@ package scene
 import (
 	"testing"
 
+	"github.com/go-iconoir/iconoir"
 	"github.com/go-widgets/painter"
 	"github.com/go-widgets/toolkit"
 	"github.com/wasmdesk/wasmbox/clients/dock/internal/theme"
@@ -288,7 +289,7 @@ func TestRenderClockInked(t *testing.T) {
 // always visually present.
 func TestRenderClockFallback(t *testing.T) {
 	s := New(tW, tH)
-	s.Clock = ""
+	s.SetClock("")
 	buf := newBuf(s)
 	Render(s, buf)
 	cx, _, cw, _ := s.ClockRect()
@@ -323,7 +324,9 @@ func TestRenderTopBorderColor(t *testing.T) {
 // Disabling the border (Width = 0) skips the top stroke.
 func TestRenderTopBorderSkippedWhenWidthZero(t *testing.T) {
 	s := New(tW, tH)
-	s.Theme.Border.Width = 0
+	th := s.Theme
+	th.Border.Width = 0
+	s.SetTheme(th)
 	buf := newBuf(s)
 	Render(s, buf)
 	off := 0
@@ -377,48 +380,44 @@ func TestEachGlyphPaints(t *testing.T) {
 	}
 }
 
-// drawGlyphHello with a wider-than-tall box exercises the h/2 < r clamp.
-func TestDrawGlyphHelloWideBox(t *testing.T) {
-	buf, p := newPainter(tW, tH)
-	drawGlyph(p, GlyphHello, toolkit.Rect{X: 0, Y: 0, W: 20, H: 8})
-	painted := 0
-	for i := range buf {
-		if buf[i] != 0 {
-			painted++
-		}
+// glyphStem maps every bespoke launcher glyph to a real go-iconoir stem, with
+// "square" as the fallback for an unknown glyph value.
+func TestGlyphStem(t *testing.T) {
+	cases := []struct {
+		g    Glyph
+		want string
+	}{
+		{GlyphTerminal, "terminal"},
+		{GlyphHello, "home"},
+		{GlyphCode, "code-brackets"},
+		{GlyphLoom, "view-grid"},
+		{Glyph(99), "square"},
 	}
-	if painted == 0 {
-		t.Fatalf("hello glyph in wide box painted nothing")
+	names := map[string]bool{}
+	for _, n := range iconoir.Names() {
+		names[n] = true
+	}
+	for _, c := range cases {
+		got := glyphStem(c.g)
+		if got != c.want {
+			t.Fatalf("glyphStem(%v) = %q, want %q", c.g, got, c.want)
+		}
+		if !names[got] {
+			t.Fatalf("glyphStem(%v) = %q is not a real iconoir stem", c.g, got)
+		}
 	}
 }
 
-// drawGlyphLoom in a tiny box exercises the w<6/h<6 fallback grid branch.
-func TestDrawGlyphLoomTinyBox(t *testing.T) {
-	buf, p := newPainter(tW, tH)
-	drawGlyph(p, GlyphLoom, toolkit.Rect{X: 0, Y: 0, W: 4, H: 4})
-	painted := 0
-	for i := range buf {
-		if buf[i] != 0 {
-			painted++
+// A bespoke launcher glyph now paints through go-iconoir: drawGlyph with an
+// iconoir-backed glyph must ink pixels via the resolved stem (not a hand-drawn
+// PutPixel routine).
+func TestGlyphDrawsIconoir(t *testing.T) {
+	for _, g := range []Glyph{GlyphTerminal, GlyphHello, GlyphCode, GlyphLoom} {
+		buf, p := newPainter(64, 64)
+		drawGlyph(p, g, toolkit.Rect{X: 8, Y: 8, W: 32, H: 32})
+		if countNonZero(buf) == 0 {
+			t.Fatalf("iconoir glyph %v painted nothing", g)
 		}
-	}
-	if painted == 0 {
-		t.Fatalf("loom glyph fallback painted nothing")
-	}
-}
-
-// drawGlyphCode in a short box exercises the armH<2 clamp.
-func TestDrawGlyphCodeTinyBox(t *testing.T) {
-	buf, p := newPainter(tW, tH)
-	drawGlyph(p, GlyphCode, toolkit.Rect{X: 0, Y: 0, W: 8, H: 8})
-	painted := 0
-	for i := range buf {
-		if buf[i] != 0 {
-			painted++
-		}
-	}
-	if painted == 0 {
-		t.Fatalf("code glyph in short box painted nothing")
 	}
 }
 
@@ -511,11 +510,11 @@ func TestRenderNarrowIconbar(t *testing.T) {
 // More launchers than fit renders without panic.
 func TestRenderExtraLaunchers(t *testing.T) {
 	s := New(400, BarHeight)
-	s.Apps = []App{
+	s.SetApps([]App{
 		{Id: "a", Glyph: GlyphTerminal, Label: "A"},
 		{Id: "b", Glyph: GlyphEditor, Label: "B"},
 		{Id: "c", Glyph: GlyphFiles, Label: "C"},
-	}
+	})
 	buf := newBuf(s)
 	Render(s, buf) // must not panic
 }
@@ -818,19 +817,6 @@ func TestItoa(t *testing.T) {
 	}
 }
 
-// abs covers the negative-input branch.
-func TestAbs(t *testing.T) {
-	if abs(-3) != 3 {
-		t.Fatal("abs(-3) wrong")
-	}
-	if abs(7) != 7 {
-		t.Fatal("abs(7) wrong")
-	}
-	if abs(0) != 0 {
-		t.Fatal("abs(0) wrong")
-	}
-}
-
 // Window.Workspace round-trips through SetWindows (the compositor sends it
 // in the windows_changed payload; the dock keeps it in the model).
 func TestWindowCarriesWorkspaceField(t *testing.T) {
@@ -861,6 +847,74 @@ func TestRGBA(t *testing.T) {
 	got := rgba(theme.Color{0x12, 0x34, 0x56})
 	if got.R != 0x12 || got.G != 0x34 || got.B != 0x56 || got.A != 0xFF {
 		t.Fatalf("rgba = %+v, want {0x12,0x34,0x56,0xFF}", got)
+	}
+}
+
+// SetApps swaps the launcher row and republishes the iconbar: the new launcher
+// count is reflected in the exposed LauncherRects on the next read (proving the
+// persistent AppDock was re-synced, not left stale).
+func TestSetApps(t *testing.T) {
+	s := New(tW, tH)
+	if got := len(s.LauncherRects()); got != 6 {
+		t.Fatalf("default LauncherRects = %d, want 6", got)
+	}
+	s.SetApps([]App{
+		{Id: "x", Glyph: GlyphTerminal, Label: "X"},
+		{Id: "y", Glyph: GlyphCode, Label: "Y"},
+	})
+	if got := len(s.Apps); got != 2 {
+		t.Fatalf("SetApps len = %d, want 2", got)
+	}
+	if got := len(s.LauncherRects()); got != 2 {
+		t.Fatalf("LauncherRects after SetApps = %d, want 2", got)
+	}
+	s.SetApps(nil)
+	if got := len(s.LauncherRects()); got != 0 {
+		t.Fatalf("LauncherRects after SetApps(nil) = %d, want 0", got)
+	}
+}
+
+// The widget tree is PERSISTENT: the AppDock, the two section ends and the top
+// border are the SAME objects across state changes and renders — the migration
+// replaced the per-frame rebuild with one tree bound to observables.
+func TestPersistentWidgetTree(t *testing.T) {
+	s := New(tW, tH)
+	dock, ws, clk, border := s.dock, s.wsView, s.clockView, s.border
+	buf := newBuf(s)
+	Render(s, buf)
+	s.SetWindows([]Window{{Id: 1, Title: "a", Focused: true}})
+	s.SetClock("10:20")
+	s.SetActiveWorkspace(2)
+	s.SetCursor(200, tH/2, true)
+	Render(s, buf)
+	if s.dock != dock {
+		t.Fatalf("AppDock was rebuilt (pointer changed) — not a persistent tree")
+	}
+	if s.wsView != ws || s.clockView != clk || s.border != border {
+		t.Fatalf("a section/border widget was rebuilt — not a persistent tree")
+	}
+	// The persistent dock still reflects the pushed windows.
+	if len(s.WindowRects()) != 1 {
+		t.Fatalf("persistent dock did not pick up SetWindows")
+	}
+}
+
+// The top border is a toolkit.Backdrop (state.border) whose Fill tracks the
+// theme's border colour through applyTheme — not a hand PutPixel loop.
+func TestTopBorderBackdropTracksTheme(t *testing.T) {
+	s := New(tW, tH)
+	want := rgba(s.Theme.Border.Color)
+	if s.border.Fill != want {
+		t.Fatalf("border Fill = %+v, want %+v", s.border.Fill, want)
+	}
+	if !s.borderOn {
+		t.Fatalf("border should be on with default Width=1")
+	}
+	th := s.Theme
+	th.Border.Color = theme.Color{0x11, 0x22, 0x33}
+	s.SetTheme(th)
+	if s.border.Fill != (toolkit.RGB(0x11, 0x22, 0x33)) {
+		t.Fatalf("border Fill did not track SetTheme: %+v", s.border.Fill)
 	}
 }
 

@@ -112,9 +112,9 @@ type State struct {
 	startCard *startCard
 	streamCrd *streamCard
 	grid      *toolkit.VBox
-	backBtn   *iconButton
-	fwdBtn    *iconButton
-	addBtn    *iconButton
+	backBtn   *toolkit.IconButton
+	fwdBtn    *toolkit.IconButton
+	addBtn    *toolkit.IconButton
 	addr      *addrBar
 	tiles     []*tile
 	frameImg  *toolkit.Image
@@ -189,22 +189,15 @@ func New(w, h int) *State {
 		{"Wiki", "wiki.wasmdesk.org"},
 	}
 
-	// Toolbar controls read live state through closures so one persistent tree
-	// reflects the model at Draw time without a rebuild.
-	s.backBtn = &iconButton{label: "<", ink: func() toolkit.RGBA {
-		if s.canBack {
-			return s.theme.OnSurface
-		}
-		return dim(s.theme)
-	}, onClick: func() { s.dirty = s.goBack() }}
-	s.fwdBtn = &iconButton{label: ">", ink: func() toolkit.RGBA {
-		if s.canFwd {
-			return s.theme.OnSurface
-		}
-		return dim(s.theme)
-	}, onClick: func() { s.dirty = s.goForward() }}
-	// The new-tab "+" button is drawn but inert (as in the original shell).
-	s.addBtn = &iconButton{label: "+", ink: func() toolkit.RGBA { return s.theme.OnSurface }, onClick: func() {}}
+	// Toolbar controls are toolkit IconButtons. Back / forward grey out through
+	// their Disabled() observable (kept in sync with the server's history flags by
+	// syncNav) instead of a hand-drawn dim-ink closure, so a disabled button is
+	// both muted and inert. The new-tab "+" button is drawn but inert (as in the
+	// original shell).
+	s.backBtn = toolkit.NewIconButton("<", func() { s.dirty = s.goBack() })
+	s.fwdBtn = toolkit.NewIconButton(">", func() { s.dirty = s.goForward() })
+	s.addBtn = toolkit.NewIconButton("+", func() {})
+	s.syncNav()
 	s.addr = &addrBar{s: s, onClick: func() { s.focusAddr(); s.dirty = true }}
 
 	row := toolkit.NewHBox()
@@ -237,7 +230,7 @@ func New(w, h int) *State {
 			s.grid.AddFixed(rowBox, tileH)
 		}
 		fav := s.favs[i]
-		t := &tile{fav: fav, onClick: func() { s.dirty = s.startNavigate(fav.url) }}
+		t := newTile(fav, func() { s.dirty = s.startNavigate(fav.url) })
 		s.tiles[i] = t
 		rowBox.AddFixed(t, tileW)
 	}
@@ -245,7 +238,7 @@ func New(w, h int) *State {
 	// Content cards: favourites start page + streamed-frame / panel card.
 	s.frameImg = toolkit.NewImage(nil, 0, 0) // pixels/dims filled by SetFrame
 	s.startCard = &startCard{s: s, grid: s.grid}
-	s.streamCrd = &streamCard{s: s}
+	s.streamCrd = newStreamCard(s)
 	s.card = &toolkit.CardLayout{Active: 0}
 	s.content = toolkit.NewContainer(s.card)
 	s.content.AddWidget(s.startCard) // card 0
@@ -281,10 +274,19 @@ func (s *State) SetConnected(connected bool) {
 func (s *State) SetState(url, title string, loading, canBack, canForward bool) {
 	s.url, s.title = url, title
 	s.loading, s.canBack, s.canFwd = loading, canBack, canForward
+	s.syncNav()
 	if !s.addrFocused {
 		s.addrText = url
 	}
 	s.syncCard()
+}
+
+// syncNav mirrors the server's history availability onto the back / forward
+// IconButtons' Disabled() observables, so an unavailable direction greys out and
+// swallows its own clicks (its OnEvent early-returns while disabled).
+func (s *State) syncNav() {
+	s.backBtn.Disabled().Set(!s.canBack)
+	s.fwdBtn.Disabled().Set(!s.canFwd)
 }
 
 // SetFrame applies a server {frame} message: pixels is the RGBA byte buffer of a
@@ -510,28 +512,6 @@ func (s *State) addressText() (string, bool) {
 
 // --- leaf widgets ---------------------------------------------------------
 
-// iconButton is a rounded chrome button with a centred glyph whose ink is
-// resolved from live state at Draw time.
-type iconButton struct {
-	toolkit.Base
-	label   string
-	ink     func() toolkit.RGBA
-	onClick func()
-}
-
-func (b *iconButton) Draw(p painter.Painter, th *toolkit.Theme) {
-	r := b.Bounds()
-	p.FillRoundRect(r, 6, th.SurfaceAlt)
-	p.StrokeRoundRect(r, 6, th.Border, 1)
-	toolkit.DrawText(p, r.X+(r.W-toolkit.TextWidth(b.label))/2, r.Y+(r.H-toolkit.GlyphHeight())/2, b.label, b.ink())
-}
-
-func (b *iconButton) OnEvent(ev toolkit.Event) {
-	if ev.Kind == toolkit.EventClick && b.onClick != nil {
-		b.onClick()
-	}
-}
-
 // addrBar is the rounded white address pill. It is now interactive: a click
 // focuses it (main.go's keydowns then edit the text), and it draws a caret
 // while focused.
@@ -570,29 +550,47 @@ func (a *addrBar) OnEvent(ev toolkit.Event) {
 	}
 }
 
-// tile is one Favourites bookmark: a click navigates to the site via the proxy.
+// tileIconSize is the side length of a tile's accent avatar square.
+const tileIconSize = 44
+
+// tile is one Favourites bookmark, composed from toolkit widgets rather than
+// hand-drawn shapes: a bordered [toolkit.Card] frame, an accent [toolkit.Avatar]
+// carrying the site's initial, and a centred [toolkit.Label] with its name. A
+// click navigates to the site via the proxy.
 type tile struct {
 	toolkit.Base
 	fav     link
 	onClick func()
+	frame   *toolkit.Card
+	avatar  *toolkit.Avatar
+	label   *toolkit.Label
+}
+
+// newTile builds a favourites tile for fav whose click runs onClick.
+func newTile(fav link, onClick func()) *tile {
+	t := &tile{fav: fav, onClick: onClick}
+	t.frame = toolkit.NewCard("", "", "")
+	t.avatar = toolkit.NewAvatar(string(upper(fav.name[0])))
+	t.label = toolkit.NewLabel(fav.name)
+	t.label.Align = toolkit.AlignCenter
+	return t
+}
+
+// SetBounds positions the card frame over the whole tile, the avatar as a centred
+// square near the top and the name label along the bottom — the same geometry the
+// old hand-placed tile produced.
+func (t *tile) SetBounds(r toolkit.Rect) {
+	t.Base.SetBounds(r)
+	t.frame.SetBounds(r)
+	ix := r.X + (r.W-tileIconSize)/2
+	t.avatar.SetBounds(toolkit.Rect{X: ix, Y: r.Y + 14, W: tileIconSize, H: tileIconSize})
+	t.label.SetBounds(toolkit.Rect{X: r.X, Y: r.Y + r.H - 16, W: r.W, H: toolkit.GlyphHeight()})
 }
 
 func (t *tile) Draw(p painter.Painter, th *toolkit.Theme) {
-	r := t.Bounds()
-	p.FillRoundRect(r, 10, th.Surface)
-	p.StrokeRoundRect(r, 10, th.Border, 1)
-	onAccent := th.Extra["accent_fg_color"]
-	if onAccent == (toolkit.RGBA{}) {
-		onAccent = toolkit.RGB(0xff, 0xff, 0xff)
-	}
-	iconSz := 44
-	ix := r.X + (r.W-iconSz)/2
-	iy := r.Y + 14
-	p.FillRoundRect(toolkit.Rect{X: ix, Y: iy, W: iconSz, H: iconSz}, 10, th.Accent)
-	initial := string(upper(t.fav.name[0]))
-	toolkit.DrawText(p, ix+(iconSz-toolkit.TextWidth(initial))/2, iy+(iconSz-toolkit.GlyphHeight())/2, initial, onAccent)
-	lw := toolkit.TextWidth(t.fav.name)
-	toolkit.DrawText(p, r.X+(r.W-lw)/2, r.Y+r.H-16, t.fav.name, th.OnSurface)
+	t.frame.Draw(p, th)
+	t.avatar.Draw(p, th)
+	t.label.Draw(p, th)
 }
 
 func (t *tile) OnEvent(ev toolkit.Event) {
@@ -639,11 +637,30 @@ func (c *startCard) OnEvent(ev toolkit.Event) {
 	}
 }
 
+// offlineHead / offlineDetail and errorHead are the panel copy for the two
+// no-frame states, hoisted to package scope so a test can assert the EmptyState
+// carries exactly this text.
+const (
+	offlineHead   = "Browser proxy not connected"
+	offlineDetail = "Start a local go-webengine browserproxy " +
+		"(go run ./cmd/browserproxy -addr :8090), then reload this window."
+	errorHead = "Could not load the page"
+)
+
 // streamCard shows the streamed page frame, or — when there is no frame — an
-// offline / loading / error panel.
+// offline / error panel drawn as a centred [toolkit.EmptyState].
 type streamCard struct {
 	toolkit.Base
-	s *State
+	s     *State
+	panel *toolkit.EmptyState
+}
+
+// newStreamCard builds the stream card with its reusable EmptyState panel (its
+// message + caption are re-set per draw for the offline vs error case).
+func newStreamCard(s *State) *streamCard {
+	c := &streamCard{s: s, panel: toolkit.NewEmptyState("")}
+	c.panel.SetCaption("")
+	return c
 }
 
 func (c *streamCard) SetBounds(r toolkit.Rect) {
@@ -675,29 +692,20 @@ func (c *streamCard) Draw(p painter.Painter, th *toolkit.Theme) {
 		c.s.frameImg.Draw(p, th)
 		return
 	}
-	// No frame and not loading: a centred panel. The stream card is only active
-	// (drawn) when the proxy is disconnected or an error is pending — so one of
-	// these two cases always holds here.
-	var head string
-	var detail []string
+	// No frame and not loading: a centred EmptyState. The stream card is only
+	// active (drawn) when the proxy is disconnected or an error is pending — so one
+	// of these two cases always holds here. The message + caption observables are
+	// re-set for whichever case applies, then the panel is centred in the content
+	// rect and drawn (its caption renders in the theme's muted ink).
 	if !c.s.connected {
-		head = "Browser proxy not connected"
-		detail = []string{
-			"The wasmdesk browser streams pages from a local",
-			"go-webengine browserproxy. Start it with:",
-			"    go run ./cmd/browserproxy -addr :8090",
-			"then reload this window.",
-		}
+		c.panel.Message().Set(offlineHead)
+		c.panel.Caption().Set(offlineDetail)
 	} else { // c.s.status != ""
-		head = "Could not load the page"
-		detail = []string{c.s.status}
+		c.panel.Message().Set(errorHead)
+		c.panel.Caption().Set(c.s.status)
 	}
-	x := r.X + gridLeft
-	y := r.Y + 50
-	toolkit.DrawText(p, x, y, head, th.OnSurface)
-	for i, line := range detail {
-		toolkit.DrawText(p, x, y+30+i*(toolkit.GlyphHeight()+8), line, dim(th))
-	}
+	c.panel.SetBounds(r)
+	c.panel.Draw(p, th)
 }
 
 func (c *streamCard) OnEvent(ev toolkit.Event) {
