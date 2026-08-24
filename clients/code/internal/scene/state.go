@@ -6,8 +6,10 @@
 // widget tree. The editing model is a go-widgets/toolkit TextView (a superset
 // of the previous hand-rolled TextBuffer: it ships lines + cursor + insert /
 // split / backspace + undo/redo + selection); the sidebar is a ListBox, the
-// tab band a small tabStrip widget, the status bar a Statusbar, and the Live
-// Server popup a Dialog with an Entry + Button. HandleKey / HandleMouse route
+// tab band a toolkit FolderTabs strip, the status bar a Statusbar (whose
+// right-most segment is an interactive StatusSegment that opens the Live
+// Server popup on click), and the Live Server popup a Dialog with an Entry +
+// Button. HandleKey / HandleMouse route
 // input into that tree; Render (render.go) paints it.
 //
 // Pure Go, no syscall/js, so the whole package builds + tests natively on
@@ -120,7 +122,7 @@ type SceneState struct {
 	root    *toolkit.Dock
 	body    *toolkit.HBox
 	sidebar *toolkit.ListBox
-	tabs    *tabStrip
+	tabs    *toolkit.FolderTabs
 	status  *toolkit.Statusbar
 
 	// Live Server popup widgets.
@@ -128,9 +130,10 @@ type SceneState struct {
 	urlEntry   *toolkit.Entry
 	connectBtn *toolkit.Button
 
-	// Per-region themes (see render.go's package doc for why four are needed).
+	// Per-region themes (see render.go's package doc for why several are needed).
 	sidebarTheme *toolkit.Theme
 	editorTheme  *toolkit.Theme
+	tabTheme     *toolkit.Theme
 	popupTheme   *toolkit.Theme
 
 	// dirty is set by a routed control's callback (sidebar OnActivate, popup
@@ -180,9 +183,15 @@ func NewWithVFS(width, height int, vfs sharedvfs.VFS) *SceneState {
 	s.sidebar.RowHeight = SidebarRowHeight
 	s.sidebar.OnActivate = s.activateSidebar
 
-	s.tabs = &tabStrip{label: s.tabLabel}
+	// The tab band is a shared toolkit FolderTabs (a single active tab for the
+	// open file) instead of the former hand-drawn tabStrip. Its label is kept in
+	// sync with the open file in Paint via syncTabs.
+	s.tabs = toolkit.NewFolderTabs([]string{s.tabLabel()}, 0)
 
-	s.status = toolkit.NewStatusbar([]string{"", "", "", ""})
+	// The status bar is a toolkit Statusbar; its segments (including the
+	// clickable Live Server region) are populated by syncStatusSegments, so the
+	// constructor hands it no static strip.
+	s.status = toolkit.NewStatusbar(nil)
 
 	s.urlEntry = toolkit.NewEntry("")
 	s.urlEntry.Placeholder = "wss://"
@@ -206,6 +215,20 @@ func NewWithVFS(width, height int, vfs sharedvfs.VFS) *SceneState {
 		OnSurface: rgb(ColorEditorText),
 		Border:    rgb(ColorWindowBG),
 		Accent:    rgb(ColorWindowBG),
+	}
+	// FolderTabs paints: the strip in SurfaceAlt, the active tab in Surface with
+	// its label in OnSurface and a top accent bar in Accent, and a bottom strip
+	// border in Border. Mapping those onto the VS Code Dark+ tab colours gives
+	// the #2D2D30 strip, a #1E1E1E active tab (seamless with the editor pane
+	// below) captioned #CCCCCC, topped by the signature-blue active-tab accent;
+	// Border == the strip colour so the strip has no visible bottom rule.
+	s.tabTheme = &toolkit.Theme{
+		Background: rgb(ColorTabStripBG),
+		Surface:    rgb(ColorActiveTabBG),
+		SurfaceAlt: rgb(ColorTabStripBG),
+		OnSurface:  rgb(ColorSidebarTextDim),
+		Accent:     rgb(ColorStatusBarBG),
+		Border:     rgb(ColorTabStripBG),
 	}
 	s.popupTheme = &toolkit.Theme{
 		Background: rgb(ColorPopupBG),
@@ -304,6 +327,14 @@ func (s *SceneState) activateSidebar(idx int) {
 	s.dirty = s.OpenFile("/" + e.Name)
 }
 
+// openLiveServer is the Live Server StatusSegment's OnClick: it opens the
+// "Connect to Live Server" popup and marks the scene dirty so HandleMouse
+// reports the click changed visible state.
+func (s *SceneState) openLiveServer() {
+	s.LiveServerPopupOpen = true
+	s.dirty = true
+}
+
 // OpenFile loads the file at path into the editor. The TextView buffer is
 // replaced (cursor parks at 0,0), CurrentPath is updated, and any open popup /
 // flash is dismissed. Returns true when the load succeeded.
@@ -384,13 +415,15 @@ func (s *SceneState) HandleMouse(x, y int) bool {
 	if s.LiveServerPopupOpen {
 		return s.handlePopupMouse(x, y)
 	}
-	// Status bar (bottom band). The Live Server segment is the right region.
-	if sb := s.status.Bounds(); y >= sb.Y && y < sb.Y+sb.H {
-		if x >= s.W-LiveServerWidth {
-			s.LiveServerPopupOpen = true
-			return true
-		}
-		return false
+	// Status bar (bottom band): refresh its segments so their right-packed boxes
+	// match what is drawn, then let the Statusbar hit-test the click. The Live
+	// Server segment's OnClick opens the popup (setting dirty); a click on any
+	// other segment fires no callback and leaves dirty false.
+	if sb := s.status.Bounds(); sb.Contains(x, y) {
+		s.syncStatusSegments()
+		s.dirty = false
+		s.status.OnEvent(toolkit.Event{Kind: toolkit.EventClick, X: x - sb.X, Y: y - sb.Y})
+		return s.dirty
 	}
 	// Sidebar: route the click into the ListBox (its OnActivate sets dirty).
 	if sd := s.sidebar.Bounds(); sd.Contains(x, y) {

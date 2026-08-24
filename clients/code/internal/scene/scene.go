@@ -23,8 +23,8 @@
 //     HandleMouse) + OpenFile / SaveCurrent / Live Server popup.
 //   - highlight.go : the Dark+ palette + darkPlusPalette() (the CodeEditor's
 //     rougelex highlighter colours) + languageForPath (extension -> lexer).
-//   - render.go    : Render(state, buf) + the widget tree paint + tabStrip +
-//     per-region themes + the Dark+ palette.
+//   - render.go    : Render(state, buf) + the widget tree paint + the tab-label
+//     and status-segment sync + per-region themes + the Dark+ palette.
 //
 // Pure Go (no syscall/js, no cgo) -- the wasm entry point lives in
 // clients/code/main.go and imports this package via the //go:build js &&
