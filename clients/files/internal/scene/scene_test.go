@@ -7,6 +7,7 @@ package scene
 import (
 	"testing"
 
+	"github.com/go-iconoir/iconoir"
 	"github.com/go-widgets/painter"
 	"github.com/go-widgets/toolkit"
 	"github.com/wasmdesk/wasmbox/clients/sharedvfs"
@@ -51,10 +52,17 @@ func listTop() int         { return HeaderBarHeight + toolkit.TableHeaderHeight 
 func rowTop(i int) int     { return listTop() + i*toolkit.TableRowHeight }
 func rowCenterY(i int) int { return rowTop(i) + toolkit.TableRowHeight/2 }
 
-// firstBookmarkRowY is the y of the Home row (first entry under BOOKMARKS).
-func firstBookmarkRowY() int {
-	return HeaderBarHeight + SidebarTopPadding + SidebarSectionHeaderHeight
-}
+// The sidebar is a sectioned toolkit.ListBox: it starts SidebarTopPadding below
+// the header bar and lays every visual row (section headers AND item rows) out
+// at a uniform SidebarRowHeight pitch. Visual rows top-to-bottom:
+//
+//	v0 "BOOKMARKS"  v1 Home  v2 Documents  v3 Pictures  v4 Downloads
+//	v5 "OTHER LOCATIONS"  v6 Computer  v7 Trash
+func sidebarListTop() int { return HeaderBarHeight + SidebarTopPadding }
+
+// firstBookmarkRowY is the y (top) of the Home row (v1, the first selectable row
+// under the BOOKMARKS header).
+func firstBookmarkRowY() int { return sidebarListTop() + SidebarRowHeight }
 
 // --- construction + basic render -----------------------------------------
 
@@ -125,12 +133,10 @@ func TestGoldenRects(t *testing.T) {
 	if cb.X != 118 || cb.Y != 10 || cb.H != 24 || cb.W != surfW-118 {
 		t.Errorf("crumbs bounds = %+v, want X=118 Y=10 H=24 W=%d", cb, surfW-118)
 	}
-	// Sidebar Home + Documents rows land at the walked y positions.
-	if got := s.sidebarRows[0].Bounds(); got != (toolkit.Rect{X: 0, Y: 74, W: 160, H: 28}) {
-		t.Errorf("Home row = %+v, want {0 74 160 28}", got)
-	}
-	if got := s.sidebarRows[1].Bounds(); got != (toolkit.Rect{X: 0, Y: 102, W: 160, H: 28}) {
-		t.Errorf("Documents row = %+v, want {0 102 160 28}", got)
+	// The sidebar ListBox fills the pane below the SidebarTopPadding gap: it
+	// starts at Y=52 (44+8) and takes the remaining flex height (396-8=388).
+	if got := s.sidebarList.Bounds(); got != (toolkit.Rect{X: 0, Y: 52, W: 160, H: 388}) {
+		t.Errorf("sidebar ListBox = %+v, want {0 52 160 388}", got)
 	}
 }
 
@@ -177,11 +183,14 @@ func TestPixelParity(t *testing.T) {
 
 	// Foreground content: folder icon + name + sidebar text (the "frame with
 	// nothing inside" regression guard). The RowIcon glyph paints in the Name
-	// column gutter at table.X + TableCellPadX, in a TableIconSize box.
+	// column gutter at table.X + TableCellPadX, in a TableIconSize box. The glyph
+	// is now the iconoir "folder" line icon stroked in ColorFolderFill, so the
+	// full-coverage blue pixels are the stroke, not a solid fill -- ~15 in a 16px
+	// box, so the guard is >= 8 (was >= 30 for the old solid two-tone folder).
 	iconX := SidebarWidth + toolkit.TableCellPadX
 	iconY := rowTop(1) + (toolkit.TableRowHeight-toolkit.TableIconSize)/2
-	if n := countIn(buf, surfW, iconX, iconY, toolkit.TableIconSize, toolkit.TableIconSize, ColorFolderFill); n < 30 {
-		t.Errorf("list row 1 folder-fill pixels = %d, want >= 30", n)
+	if n := countIn(buf, surfW, iconX, iconY, toolkit.TableIconSize, toolkit.TableIconSize, ColorFolderFill); n < 8 {
+		t.Errorf("list row 1 folder-fill pixels = %d, want >= 8", n)
 	}
 	// Name text lands after the gutter (TableCellPadX + TableIconSize) plus the
 	// cell's own left pad.
@@ -409,7 +418,10 @@ func TestSidebarNavigation(t *testing.T) {
 // still moves (the "same path, different idx" branch).
 func TestSidebarComputerAtRoot(t *testing.T) {
 	s := New(surfW, surfH)
-	computerY := firstBookmarkRowY() + 4*SidebarRowHeight + SidebarSectionHeaderHeight + SidebarRowHeight/2
+	// Computer is visual row v6: five uniform rows below the Home row (Home,
+	// Documents, Pictures, Downloads, and the OTHER LOCATIONS header), since every
+	// visual row -- headers included -- now advances at SidebarRowHeight.
+	computerY := firstBookmarkRowY() + 5*SidebarRowHeight + SidebarRowHeight/2
 	if !s.HandleMouse(20, computerY) {
 		t.Fatal("Computer click returned false")
 	}
@@ -687,48 +699,47 @@ func TestSyncSidebarUnknownPath(t *testing.T) {
 	}
 }
 
-// HitTest of the non-interactive sidebar section label returns false.
-func TestNonInteractiveHitTests(t *testing.T) {
-	if (&sectionLabel{}).HitTest(1, 1) {
-		t.Error("sectionLabel HitTest should be false")
+// sidebarStem maps each SidebarEntry.Kind to its iconoir stem, folding every
+// unknown / bookmark kind onto the folder glyph.
+func TestSidebarStem(t *testing.T) {
+	cases := map[string]string{
+		"home":     "star",
+		"computer": "computer",
+		"trash":    "trash",
+		"folder":   "folder",
+		"bogus":    "folder",
+	}
+	for kind, want := range cases {
+		if got := sidebarStem(kind); got != want {
+			t.Errorf("sidebarStem(%q) = %q, want %q", kind, got, want)
+		}
 	}
 }
 
-// Every file-type + sidebar icon glyph paints in both the plain + selected
-// variant (both colour arms of each drawer). The file-type glyphs paint into a
-// TableIconSize box (the RowIcon gutter); the sidebar glyphs keep their own
-// point-anchored form.
-func TestIconGlyphs(t *testing.T) {
+// Every iconoir stem the scene renders -- the file-list folder / page glyphs and
+// the four sidebar kind glyphs -- resolves to a real Iconoir icon and inks
+// pixels in the chosen ink when drawn into a TableIconSize box. This is the
+// "icons draw something" regression guard the old hand-drawn glyph tests gave,
+// now asserted against the iconoir path the scene actually uses.
+func TestIconStemsRender(t *testing.T) {
 	w, h := 64, 64
-	iconRect := func(x, y int) toolkit.Rect {
-		return toolkit.Rect{X: x, Y: y, W: toolkit.TableIconSize, H: toolkit.TableIconSize}
-	}
-	for _, sel := range []bool{false, true} {
+	for _, stem := range []string{"folder", "page", "star", "computer", "trash"} {
 		buf := newSurface(w, h)
 		p := painter.NewPixelPainter(buf, w, h)
-		drawFolderIconRect(p, iconRect(4, 4), sel)
-		drawFileIconRect(p, iconRect(30, 4), sel)
-		for _, kind := range []string{"home", "computer", "trash", "folder", "unknown"} {
-			drawSidebarIcon(p, 4, 40, kind, sel)
+		r := toolkit.Rect{X: 4, Y: 4, W: toolkit.TableIconSize, H: toolkit.TableIconSize}
+		if !iconoir.Draw(p, r, stem, ColorFolderFill) {
+			t.Errorf("iconoir stem %q not found", stem)
 		}
-		// Something must have been inked.
-		any := false
-		for _, b := range buf {
-			if b != 0 {
-				any = true
-				break
-			}
-		}
-		if !any {
-			t.Errorf("icons (selected=%v) drew nothing", sel)
+		if n := countIn(buf, w, 4, 4, toolkit.TableIconSize, toolkit.TableIconSize, ColorFolderFill); n < 5 {
+			t.Errorf("iconoir stem %q inked %d full-coverage pixels, want >= 5", stem, n)
 		}
 	}
 }
 
-// The folder RowIcon keeps its two-tone blue fill on an unselected row and
-// inverts to white on the selected row (it ignores the ink Draw passes and
-// takes the variant from Browser.Cursor). This is the file-list appearance the
-// Table's single-ink default could not express on its own.
+// The folder RowIcon keeps its blue iconoir "folder" glyph on an unselected row
+// and inverts to a white glyph on the selected row (it ignores the ink Draw
+// passes and takes the variant from Browser.Cursor). This is the file-list
+// appearance the Table's single-ink default could not express on its own.
 func TestRowIconSelectedVariant(t *testing.T) {
 	s := New(surfW, surfH)
 	s.Browser.Cursor = 0 // row 0 (a folder) selected
@@ -743,8 +754,8 @@ func TestRowIconSelectedVariant(t *testing.T) {
 		t.Fatal("RowIcon(1) returned no painter")
 	}
 	draw(p, rect, ColorTextPrimary)
-	if countIn(buf, w, 4, 4, toolkit.TableIconSize, toolkit.TableIconSize, ColorFolderFill) < 30 {
-		t.Error("unselected folder RowIcon has no blue fill")
+	if countIn(buf, w, 4, 4, toolkit.TableIconSize, toolkit.TableIconSize, ColorFolderFill) < 8 {
+		t.Error("unselected folder RowIcon has no blue glyph")
 	}
 
 	// Selected row 0 folder -> white fill (ColorOnAccent), no blue.
@@ -758,8 +769,8 @@ func TestRowIconSelectedVariant(t *testing.T) {
 	if countIn(buf, w, 4, 4, toolkit.TableIconSize, toolkit.TableIconSize, ColorFolderFill) != 0 {
 		t.Error("selected folder RowIcon still painted blue")
 	}
-	if countIn(buf, w, 4, 4, toolkit.TableIconSize, toolkit.TableIconSize, ColorOnAccent) < 30 {
-		t.Error("selected folder RowIcon has no white fill")
+	if countIn(buf, w, 4, 4, toolkit.TableIconSize, toolkit.TableIconSize, ColorOnAccent) < 8 {
+		t.Error("selected folder RowIcon has no white glyph")
 	}
 
 	// Out-of-range rows yield no icon (both guard arms).

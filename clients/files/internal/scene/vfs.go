@@ -40,10 +40,10 @@ var (
 
 // Path-helper re-exports. We keep them as functions rather than `var` aliases
 // because the test layer also calls them through `scene.Clean(...)` syntax.
-func Clean(p string) string         { return sharedvfs.Clean(p) }
-func Join(dir, name string) string  { return sharedvfs.Join(dir, name) }
-func Parent(p string) string        { return sharedvfs.Parent(p) }
-func Basename(p string) string      { return sharedvfs.Basename(p) }
+func Clean(p string) string        { return sharedvfs.Clean(p) }
+func Join(dir, name string) string { return sharedvfs.Join(dir, name) }
+func Parent(p string) string       { return sharedvfs.Parent(p) }
+func Basename(p string) string     { return sharedvfs.Basename(p) }
 
 // NewDemoVFS keeps the legacy constructor name working: builds an InMemoryVFS
 // and seeds it with the canonical demo tree. The tests + wasm boot path both
