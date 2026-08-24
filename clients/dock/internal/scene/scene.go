@@ -2,14 +2,14 @@
 //
 // Package scene paints the wasmdock surface as a Fluxbox-style bottom
 // toolbar: a full-width, 28-pixel-tall bevelled gray bar split into three
-// sections that read left-to-right —
+// zones that read left-to-right —
 //
-//   - a fixed-width workspace section on the left rendering the active
-//     workspace as "<active> of <count>" (default "1 of 4"). Left-clicking
-//     the section cycles to the next workspace; scroll-wheel up/down
-//     cycles backward/forward. The active workspace is reported by the
-//     compositor through the `workspace_changed` input event (kind:
-//     "workspace_changed", payload {active:int, count:int});
+//   - a fixed-width workspace switcher on the left rendering the WORKSPACE_COUNT
+//     workspaces as a compact numbered cell strip with the active one
+//     highlighted. Left-clicking the zone cycles to the next workspace;
+//     scroll-wheel up/down cycles backward/forward. The active workspace is
+//     reported by the compositor through the `workspace_changed` input event
+//     (kind: "workspace_changed", payload {active:int, count:int});
 //   - an iconbar in the middle. Reading left-to-right inside the iconbar:
 //     first the static LAUNCHERS (one button per known app —
 //     terminal / editor / files / hello / vscode / loom), then one task
@@ -27,25 +27,30 @@
 //   - a fixed-width clock ("HH:MM") on the right, kept in sync by a `tick`
 //     event posted by the JS worker every 30 seconds.
 //
-// # Persistent widget tree + MVVM binding
+// # One shared DockPanel + accessories, bound through MVVM
 //
-// The bar is a PERSISTENT go-widgets/toolkit widget tree built exactly once (in
-// New) — never rebuilt per frame. The tree is three leaves painted at fixed
-// bounds: the workspace `section`, ONE toolkit.AppDock iconbar, and the clock
-// `section`, plus a 1-pixel toolkit.Backdrop that strokes the toolbar's top
-// edge. Render only lays the leaves out (their bounds are constant, computed in
-// New) and draws them; it allocates no widgets and copies no state.
+// The bar is a single toolkit.DockPanel — the shared shell chrome the toolkit
+// grew for exactly this shape (an AppDock launcher run with accessory widgets
+// pinned at its ends). The dock no longer hand-composes a scene around a bare
+// AppDock: it drops a toolkit.WorkspacePager into the panel's Leading slot and a
+// toolkit.Clock into its Trailing slot, and the DockPanel lays all three out
+// (HeaderBar-style), clips the AppDock's hover magnification to its own run so a
+// swelling item never spills onto an accessory, and reports the composite in the
+// accessibility tree. Two toolkit.Backdrop leaves frame it: a full-surface bevel
+// ground behind the accessories and a 1-pixel top-edge border. Everything is a
+// PERSISTENT widget tree built exactly once in New — never rebuilt per frame.
 //
 // Every mutable, cross-boundary input the view depends on flows through an
-// mvvm.Observable, the MVVM "property" primitive: the launcher/window/badge/
-// magnify model (itemsO), the cursor (cursorO), the workspace label (wsLabelO),
-// the clock string (clockO) and the Openbox theme (themeO). A setter mutates the
-// State model and publishes to the matching observable; a subscription wired once
-// in New pushes the change into the persistent widget (applyItems rebuilds the
-// AppDock's Items in place, applyCursor re-aims magnification, applyTheme repaints
-// the section/border palette). So the widget tree tracks the model on CHANGE, not
-// on every paint, and paint / hit-testing / the exposed geometry all read one
-// live AppDock.
+// mvvm.Observable, the MVVM "property" primitive. The launcher/window/badge/
+// magnify model rides itemsO and the cursor rides cursorO (both feed the
+// AppDock); the theme rides themeO (repaints the ground + border). The two
+// accessory widgets carry their OWN observables — the WorkspacePager's Current()
+// and the Clock's Time() — so the workspace selection and the clock reading are
+// bound straight into the shared widgets rather than mirrored through a private
+// channel. A setter mutates the State model and pushes onto the matching
+// observable; a subscription wired once in New pulls the change into the
+// persistent widget. So the tree tracks the model on CHANGE, not on every paint,
+// and paint / hit-testing / the exposed geometry all read one live DockPanel.
 //
 // The AppDock carries the launchers (fixed-width icon items) followed by one
 // variable-width task button per open window (its Width sized to the window
@@ -66,7 +71,9 @@
 package scene
 
 import (
+	"strings"
 	"sync"
+	"time"
 
 	"github.com/go-iconoir/iconoir"
 	"github.com/go-widgets/mvvm"
@@ -82,7 +89,7 @@ import (
 var aaOnce sync.Once
 
 // enableAAText installs the toolkit's bundled AA/shaped OpenType face (Atkinson
-// Hyperlegible @16px, toolkit v0.77.0), so the workspace label, launcher/window
+// Hyperlegible @16px, toolkit v0.77.0), so the workspace cells, launcher/window
 // button labels and clock render as the shaped vector face. The bundled face
 // never fails to parse (the error is documented as never-returned); on the
 // impossible error path the toolkit leaves the still-working bitmap default
@@ -120,8 +127,8 @@ type Window struct {
 	// (1..WORKSPACE_COUNT). The compositor's windows_snapshot already
 	// filters to the active workspace, so in v0 every entry sent over the
 	// wire has Workspace == State.ActiveWorkspace — but the field is here
-	// so a future "show all workspaces" view (e.g. a pager) needs no
-	// schema change.
+	// so the pager's per-cell occupancy dot and a future "show all
+	// workspaces" view need no schema change.
 	Workspace int `json:"workspace"`
 	// App is the launcher id the window was spawned from (e.g. "terminal").
 	// Forward-compatible: the compositor's windows_snapshot does not send it
@@ -154,11 +161,12 @@ const (
 const (
 	// BarHeight is the toolbar's vertical extent (and the surface height).
 	BarHeight = 28
-	// WorkspaceW is the fixed pixel width of the workspace section on the
-	// left edge of the toolbar.
+	// WorkspaceW is the fixed pixel width of the workspace switcher zone on the
+	// left edge of the toolbar (the DockPanel's Leading run); the AppDock
+	// iconbar begins at WorkspaceW.
 	WorkspaceW = 100
-	// ClockW is the fixed pixel width of the clock section on the right
-	// edge of the toolbar.
+	// ClockW is the fixed pixel width of the clock zone on the right edge of the
+	// toolbar (the DockPanel's Trailing run); the iconbar ends at W-ClockW.
 	ClockW = 80
 	// IconbarButtonW is the fixed pixel width of one launcher item in the
 	// AppDock iconbar (window task buttons size to their title instead).
@@ -168,6 +176,12 @@ const (
 	// each launcher glyph into the AppDock's own glyph box.
 	IconGlyphPx = 16
 )
+
+// clockLayout is the Go reference-time layout the dock's clock reads in and
+// writes out: a 24-hour "HH:MM". The worker posts the wall time preformatted in
+// this shape (JS-local timezone), so the dock parses it back to a time.Time and
+// lets the toolkit.Clock reformat it — no Go-side time source, no timezone drift.
+const clockLayout = "15:04"
 
 // taskButtonPad is the extra device pixels a window task button reserves beyond
 // its measured title: the AppDock reserves a glyph box (pad + glyph + label
@@ -181,18 +195,34 @@ func taskButtonPad() int {
 		toolkit.Scaled(2) + 6
 }
 
+// dockGap is the DockPanel's end padding + inter-accessory gap (it reuses the
+// AppDock item gap). The accessory zones are sized so the iconbar lands exactly
+// in [WorkspaceW, W-ClockW): a Leading accessory of pagerBoundsW() consumes
+// gap+width+gap == WorkspaceW, and a Trailing accessory of clockBoundsW()
+// consumes the symmetric ClockW.
+func dockGap() int { return toolkit.Scaled(toolkit.AppDockGap) }
+
+// pagerBoundsW is the WorkspacePager's own width inside the Leading run so that
+// gap + width + gap == WorkspaceW (the iconbar starts at WorkspaceW).
+func pagerBoundsW() int { return WorkspaceW - 2*dockGap() }
+
+// clockBoundsW is the Clock's own width inside the Trailing run so that
+// gap + width + gap == ClockW (the iconbar ends at W-ClockW).
+func clockBoundsW() int { return ClockW - 2*dockGap() }
+
 // State is the toolbar's mutable model (the ViewModel): surface size, the static
 // launcher row, the active open-window row (one task button per non-panel window
 // the compositor has open, including folded ones — flagged via Window.Minimized),
-// the active workspace + workspace count (numeric model — Workspace string
-// derives from them in Render), the current clock string, the cursor position
-// (drives hover magnification) and the active Openbox-compatible Theme.
+// the active workspace + workspace count (numeric model driving the pager), the
+// current clock string, the cursor position (drives hover magnification) and the
+// active Openbox-compatible Theme.
 //
 // The model's fields hold the authoritative values (read by the wasm shell and
-// the exposed geometry); the persistent widget tree and the mvvm.Observables
-// below bind the view to them — a setter mutates the field and publishes to the
-// matching observable, whose subscription (wired once in New) updates the
-// persistent widget. Nothing is rebuilt per frame.
+// the exposed geometry); the persistent DockPanel + the observables below bind
+// the view to them — a setter mutates the field and pushes to the matching
+// observable (itemsO/cursorO/themeO) or straight into a widget's own observable
+// (the pager's Current(), the clock's Time()), whose subscription (wired once in
+// New) updates the persistent widget. Nothing is rebuilt per frame.
 //
 // ActiveWorkspace defaults to 1 and WorkspaceCount to 4 (matches the
 // compositor's WORKSPACE_COUNT constant). The compositor pushes a
@@ -216,19 +246,19 @@ type State struct {
 	// (see indicators.go). nil until the first SetBadge; read via BadgeCount.
 	badges map[string]int
 
-	// --- persistent view (built once in New; Render only lays out + draws) ---
-	dock      *toolkit.AppDock  // the iconbar
-	wsView    *section          // workspace label (left end)
-	clockView *section          // clock (right end)
-	border    *toolkit.Backdrop // 1px top-edge stroke
-	borderOn  bool              // whether the top border is drawn (Border.Width > 0)
+	// --- persistent view (built once in New; Render only draws) ---
+	panel    *toolkit.DockPanel      // the shared shell: iconbar + accessories
+	dock     *toolkit.AppDock        // the iconbar (DockPanel.Dock)
+	pager    *toolkit.WorkspacePager // workspace switcher (DockPanel.Leading)
+	clock    *toolkit.Clock          // clock (DockPanel.Trailing)
+	ground   *toolkit.Backdrop       // full-surface bevel-gray ground
+	border   *toolkit.Backdrop       // 1px top-edge stroke
+	borderOn bool                    // whether the top border is drawn (Border.Width > 0)
 
 	// --- MVVM binding channels (model change → persistent view) ---
-	itemsO   *mvvm.Observable[dockModel]   // launchers + windows + badges + magnify
-	cursorO  *mvvm.Observable[cursorState] // pointer position
-	wsLabelO *mvvm.Observable[string]      // workspace label text
-	clockO   *mvvm.Observable[string]      // clock text
-	themeO   *mvvm.Observable[theme.Theme] // section/border palette
+	itemsO  *mvvm.Observable[dockModel]   // launchers + windows + badges + magnify
+	cursorO *mvvm.Observable[cursorState] // pointer position
+	themeO  *mvvm.Observable[theme.Theme] // ground/border palette
 }
 
 // dockModel is the value the itemsO observable carries: the full input the
@@ -265,9 +295,10 @@ func DefaultApps() []App {
 // empty clock string (the worker posts a tick on boot to fill it in) + the
 // default Fluxbox-light theme. The cursor is parked outside the surface.
 //
-// New also builds the PERSISTENT widget tree once (dock + the two section ends +
-// the top-border backdrop), wires each mvvm.Observable to the subscription that
-// keeps its widget in sync, and seeds the view from the initial model.
+// New also builds the PERSISTENT widget tree once (the DockPanel with its
+// WorkspacePager + Clock accessories, plus the ground + top-border backdrops),
+// wires each observable to the subscription that keeps its widget in sync, and
+// seeds the view from the initial model.
 func New(width, height int) *State {
 	enableAAText() // labels/clock render with the AA/shaped OpenType face.
 	s := &State{
@@ -282,14 +313,25 @@ func New(width, height int) *State {
 	}
 	s.Workspace = workspaceLabel(s.ActiveWorkspace, s.WorkspaceCount)
 
-	// Persistent widgets, built exactly once. Their bounds are fixed by the
-	// surface size, so they are laid out here and never again.
+	// Persistent widgets, built exactly once. The DockPanel lays out its dock +
+	// accessories; the accessory zones are sized so the iconbar lands in
+	// [WorkspaceW, W-ClockW].
 	s.dock = toolkit.NewAppDock()
 	s.dock.Style = toolkit.BevelDockStyle{}
-	s.wsView = newSection()
-	s.wsView.SetBounds(rectOf(s.WorkspaceRect()))
-	s.clockView = newSection()
-	s.clockView.SetBounds(rectOf(s.ClockRect()))
+
+	s.pager = toolkit.NewWorkspacePager(s.WorkspaceCount, s.ActiveWorkspace-1)
+	s.pager.SetBounds(toolkit.Rect{W: pagerBoundsW(), H: height})
+
+	s.clock = &toolkit.Clock{Align: toolkit.AlignCenter, Func: clockReading}
+	s.clock.SetBounds(toolkit.Rect{W: clockBoundsW(), H: height})
+
+	s.panel = toolkit.NewDockPanel(s.dock)
+	s.panel.Leading = []toolkit.Widget{s.pager}
+	s.panel.Trailing = []toolkit.Widget{s.clock}
+	s.panel.SetBounds(toolkit.Rect{X: 0, Y: 0, W: width, H: height}) // lays out dock + ends
+
+	s.ground = &toolkit.Backdrop{}
+	s.ground.SetBounds(toolkit.Rect{X: 0, Y: 0, W: width, H: height})
 	s.border = &toolkit.Backdrop{}
 	s.border.SetBounds(toolkit.Rect{X: 0, Y: 0, W: width, H: 1})
 
@@ -297,27 +339,19 @@ func New(width, height int) *State {
 	// the field never diverge.
 	s.itemsO = mvvm.NewObservableEq(s.snapshotItems(), nil) // slices: always notify
 	s.cursorO = mvvm.NewObservable(s.snapshotCursor())
-	s.wsLabelO = mvvm.NewObservable(s.Workspace)
-	s.clockO = mvvm.NewObservable(s.Clock)
 	s.themeO = mvvm.NewObservable(s.Theme)
 
 	s.itemsO.Subscribe(func(m dockModel) { s.applyItems(m) })
 	s.cursorO.Subscribe(func(c cursorState) { s.applyCursor(c) })
-	s.wsLabelO.Subscribe(func(v string) { s.wsView.label.Text().Set(v) })
-	s.clockO.Subscribe(func(v string) { s.clockView.label.Text().Set(displayClock(v)) })
 	s.themeO.Subscribe(func(th theme.Theme) { s.applyTheme(th) })
 
-	// Seed the view from the initial observable values (Subscribe does not fire).
+	// Seed the view from the initial values (Subscribe does not fire).
 	s.applyItems(s.itemsO.Get())
 	s.applyCursor(s.cursorO.Get())
-	s.wsView.label.Text().Set(s.wsLabelO.Get())
-	s.clockView.label.Text().Set(displayClock(s.clockO.Get()))
 	s.applyTheme(s.themeO.Get())
+	s.SetClock(s.Clock) // seed the clock reading ("" → "--:--")
 	return s
 }
-
-// rectOf packs an (x,y,w,h) tuple into a toolkit.Rect.
-func rectOf(x, y, w, h int) toolkit.Rect { return toolkit.Rect{X: x, Y: y, W: w, H: h} }
 
 // snapshotItems captures the current item model for publication on itemsO.
 func (s *State) snapshotItems() dockModel {
@@ -333,18 +367,19 @@ func (s *State) snapshotCursor() cursorState {
 // notifies), rebuilding the persistent AppDock's items in place.
 func (s *State) publishItems() { s.itemsO.Set(s.snapshotItems()) }
 
-// displayClock is the clock text the clock section shows: the tick string, or
-// the "--:--" placeholder when no tick has arrived, so the section is never blank.
-func displayClock(t string) string {
-	if t == "" {
+// clockReading is the toolkit.Clock's rendering hook: the "HH:MM" reading, or
+// the "--:--" placeholder for the zero time (no tick has arrived yet), so the
+// clock is never blank.
+func clockReading(t time.Time) string {
+	if t.IsZero() {
 		return "--:--"
 	}
-	return t
+	return t.Format(clockLayout)
 }
 
-// workspaceLabel formats the active/count pair as the text the bar renders.
-// "1 of 4" is the chosen form: it reads like Fluxbox's "Workspace 1" but
-// also surfaces the total count so the user knows how many slots cycle.
+// workspaceLabel formats the active/count pair as the legacy "<active> of
+// <count>" text the model keeps for back-compat (the WorkspacePager renders the
+// live switcher; this string is only read back through State.Workspace).
 func workspaceLabel(active, count int) string {
 	if count <= 0 {
 		return itoa(active)
@@ -353,7 +388,8 @@ func workspaceLabel(active, count int) string {
 }
 
 // itoa is a tiny base-10 formatter for small non-negative ints. Keeping the
-// dock's own formatter (instead of strconv.Itoa) keeps the wasm payload lean.
+// dock's own formatter (instead of strconv.Itoa) keeps the wasm payload lean; it
+// also stamps each window task button's AppDockItem.Id.
 func itoa(n int) string {
 	if n == 0 {
 		return "0"
@@ -386,15 +422,24 @@ func (s *State) SetCursor(x, y int, inside bool) {
 }
 
 // SetClock records the latest "HH:MM" clock string posted by the worker and
-// refreshes the clock section.
+// advances the toolkit.Clock's instant. An empty string resets the clock to the
+// "--:--" placeholder; a well-formed "HH:MM" advances it; a malformed non-empty
+// string is ignored (the clock keeps its last reading) so a transient bad tick
+// never blanks the display.
 func (s *State) SetClock(t string) {
 	s.Clock = t
-	s.clockO.Set(t)
+	if strings.TrimSpace(t) == "" {
+		s.clock.SetTime(time.Time{})
+		return
+	}
+	if tm, err := time.Parse(clockLayout, t); err == nil {
+		s.clock.SetTime(tm)
+	}
 }
 
 // SetTheme swaps in a new Openbox-compatible theme. The next Render call
-// repaints every section with the new colours / gradients. The section/border
-// palette is refreshed immediately through themeO.
+// repaints the ground + border with the new colours. The palette is refreshed
+// immediately through themeO.
 func (s *State) SetTheme(th theme.Theme) {
 	s.Theme = th
 	s.themeO.Set(th)
@@ -410,16 +455,16 @@ func (s *State) SetApps(apps []App) {
 // SetWorkspace records the active workspace label ("1", "2", ...). Kept as
 // a legacy entry point for the `tick` event payload (worker.js may post
 // a `workspace` field opportunistically). The numeric model is the
-// authoritative source — SetActiveWorkspace / SetWorkspaceCount overwrite
-// the label whenever they change so the two stay coherent.
+// authoritative source that drives the pager — SetActiveWorkspace /
+// SetWorkspaceCount overwrite the label whenever they change so the two stay
+// coherent.
 func (s *State) SetWorkspace(w string) {
 	s.Workspace = w
-	s.wsLabelO.Set(w)
 }
 
 // SetActiveWorkspace records the active workspace number (1..WorkspaceCount)
-// and refreshes the rendered Workspace label. Clamped silently to the legal
-// range so a malformed compositor payload cannot poison the model.
+// and refreshes the pager highlight. Clamped silently to the legal range so a
+// malformed compositor payload cannot poison the model.
 func (s *State) SetActiveWorkspace(n int) {
 	if s.WorkspaceCount > 0 {
 		if n < 1 {
@@ -431,12 +476,12 @@ func (s *State) SetActiveWorkspace(n int) {
 	}
 	s.ActiveWorkspace = n
 	s.Workspace = workspaceLabel(s.ActiveWorkspace, s.WorkspaceCount)
-	s.wsLabelO.Set(s.Workspace)
+	s.syncPager()
 }
 
 // SetWorkspaceCount records the total workspace count (typically 4) and
-// refreshes the rendered Workspace label. A non-positive count is treated
-// as "unknown" and the label reduces to the active number only.
+// refreshes the pager. A non-positive count is treated as "unknown" and the
+// pager shows no cells.
 func (s *State) SetWorkspaceCount(n int) {
 	if n < 0 {
 		n = 0
@@ -449,11 +494,54 @@ func (s *State) SetWorkspaceCount(n int) {
 		s.ActiveWorkspace = s.WorkspaceCount
 	}
 	s.Workspace = workspaceLabel(s.ActiveWorkspace, s.WorkspaceCount)
-	s.wsLabelO.Set(s.Workspace)
+	s.syncPager()
+}
+
+// syncPager pushes the numeric workspace model into the persistent
+// WorkspacePager: its cell count, the per-cell occupancy dots (which workspaces
+// hold windows) and the highlighted Current cell. Called on every workspace /
+// window change; the pager renders the switcher and owns the selection state.
+func (s *State) syncPager() {
+	c := s.WorkspaceCount
+	if c < 0 {
+		c = 0
+	}
+	s.pager.Count = c
+	s.pager.Occupied = s.computeOccupied(c)
+	cur := s.ActiveWorkspace - 1
+	if cur < 0 {
+		cur = 0
+	}
+	if c > 0 && cur >= c {
+		cur = c - 1
+	}
+	s.pager.Current().Set(cur)
+}
+
+// computeOccupied returns, per workspace cell, whether it holds at least one
+// open window — the pager's occupancy dot. A window's Workspace field places it
+// (1-based); the compositor's windows_snapshot filters to the active workspace
+// and does not yet stamp Workspace, so an unset / out-of-range value is treated
+// as the active workspace. A non-positive count yields nil (no cells).
+func (s *State) computeOccupied(count int) []bool {
+	if count <= 0 {
+		return nil
+	}
+	occ := make([]bool, count)
+	for _, w := range s.Windows {
+		ws := w.Workspace
+		if ws < 1 || ws > count {
+			ws = s.ActiveWorkspace
+		}
+		if ws >= 1 && ws <= count {
+			occ[ws-1] = true
+		}
+	}
+	return occ
 }
 
 // NextWorkspace returns the index the bar should cycle to on a forward
-// step (left-click on the workspace section, scroll-wheel down). Wraps
+// step (left-click on the workspace zone, scroll-wheel down). Wraps
 // from WorkspaceCount back to 1. Returns the current active workspace if
 // the count is non-positive so the dock cannot dispatch a bogus index.
 func (s *State) NextWorkspace() int {
@@ -490,36 +578,25 @@ func (s *State) SetWindows(ws []Window) {
 	s.publishItems()
 }
 
-// ---- section geometry ----------------------------------------------------
+// ---- iconbar geometry ----------------------------------------------------
 
-// WorkspaceRect returns the workspace section rectangle.
-func (s *State) WorkspaceRect() (x, y, w, h int) {
-	return 0, 0, WorkspaceW, s.H
-}
-
-// ClockRect returns the clock section rectangle.
-func (s *State) ClockRect() (x, y, w, h int) {
-	return s.W - ClockW, 0, ClockW, s.H
-}
-
-// IconbarRect returns the iconbar (middle) section rectangle, expanding to
-// fill the gap between the workspace label and the clock.
+// IconbarRect returns the AppDock iconbar (middle) rectangle — the span the
+// DockPanel left between the workspace switcher and the clock, which is
+// [WorkspaceW, W-ClockW] on a wide surface and clamps to width 0 when the ends
+// would overlap. It reads the live dock bounds, so hit-testing, the window
+// task-button shrink-to-fit and the exposed rects share one layout.
 func (s *State) IconbarRect() (x, y, w, h int) {
-	x = WorkspaceW
-	w = s.W - WorkspaceW - ClockW
-	if w < 0 {
-		w = 0
-	}
-	return x, 0, w, s.H
+	r := s.dock.Bounds()
+	return r.X, r.Y, r.W, r.H
 }
 
-// HitTestWorkspace reports whether (x, y) falls inside the workspace section
-// on the left edge of the toolbar. Used by the dock to recognize a
-// left-click (cycle to next workspace) or scroll-wheel event (cycle
-// back/forward) over the workspace UI.
+// HitTestWorkspace reports whether (x, y) falls inside the workspace switcher
+// zone on the left edge of the toolbar (everything left of the iconbar). Used by
+// the dock to recognize a left-click (cycle to next workspace) or scroll-wheel
+// event (cycle back/forward) over the workspace UI.
 func (s *State) HitTestWorkspace(x, y int) bool {
-	wx, wy, ww, wh := s.WorkspaceRect()
-	return x >= wx && x < wx+ww && y >= wy && y < wy+wh
+	r := s.dock.Bounds()
+	return x >= 0 && x < r.X && y >= 0 && y < s.H
 }
 
 // ---- the iconbar AppDock -------------------------------------------------
@@ -544,19 +621,17 @@ func (s *State) windowButtonWidths() []int {
 	if n == 0 {
 		return widths
 	}
+	// A task button is always at least taskButtonPad() wide (the reserved glyph
+	// run), so the natural width is positive before any shrink-to-fit cap.
 	pad := taskButtonPad()
 	for i, w := range s.Windows {
-		wd := pad + toolkit.TextWidth(windowLabel(w))
-		if wd < 1 {
-			wd = 1
-		}
-		widths[i] = wd
+		widths[i] = pad + toolkit.TextWidth(windowLabel(w))
 	}
 	// Shrink-to-fit: AppDock lays the items out at bounds.X + gap, each item
 	// consuming width+gap. The window row begins after the launcher row, so the
 	// space left for the windows is the iconbar width minus the launcher run.
 	_, _, iw, _ := s.IconbarRect()
-	gap := toolkit.Scaled(toolkit.AppDockGap)
+	gap := dockGap()
 	consumed := gap + len(s.Apps)*(IconbarButtonW+gap)
 	avail := iw - consumed
 	total := 0
@@ -582,9 +657,9 @@ func (s *State) windowButtonWidths() []int {
 // iconoir/toolkit glyph as their Icon painter, running/active/badge state), then
 // one variable-width task button per open window (Label = title, "[*] "-prefixed
 // when minimized; Active = focused so BevelDockStyle draws it sunken). It also
-// refreshes the dock's magnification knobs and bounds. It runs on every itemsO
-// change (never per frame), so paint, hit-testing and the exposed rects all read
-// one live layout.
+// refreshes the dock's magnification knobs and the pager's occupancy. It runs on
+// every itemsO change (never per frame), so paint, hit-testing and the exposed
+// rects all read one live layout.
 func (s *State) applyItems(m dockModel) {
 	running := s.launcherRunning()
 	focusApp := s.focusedLauncher()
@@ -616,7 +691,7 @@ func (s *State) applyItems(m dockModel) {
 	s.dock.Magnify = m.magnify.On
 	s.dock.MaxScale = m.magnify.MaxScale
 	s.dock.Radius = m.magnify.Radius
-	s.dock.SetBounds(rectOf(s.IconbarRect()))
+	s.syncPager() // occupancy dots follow the window set
 }
 
 // applyCursor re-aims the persistent AppDock's magnification from the published
@@ -624,20 +699,17 @@ func (s *State) applyItems(m dockModel) {
 // x-range (not the fixed workspace/clock ends), matching the AppDock's own
 // "inside" contract.
 func (s *State) applyCursor(c cursorState) {
-	ix, _, iw, _ := s.IconbarRect()
-	inside := c.inside && c.x >= ix && c.x < ix+iw
+	r := s.dock.Bounds()
+	inside := c.inside && c.x >= r.X && c.x < r.X+r.W
 	s.dock.SetCursor(c.x, inside)
 }
 
-// applyTheme repaints the section ends' and top border's palette from the
-// published theme th. The section ends draw from the richer Openbox theme
-// (gradients + per-state title colours toolkit.Theme cannot express); the top
-// border is a Backdrop stroking row 0 in the theme's border colour.
+// applyTheme repaints the ground + top-border palette from the published theme
+// th. The ground is a full-surface Backdrop in the theme's inactive-title bevel
+// gray (the Fluxbox toolbar face behind the accessories); the top border is a
+// Backdrop stroking row 0 in the theme's border colour.
 func (s *State) applyTheme(th theme.Theme) {
-	s.wsView.bg = th.Window.Inactive.Title.Bg
-	s.wsView.label.Ink = rgba(th.Window.Inactive.Title.Label.Color)
-	s.clockView.bg = th.Osd.Bg
-	s.clockView.label.Ink = rgba(th.Osd.Label.Color)
+	s.ground.Fill = rgba(th.Window.Inactive.Title.Bg.Color)
 	s.border.Fill = rgba(th.Border.Color)
 	s.borderOn = th.Border.Width > 0
 }
@@ -668,11 +740,11 @@ func (s *State) HitTestWindow(x, y int) int {
 // ---- painting ------------------------------------------------------------
 
 // dockToolkitTheme is the toolkit.Theme handed to the widget tree's Draw pass.
-// The dock's `section` ends paint from the richer Openbox theme.Theme stored on
-// State (gradients + per-state title colours that toolkit.Theme cannot express),
-// so this value is never consulted for their colour. The iconbar AppDock /
-// BevelDockStyle DOES read it — its Surface (item face), SurfaceAlt (ground) and
-// OnSurface (label ink) are the gray Fluxbox-family bevel palette.
+// The AppDock / BevelDockStyle read it — its Surface (item face), SurfaceAlt
+// (ground) and OnSurface (label ink) are the gray Fluxbox-family bevel palette;
+// the WorkspacePager (cell fills = SurfaceAlt, current = Accent) and the Clock
+// (reading ink = OnSurface) read it too. The full-surface bevel ground behind
+// the accessories carries the richer Openbox theme colour instead (applyTheme).
 var dockToolkitTheme = toolkit.DefaultLight()
 
 // rgba converts a theme.Color (RGB triple) to an opaque toolkit.RGBA.
@@ -683,10 +755,11 @@ func rgba(c theme.Color) toolkit.RGBA { return toolkit.RGB(c[0], c[1], c[2]) }
 // (a size mismatch in the caller is a bug). The whole surface is opaque —
 // the toolbar paints every pixel from edge to edge.
 //
-// Render draws the PERSISTENT widget tree — the workspace `section`, the iconbar
-// AppDock, the clock `section`, then the top-border Backdrop chrome. It builds
-// no widgets and mutates no widget state: the tree was assembled in New and is
-// kept current by the observable subscriptions, so Render is pure paint.
+// Render draws the PERSISTENT widget tree — the bevel-gray ground, the DockPanel
+// (iconbar clipped to its run, then the WorkspacePager + Clock accessories), then
+// the top-border Backdrop chrome. It builds no widgets and mutates no widget
+// state: the tree was assembled in New and is kept current by the observable
+// subscriptions, so Render is pure paint.
 func Render(s *State, buf []byte) {
 	need := 4 * s.W * s.H
 	if len(buf) != need {
@@ -694,80 +767,15 @@ func Render(s *State, buf []byte) {
 	}
 	p := painter.NewPixelPainter(buf, s.W, s.H)
 
-	s.wsView.Draw(p, dockToolkitTheme)    // workspace section (left end)
-	s.dock.Draw(p, dockToolkitTheme)      // iconbar (launchers + window buttons)
-	s.clockView.Draw(p, dockToolkitTheme) // clock section (right end)
+	s.ground.Draw(p, dockToolkitTheme) // bevel-gray toolbar face
+	s.panel.Draw(p, dockToolkitTheme)  // iconbar + workspace switcher + clock
 
 	// Outer border on the very top edge of the toolbar (the bottom edge sits at
 	// the bottom of the canvas, so a bottom border is not visible). A 1-pixel
 	// toolkit.Backdrop spanning the full surface width, drawn last so it strokes
-	// over the sections/iconbar.
+	// over the ground/panel.
 	if s.borderOn {
 		s.border.Draw(p, dockToolkitTheme)
-	}
-}
-
-// section is a fixed-width bevelled toolbar end (the workspace label + the
-// clock): a gradient background, a raised bevel, and one line of centred text.
-// The text is a composed, persistent [toolkit.Label] (centred horizontally and
-// vertically) rather than a raw draw; both ends share this leaf, differing only
-// in their bg and the label's text / Ink — kept current by applyTheme (bg + Ink)
-// and the label/clock subscriptions (the Label's Text() Observable).
-type section struct {
-	toolkit.Base
-	bg    theme.Bg
-	label *toolkit.Label
-}
-
-// newSection builds a section end with its persistent centred label.
-func newSection() *section {
-	l := toolkit.NewLabel("")
-	l.Align = toolkit.AlignCenter
-	l.VAlign = toolkit.VMiddle
-	return &section{label: l}
-}
-
-// SetBounds fixes the section's placement and its label to the same rect, so the
-// Label centres its text over the whole end. The bounds are set once (the ends
-// never move), so there is no per-frame layout.
-func (w *section) SetBounds(r toolkit.Rect) {
-	w.Base.SetBounds(r)
-	w.label.SetBounds(r)
-}
-
-// Draw paints the section as a composed toolkit.Backdrop — a gradient (or flat)
-// face under a raised Fluxbox bevel — then draws the persistent centred Label.
-// The Backdrop owns the last hand-drawn Fluxbox chrome the toolbar ends used to
-// paint by hand (the per-pixel gradient + the 1-pixel raised bevel), so there is
-// no bespoke shape- or text-drawing left here; only composed toolkit widgets.
-func (w *section) Draw(p painter.Painter, _ *toolkit.Theme) {
-	r := w.Bounds()
-	bd := toolkit.Backdrop{
-		Fill:  rgba(w.bg.Color),
-		Bevel: toolkit.BevelRaised,
-	}
-	if w.bg.Gradient != theme.GradientFlat {
-		bd.GradientTo = rgba(w.bg.ColorTo)
-		bd.GradientDir = gradientDir(w.bg.Gradient)
-	}
-	bd.SetBounds(r)
-	bd.Draw(p, dockToolkitTheme)
-	w.label.Draw(p, dockToolkitTheme)
-}
-
-// gradientDir maps a theme.GradientType onto the toolkit.Backdrop gradient
-// direction. Flat / unknown fall back to GradientVertical, though a Flat bg
-// never reaches here (section.Draw gates the gradient on != GradientFlat).
-func gradientDir(g theme.GradientType) toolkit.GradientDir {
-	switch g {
-	case theme.GradientHorizontal:
-		return toolkit.GradientHorizontal
-	case theme.GradientDiagonal:
-		return toolkit.GradientDiagonal
-	case theme.GradientCrossDiagonal:
-		return toolkit.GradientCrossDiagonal
-	default:
-		return toolkit.GradientVertical
 	}
 }
 

@@ -642,8 +642,8 @@ github.com/go-widgets/mvvm v0.8.0 h1:DqyNiNNTdITkMOdAwGvWFuCd6xpTaDRS2S+LNxd8inA
 github.com/go-widgets/mvvm v0.8.0/go.mod h1:GuGxC1kVTiPWANsAfKBPFb2YlmoG55J3NmZauvyqJ6w=
 github.com/go-widgets/painter v0.11.0 h1:xsj4zTz8B43rOZnWrx7ZsaUBMgJyvgaE/Pq2FfcG2Sw=
 github.com/go-widgets/painter v0.11.0/go.mod h1:IPRLqdUJuJX8sfuHeYLZCzjoLvA0ApbOlyIAVmguJDQ=
-github.com/go-widgets/toolkit v0.244.0 h1:0CrfZXIdoBdcv07ZJNyzf5fR2cSEM1N0l1isBKklLF8=
-github.com/go-widgets/toolkit v0.244.0/go.mod h1:R8KEk0Hp5TIsUYnoJ1OnptS6TZ0KwxqSx06Xg9yLyzQ=
+github.com/go-widgets/toolkit v0.247.0 h1:wZBsTKznVvmSf0dr5kZvfDvwahvQygBqpu2OcGXQDD0=
+github.com/go-widgets/toolkit v0.247.0/go.mod h1:R8KEk0Hp5TIsUYnoJ1OnptS6TZ0KwxqSx06Xg9yLyzQ=
 github.com/go-widgets/toolkit/rougelex v0.1.0 h1:3WdpaNp8laneKDVqYgaev/4I5SMZTnFa+2UtD8f7vmU=
 github.com/go-widgets/toolkit/rougelex v0.1.0/go.mod h1:zntdpbJrVqLk/JGJ6EMdiZeXHFHtVeV5JXHqhWH1f+s=
 github.com/go-widgets/tui v0.55.0 h1:R0m2F7Q0rtXKSBEjto5g6LhUuxHwRaZcmkJqXQGwtOg=
