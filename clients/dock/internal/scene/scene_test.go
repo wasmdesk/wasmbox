@@ -462,15 +462,14 @@ func TestGradientDir(t *testing.T) {
 func TestSectionDrawBevelAndGradient(t *testing.T) {
 	const w, h = 100, BarHeight
 	buf, p := newPainter(w, h)
-	sec := &section{
-		bg: theme.Bg{
-			Gradient: theme.GradientVertical,
-			Color:    theme.Color{0x30, 0x30, 0x30},
-			ColorTo:  theme.Color{0xC0, 0xC0, 0xC0},
-		},
-		text: "1 of 4",
-		ink:  theme.Color{0, 0, 0},
+	sec := newSection()
+	sec.bg = theme.Bg{
+		Gradient: theme.GradientVertical,
+		Color:    theme.Color{0x30, 0x30, 0x30},
+		ColorTo:  theme.Color{0xC0, 0xC0, 0xC0},
 	}
+	sec.label.Text().Set("1 of 4")
+	sec.label.Ink = rgba(theme.Color{0, 0, 0})
 	sec.SetBounds(toolkit.Rect{X: 0, Y: 0, W: w, H: h})
 	sec.Draw(p, dockToolkitTheme)
 

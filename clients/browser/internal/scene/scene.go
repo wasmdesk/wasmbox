@@ -40,6 +40,7 @@ import (
 	"strings"
 	"sync"
 
+	"github.com/go-widgets/mvvm"
 	"github.com/go-widgets/painter"
 	"github.com/go-widgets/toolkit"
 )
@@ -67,8 +68,9 @@ type State struct {
 	theme *toolkit.Theme
 	favs  []link
 
-	// Page/connection model, updated by the Set* sinks from server messages.
-	url       string // current page URL (address bar shows it when not editing)
+	// Page/connection model, updated by the Set* sinks from server messages. The
+	// current page URL lives on the AddressBar's URL() Observable (its single
+	// source of truth), not a duplicated field.
 	title     string // current page title
 	loading   bool   // a navigation is in flight
 	canBack   bool   // server reports back history
@@ -93,10 +95,6 @@ type State struct {
 	skel          *toolkit.SkeletonGroup
 	skelTheme     *toolkit.Theme
 
-	// Address-bar editing.
-	addrFocused bool
-	addrText    string // the text being edited (only meaningful while focused)
-
 	// Intent callbacks — wired by main.go, all nil-safe.
 	OnNavigate     func(url string) // address Enter or favourite tile
 	OnBack         func()
@@ -115,7 +113,7 @@ type State struct {
 	backBtn   *toolkit.IconButton
 	fwdBtn    *toolkit.IconButton
 	addBtn    *toolkit.IconButton
-	addr      *addrBar
+	addr      *toolkit.AddressBar
 	tiles     []*tile
 	frameImg  *toolkit.Image
 
@@ -133,13 +131,18 @@ const (
 	btnGap   = 6
 	addrGap  = 14
 	addrH    = 28
-	tileCols = 4
-	tileW    = 150
-	tileH    = 98
-	tileGapX = 22
-	tileGapY = 26
-	gridTop  = toolbarH + 56
-	gridLeft = 40
+	// addrTextPad is the AddressBar's left/right text inset (the old hand-drawn
+	// pill placed its text at r.X+12), and addrPlaceholder is the prompt shown
+	// when the field is empty and unfocused.
+	addrTextPad     = 12
+	addrPlaceholder = "Search or enter website name"
+	tileCols        = 4
+	tileW           = 150
+	tileH           = 98
+	tileGapX        = 22
+	tileGapY        = 26
+	gridTop         = toolbarH + 56
+	gridLeft        = 40
 
 	btnY          = (toolbarH - btnH) / 2
 	headingOffset = 28
@@ -198,7 +201,24 @@ func New(w, h int) *State {
 	s.fwdBtn = toolkit.NewIconButton(">", func() { s.dirty = s.goForward() })
 	s.addBtn = toolkit.NewIconButton("+", func() {})
 	s.syncNav()
-	s.addr = &addrBar{s: s, onClick: func() { s.focusAddr(); s.dirty = true }}
+
+	// The address bar is the toolkit's own persistent AddressBar widget. Its
+	// state (edit buffer, focus, current URL) is MVVM-only: a click focuses it and
+	// seeds the edit buffer from URL, printable keys / Backspace edit the buffer,
+	// Enter runs the Commit command (normalise + navigate) and Escape reverts the
+	// buffer to URL and defocuses — the widget owns all of that. The scene repaints
+	// by SUBSCRIBING to its Editing / Focused Observables rather than copying state
+	// per frame; the URL Observable is the sole source of truth for the shown URL,
+	// published by SetState. Placeholder shows when the field is empty and unfocused.
+	s.addr = &toolkit.AddressBar{
+		Placeholder: addrPlaceholder,
+		Radius:      addrH / 2,
+		TextPad:     addrTextPad,
+	}
+	s.addr.Commit = mvvm.NewCommand(func() { s.dirty = s.startNavigate(s.addr.Editing().Get()) }, nil)
+	for _, o := range []mvvm.Changeable{s.addr.Editing(), s.addr.Focused()} {
+		o.SubscribeChanged(func() { s.dirty = true })
+	}
 
 	row := toolkit.NewHBox()
 	row.Spacing = zeroGap
@@ -269,15 +289,14 @@ func (s *State) SetConnected(connected bool) {
 }
 
 // SetState applies a server {state} message: the current URL, title and history
-// availability. While the user is editing the address bar its text is left
-// untouched.
+// availability. The URL is published to the AddressBar's URL() Observable; the
+// widget shows it only while unfocused, so a URL update never clobbers the
+// buffer the user is editing.
 func (s *State) SetState(url, title string, loading, canBack, canForward bool) {
-	s.url, s.title = url, title
+	s.title = title
 	s.loading, s.canBack, s.canFwd = loading, canBack, canForward
 	s.syncNav()
-	if !s.addrFocused {
-		s.addrText = url
-	}
+	s.addr.URL().Set(url)
 	s.syncCard()
 }
 
@@ -398,30 +417,23 @@ func (s *State) HandleWheel(dy int) bool {
 	return true
 }
 
-// HandleKey routes a key. While the address bar is focused it edits the address
-// (Enter navigates, Escape cancels, Backspace deletes, printable keys append).
+// HandleKey routes a key. While the address bar is focused the key is delivered
+// to the AddressBar widget, which owns the edit: a printable key is a character
+// event that appends to its buffer, and Backspace / Enter / Escape are edit keys
+// (Enter runs the Commit command → navigate, Escape reverts + defocuses). The
+// scene's dirty flag is raised by the widget's Observable subscriptions when the
+// key changed something, so a no-op key (an ignored named key) repaints nothing.
 // Otherwise, when a page is shown, the key is forwarded to the proxy (for
-// server-side scrolling). Returns true if the key was consumed.
+// server-side scrolling). Returns true if the key changed something worth a redraw.
 func (s *State) HandleKey(key string) bool {
-	if s.addrFocused {
-		switch key {
-		case "Enter":
-			s.addrFocused = false
-			return s.startNavigate(s.addrText)
-		case "Escape":
-			s.addrFocused = false
-			s.addrText = s.url
-			return true
-		case "Backspace":
-			s.addrText = trimLastRune(s.addrText)
-			return true
-		default:
-			if isPrintable(key) {
-				s.addrText += key
-				return true
-			}
-			return false
+	if s.addr.Focused().Get() {
+		s.dirty = false
+		if isPrintable(key) {
+			s.addr.OnEvent(toolkit.Event{Kind: toolkit.EventChar, Code: key})
+		} else {
+			s.addr.OnEvent(toolkit.Event{Kind: toolkit.EventKeyDown, Code: key})
 		}
+		return s.dirty
 	}
 	if s.hasFrame && s.OnContentKey != nil {
 		s.OnContentKey(key)
@@ -432,12 +444,6 @@ func (s *State) HandleKey(key string) bool {
 
 // --- model helpers --------------------------------------------------------
 
-// focusAddr begins editing the address bar, seeding it with the current URL.
-func (s *State) focusAddr() {
-	s.addrFocused = true
-	s.addrText = s.url
-}
-
 // startNavigate normalises url and emits a navigate intent, entering the
 // loading state. It reports whether a navigation was started.
 func (s *State) startNavigate(url string) bool {
@@ -445,7 +451,6 @@ func (s *State) startNavigate(url string) bool {
 	if u == "" {
 		return false
 	}
-	s.addrFocused = false
 	s.loading = true
 	s.awaitingFrame = true // show the skeleton until this navigation's first frame
 	s.status = ""
@@ -499,56 +504,7 @@ func (s *State) syncCard() {
 	s.content.SetBounds(s.content.Bounds())
 }
 
-// addressText is what the address bar shows and whether it is placeholder text.
-func (s *State) addressText() (string, bool) {
-	if s.addrFocused {
-		return s.addrText, false
-	}
-	if s.url != "" {
-		return s.url, false
-	}
-	return "Search or enter website name", true
-}
-
 // --- leaf widgets ---------------------------------------------------------
-
-// addrBar is the rounded white address pill. It is now interactive: a click
-// focuses it (main.go's keydowns then edit the text), and it draws a caret
-// while focused.
-type addrBar struct {
-	toolkit.Base
-	s       *State
-	onClick func()
-}
-
-func (a *addrBar) Draw(p painter.Painter, th *toolkit.Theme) {
-	r := a.Bounds()
-	p.FillRoundRect(r, addrH/2, th.Surface)
-	stroke := th.Border
-	if a.s.addrFocused {
-		stroke = th.Accent
-	}
-	p.StrokeRoundRect(r, addrH/2, stroke, 1)
-	txt, placeholder := a.s.addressText()
-	ink := th.OnSurface
-	if placeholder {
-		ink = dim(th)
-	}
-	tx := r.X + 12
-	ty := r.Y + (r.H-toolkit.GlyphHeight())/2
-	toolkit.DrawText(p, tx, ty, txt, ink)
-	if a.s.addrFocused {
-		// A thin caret after the edited text.
-		caretX := tx + toolkit.TextWidth(txt)
-		p.FillRect(toolkit.Rect{X: caretX + 1, Y: ty, W: 1, H: toolkit.GlyphHeight()}, th.OnSurface)
-	}
-}
-
-func (a *addrBar) OnEvent(ev toolkit.Event) {
-	if ev.Kind == toolkit.EventClick && a.onClick != nil {
-		a.onClick()
-	}
-}
 
 // tileIconSize is the side length of a tile's accent avatar square.
 const tileIconSize = 44
@@ -739,18 +695,6 @@ func normalizeURL(s string) string {
 func isPrintable(key string) bool {
 	return len([]rune(key)) == 1
 }
-
-// trimLastRune drops the final rune of s (Backspace).
-func trimLastRune(s string) string {
-	r := []rune(s)
-	if len(r) == 0 {
-		return s
-	}
-	return string(r[:len(r)-1])
-}
-
-// dim returns a muted ink for placeholder / disabled text.
-func dim(*toolkit.Theme) toolkit.RGBA { return toolkit.RGB(0x80, 0x80, 0x88) }
 
 func upper(b byte) byte {
 	if b >= 'a' && b <= 'z' {

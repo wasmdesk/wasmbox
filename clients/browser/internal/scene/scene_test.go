@@ -111,19 +111,28 @@ func TestNew(t *testing.T) {
 	}
 }
 
-func TestAddressText(t *testing.T) {
+// TestAddressField proves the toolkit AddressBar is wired as the URL field: it
+// carries the scene's placeholder, shows the published URL while unfocused and
+// the edit buffer while focused (its Value() single source of truth).
+func TestAddressField(t *testing.T) {
 	s := newState()
-	if txt, ph := s.addressText(); !ph || txt == "" {
-		t.Errorf("empty address = (%q, ph=%v), want placeholder", txt, ph)
+	// Empty + unfocused: the field carries the placeholder and an empty value.
+	if s.addr.Placeholder != addrPlaceholder {
+		t.Errorf("placeholder = %q, want %q", s.addr.Placeholder, addrPlaceholder)
 	}
+	if v := s.addr.Value(); v != "" {
+		t.Errorf("empty address value = %q, want empty", v)
+	}
+	// A state update publishes the URL, shown while unfocused.
 	s.SetState("https://example.com/", "Example", false, false, false)
-	if txt, ph := s.addressText(); ph || txt != "https://example.com/" {
-		t.Errorf("address with url = (%q, ph=%v)", txt, ph)
+	if v := s.addr.Value(); v != "https://example.com/" {
+		t.Errorf("address value = %q, want the url", v)
 	}
-	s.focusAddr()
-	s.addrText = "typing"
-	if txt, ph := s.addressText(); ph || txt != "typing" {
-		t.Errorf("focused address = (%q, ph=%v)", txt, ph)
+	// While focused it shows the in-progress edit buffer instead.
+	s.addr.Focused().Set(true)
+	s.addr.Editing().Set("typing")
+	if v := s.addr.Value(); v != "typing" {
+		t.Errorf("focused address value = %q, want typing", v)
 	}
 }
 
@@ -158,8 +167,8 @@ func TestRenderContentModes(t *testing.T) {
 func TestRenderFocusedChrome(t *testing.T) {
 	s := connected()
 	s.SetState("https://ex/", "T", false, true, true) // canBack + canForward
-	s.focusAddr()
-	s.addrText = "typing"
+	s.addr.Focused().Set(true)
+	s.addr.Editing().Set("typing")
 	Render(s, newSurface())
 }
 
@@ -245,18 +254,22 @@ func TestSetConnected(t *testing.T) {
 func TestSetStateTracksAddress(t *testing.T) {
 	s := connected()
 	s.SetState("https://a/", "A", false, true, false)
-	if txt, _ := s.addressText(); txt != "https://a/" {
-		t.Errorf("address not tracking state url: %q", txt)
+	if v := s.addr.Value(); v != "https://a/" {
+		t.Errorf("address not tracking state url: %q", v)
 	}
 	if !s.canBack || s.canFwd {
 		t.Errorf("history flags = back:%v fwd:%v", s.canBack, s.canFwd)
 	}
-	// While editing, the address text is not overwritten by a state update.
-	s.focusAddr()
-	s.addrText = "user typing"
+	// While editing, the shown value stays the edit buffer, not the pushed URL.
+	s.addr.Focused().Set(true)
+	s.addr.Editing().Set("user typing")
 	s.SetState("https://b/", "B", false, true, true)
-	if s.addrText != "user typing" {
-		t.Errorf("state update clobbered edited address: %q", s.addrText)
+	if v := s.addr.Value(); v != "user typing" {
+		t.Errorf("state update clobbered the edit buffer: %q", v)
+	}
+	// The new URL is still published underneath, ready once the edit ends.
+	if u := s.addr.URL().Get(); u != "https://b/" {
+		t.Errorf("URL observable = %q, want https://b/", u)
 	}
 }
 
@@ -295,15 +308,15 @@ func TestAddressEditing(t *testing.T) {
 	var navigated string
 	s.OnNavigate = func(u string) { navigated = u }
 
-	// Click the address bar to focus it.
+	// Click the address bar to focus it (the AddressBar owns focus + the buffer).
 	r := s.addr.Bounds()
 	if !s.HandleMouse(r.X+5, r.Y+5) {
 		t.Fatal("clicking the address bar should focus it")
 	}
-	if !s.addrFocused {
+	if !s.addr.Focused().Get() {
 		t.Fatal("address bar not focused after click")
 	}
-	// Type, backspace, then Enter.
+	// Type (character events), backspace (an edit key), then Enter.
 	for _, k := range []string{"e", "x", "a", "m", "p", "l", "e", "z"} {
 		if !s.HandleKey(k) {
 			t.Fatalf("printable key %q not consumed", k)
@@ -312,10 +325,10 @@ func TestAddressEditing(t *testing.T) {
 	if !s.HandleKey("Backspace") { // delete the trailing 'z'
 		t.Fatal("Backspace not consumed")
 	}
-	if s.addrText != "example" {
-		t.Fatalf("edited text = %q, want example", s.addrText)
+	if got := s.addr.Editing().Get(); got != "example" {
+		t.Fatalf("edited text = %q, want example", got)
 	}
-	// A named key while editing is ignored.
+	// A named key that the AddressBar ignores changes nothing → no redraw.
 	if s.HandleKey("Shift") {
 		t.Error("named key should not be consumed as text")
 	}
@@ -325,7 +338,7 @@ func TestAddressEditing(t *testing.T) {
 	if navigated != "https://example" {
 		t.Errorf("navigated to %q, want https://example", navigated)
 	}
-	if s.addrFocused {
+	if s.addr.Focused().Get() {
 		t.Error("Enter should blur the address bar")
 	}
 }
@@ -333,21 +346,34 @@ func TestAddressEditing(t *testing.T) {
 func TestAddressEscapeCancels(t *testing.T) {
 	s := connected()
 	s.SetState("https://keep/", "", false, false, false)
-	s.focusAddr()
-	s.addrText = "throwaway"
+	s.addr.Focused().Set(true)
+	s.addr.Editing().Set("throwaway")
 	if !s.HandleKey("Escape") {
 		t.Fatal("Escape not consumed")
 	}
-	if s.addrFocused || s.addrText != "https://keep/" {
-		t.Errorf("Escape did not restore: focused=%v text=%q", s.addrFocused, s.addrText)
+	if s.addr.Focused().Get() {
+		t.Error("Escape should defocus the address bar")
+	}
+	if v := s.addr.Value(); v != "https://keep/" {
+		t.Errorf("Escape did not restore the url: %q", v)
 	}
 }
 
 func TestEnterEmptyAddressIsNoop(t *testing.T) {
 	s := connected()
-	s.focusAddr() // addrText seeded from empty url
-	if s.HandleKey("Enter") {
+	var navigated bool
+	s.OnNavigate = func(string) { navigated = true }
+	s.addr.Focused().Set(true) // empty edit buffer
+	s.HandleKey("Enter")
+	if navigated {
 		t.Error("Enter on an empty address should not navigate")
+	}
+	if s.addr.Focused().Get() {
+		t.Error("Enter should defocus even when the buffer is empty")
+	}
+	// A blank/whitespace target normalises to empty and starts nothing.
+	if s.startNavigate("   ") || navigated {
+		t.Error("navigating a blank address should be a no-op")
 	}
 }
 
@@ -516,9 +542,6 @@ func TestHelpers(t *testing.T) {
 	}
 	if !isPrintable("a") || isPrintable("Enter") || isPrintable("") {
 		t.Error("isPrintable classification wrong")
-	}
-	if trimLastRune("") != "" || trimLastRune("abc") != "ab" {
-		t.Error("trimLastRune wrong")
 	}
 	if upper('a') != 'A' || upper('Z') != 'Z' {
 		t.Error("upper wrong")
