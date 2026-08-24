@@ -286,9 +286,9 @@ func New(width, height int) *State {
 	// surface size, so they are laid out here and never again.
 	s.dock = toolkit.NewAppDock()
 	s.dock.Style = toolkit.BevelDockStyle{}
-	s.wsView = &section{}
+	s.wsView = newSection()
 	s.wsView.SetBounds(rectOf(s.WorkspaceRect()))
-	s.clockView = &section{}
+	s.clockView = newSection()
 	s.clockView.SetBounds(rectOf(s.ClockRect()))
 	s.border = &toolkit.Backdrop{}
 	s.border.SetBounds(toolkit.Rect{X: 0, Y: 0, W: width, H: 1})
@@ -303,15 +303,15 @@ func New(width, height int) *State {
 
 	s.itemsO.Subscribe(func(m dockModel) { s.applyItems(m) })
 	s.cursorO.Subscribe(func(c cursorState) { s.applyCursor(c) })
-	s.wsLabelO.Subscribe(func(v string) { s.wsView.text = v })
-	s.clockO.Subscribe(func(v string) { s.clockView.text = displayClock(v) })
+	s.wsLabelO.Subscribe(func(v string) { s.wsView.label.Text().Set(v) })
+	s.clockO.Subscribe(func(v string) { s.clockView.label.Text().Set(displayClock(v)) })
 	s.themeO.Subscribe(func(th theme.Theme) { s.applyTheme(th) })
 
 	// Seed the view from the initial observable values (Subscribe does not fire).
 	s.applyItems(s.itemsO.Get())
 	s.applyCursor(s.cursorO.Get())
-	s.wsView.text = s.wsLabelO.Get()
-	s.clockView.text = displayClock(s.clockO.Get())
+	s.wsView.label.Text().Set(s.wsLabelO.Get())
+	s.clockView.label.Text().Set(displayClock(s.clockO.Get()))
 	s.applyTheme(s.themeO.Get())
 	return s
 }
@@ -635,9 +635,9 @@ func (s *State) applyCursor(c cursorState) {
 // border is a Backdrop stroking row 0 in the theme's border colour.
 func (s *State) applyTheme(th theme.Theme) {
 	s.wsView.bg = th.Window.Inactive.Title.Bg
-	s.wsView.ink = th.Window.Inactive.Title.Label.Color
+	s.wsView.label.Ink = rgba(th.Window.Inactive.Title.Label.Color)
 	s.clockView.bg = th.Osd.Bg
-	s.clockView.ink = th.Osd.Label.Color
+	s.clockView.label.Ink = rgba(th.Osd.Label.Color)
 	s.border.Fill = rgba(th.Border.Color)
 	s.borderOn = th.Border.Width > 0
 }
@@ -708,21 +708,38 @@ func Render(s *State, buf []byte) {
 }
 
 // section is a fixed-width bevelled toolbar end (the workspace label + the
-// clock): a gradient background, a raised bevel, and one line of centred
-// text. Both ends share this leaf; only their bg / text / ink differ, kept
-// current by applyTheme (bg/ink) and the label/clock subscriptions (text).
+// clock): a gradient background, a raised bevel, and one line of centred text.
+// The text is a composed, persistent [toolkit.Label] (centred horizontally and
+// vertically) rather than a raw draw; both ends share this leaf, differing only
+// in their bg and the label's text / Ink — kept current by applyTheme (bg + Ink)
+// and the label/clock subscriptions (the Label's Text() Observable).
 type section struct {
 	toolkit.Base
-	bg   theme.Bg
-	text string
-	ink  theme.Color
+	bg    theme.Bg
+	label *toolkit.Label
+}
+
+// newSection builds a section end with its persistent centred label.
+func newSection() *section {
+	l := toolkit.NewLabel("")
+	l.Align = toolkit.AlignCenter
+	l.VAlign = toolkit.VMiddle
+	return &section{label: l}
+}
+
+// SetBounds fixes the section's placement and its label to the same rect, so the
+// Label centres its text over the whole end. The bounds are set once (the ends
+// never move), so there is no per-frame layout.
+func (w *section) SetBounds(r toolkit.Rect) {
+	w.Base.SetBounds(r)
+	w.label.SetBounds(r)
 }
 
 // Draw paints the section as a composed toolkit.Backdrop — a gradient (or flat)
-// face under a raised Fluxbox bevel — then overlays the centred label. The
-// Backdrop owns the last hand-drawn Fluxbox chrome the toolbar ends used to
-// paint by hand (the per-pixel gradient + the 1-pixel raised bevel), so there
-// is no bespoke shape-drawing left here; only the toolkit text stack.
+// face under a raised Fluxbox bevel — then draws the persistent centred Label.
+// The Backdrop owns the last hand-drawn Fluxbox chrome the toolbar ends used to
+// paint by hand (the per-pixel gradient + the 1-pixel raised bevel), so there is
+// no bespoke shape- or text-drawing left here; only composed toolkit widgets.
 func (w *section) Draw(p painter.Painter, _ *toolkit.Theme) {
 	r := w.Bounds()
 	bd := toolkit.Backdrop{
@@ -735,9 +752,7 @@ func (w *section) Draw(p painter.Painter, _ *toolkit.Theme) {
 	}
 	bd.SetBounds(r)
 	bd.Draw(p, dockToolkitTheme)
-	tx := r.X + (r.W-toolkit.TextWidth(w.text))/2
-	ty := r.Y + (r.H-toolkit.GlyphHeight())/2
-	toolkit.DrawText(p, tx, ty, w.text, rgba(w.ink))
+	w.label.Draw(p, dockToolkitTheme)
 }
 
 // gradientDir maps a theme.GradientType onto the toolkit.Backdrop gradient
