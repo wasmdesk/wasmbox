@@ -217,7 +217,7 @@ func DefaultFluxboxLight() Theme {
 	c2 := MustHex("#202020") // inactive label ink
 	cf := Font{Face: "sans", Size: 9}
 	t := Theme{
-		Border: Border{Color: c4, Width: 1},
+		Border:  Border{Color: c4, Width: 1},
 		Padding: Padding{Width: 1, Height: 1},
 	}
 	t.Window.Active.Title.Bg = Bg{Gradient: GradientVertical, Color: c8, ColorTo: c9}

@@ -86,9 +86,14 @@ func (s *State) SetBadge(app string, count int) {
 
 // BadgeCount returns the attention-badge count for the launcher app id (0 when
 // none). Exposed so the wasm shell + tests can read back what SetBadge stored.
-func (s *State) BadgeCount(app string) int {
-	if s.badges == nil {
+func (s *State) BadgeCount(app string) int { return badgeOf(s.badges, app) }
+
+// badgeOf reads the attention-badge count for app out of a badge map (0 when the
+// map is nil or the app is unset). It is the pure lookup applyItems uses against
+// the published dockModel's badge snapshot, and BadgeCount against the live map.
+func badgeOf(badges map[string]int, app string) int {
+	if badges == nil {
 		return 0
 	}
-	return s.badges[app]
+	return badges[app]
 }

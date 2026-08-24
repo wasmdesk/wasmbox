@@ -6,7 +6,7 @@ package scene
 // over the iconbar the button under the pointer (and its neighbours, with a
 // smooth falloff) swell, and the row re-lays so the swollen buttons never
 // overlap. The effect is owned by the toolkit.AppDock the iconbar is composed
-// from (see scene.iconDock); this struct is the dock's public knob set, mapped
+// from (see applyItems); this struct is the dock's public knob set, mapped
 // onto the AppDock's Magnify / MaxScale / Radius fields.
 //
 //   - On       toggles the effect. When false the iconbar lays out flat (every
@@ -29,9 +29,13 @@ func DefaultMagnify() Magnify {
 	return Magnify{On: true, MaxScale: 1.6, Radius: 1.5}
 }
 
-// SetMagnify swaps the magnification config. Pure data; the caller decides when
-// to repaint (the dock repaints on every hover move while magnification is on).
-func (s *State) SetMagnify(m Magnify) { s.Magnify = m }
+// SetMagnify swaps the magnification config and republishes the iconbar so the
+// persistent AppDock picks up the new swell knobs. The caller decides when to
+// repaint (the dock repaints on every hover move while magnification is on).
+func (s *State) SetMagnify(m Magnify) {
+	s.Magnify = m
+	s.publishItems()
+}
 
 // LauncherRects returns the current on-screen rectangles of the launcher
 // buttons (magnified when the cursor hovers, resting otherwise), one [x,y,w,h]
@@ -39,7 +43,7 @@ func (s *State) SetMagnify(m Magnify) { s.Magnify = m }
 // Exposed so the wasm shell can publish the live geometry for headless probes
 // and so hit-testing + paint share one source.
 func (s *State) LauncherRects() [][4]int {
-	rects := s.iconDock().ItemRects()
+	rects := s.dock.ItemRects()
 	out := make([][4]int, 0, len(s.Apps))
 	for i := 0; i < len(s.Apps) && i < len(rects); i++ {
 		r := rects[i]
@@ -54,7 +58,7 @@ func (s *State) LauncherRects() [][4]int {
 // __wasmdockGeometry probe hook reads this so a headless test clicks the button
 // where it is actually painted, magnification included.
 func (s *State) WindowRects() [][4]int {
-	rects := s.iconDock().ItemRects()
+	rects := s.dock.ItemRects()
 	out := make([][4]int, 0, len(s.Windows))
 	for i := len(s.Apps); i < len(rects); i++ {
 		r := rects[i]
