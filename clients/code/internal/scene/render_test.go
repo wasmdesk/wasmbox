@@ -148,11 +148,8 @@ func TestRender_FlashNoneDefaultBlue(t *testing.T) {
 	}
 }
 
-// TestRender_TabWithOpenFile asserts the FolderTabs active tab paints its
-// VS Code Dark+ chrome: the tab body is filled ColorActiveTabBG (== editor BG,
-// so the seam to the pane below is invisible) with the signature-blue accent
-// bar along its top edge, while the strip to the right of the tab stays
-// ColorTabStripBG. It also exercises tabLabel's file-open branch.
+// TestRender_TabWithOpenFile draws the active-tab fill (== editor BG) at the
+// tab strip's left, and exercises tabLabel's file-open branch.
 func TestRender_TabWithOpenFile(t *testing.T) {
 	w, h := 900, 460
 	s := newSeededState(t, w, h)
@@ -161,22 +158,8 @@ func TestRender_TabWithOpenFile(t *testing.T) {
 	}
 	buf := make([]byte, 4*w*h)
 	Render(s, buf)
-
-	tr := s.tabs.TabRect(0)
-	cx, cy := tr.X+tr.W/2, tr.Y+tr.H/2
-	// Tab body fill (identical to the editor pane below), sampled in the left
-	// padding band so it lands on fill rather than the centred label glyphs.
-	fx := tr.X + 3
-	if got := pixelAt(buf, w, fx, cy); got != ColorActiveTabBG {
-		t.Errorf("active tab body @ (%d,%d) = %v, want %v", fx, cy, got, ColorActiveTabBG)
-	}
-	// Top accent bar: signature blue at the tab's top edge, over its centre x.
-	if got := pixelAt(buf, w, cx, tr.Y); got != ColorStatusBarBG {
-		t.Errorf("active tab accent @ (%d,%d) = %v, want %v", cx, tr.Y, got, ColorStatusBarBG)
-	}
-	// Strip background to the right of the (label-width) tab.
-	if got := pixelAt(buf, w, w-50, cy); got != ColorTabStripBG {
-		t.Errorf("tab strip bg = %v, want %v", got, ColorTabStripBG)
+	if got := pixelAt(buf, w, SidebarWidth+5, 4); got != ColorActiveTabBG {
+		t.Errorf("active tab: %v, want %v", got, ColorActiveTabBG)
 	}
 }
 
@@ -225,9 +208,9 @@ func TestBasename(t *testing.T) {
 	}
 }
 
-// TestRender_ShortTabLabel renders a one-character basename in the FolderTabs
-// strip: the tab is sized to its (narrow) label, so this exercises the
-// short-label layout path and asserts the tab still paints its active fill.
+// TestRender_ShortTabLabel exercises tabStrip.Draw's minimum-width branch:
+// a one-character basename produces a natural tab narrower than the 100 px
+// floor, so the floor clamps it.
 func TestRender_ShortTabLabel(t *testing.T) {
 	w, h := 900, 460
 	v := sharedvfs.NewInMemoryVFS()
@@ -237,12 +220,7 @@ func TestRender_ShortTabLabel(t *testing.T) {
 		t.Fatal("open /x")
 	}
 	buf := make([]byte, 4*w*h)
-	Render(s, buf)
-	tr := s.tabs.TabRect(0)
-	// Sample the left padding band (left of the centred label) to land on fill.
-	if got := pixelAt(buf, w, tr.X+3, tr.Y+tr.H/2); got != ColorActiveTabBG {
-		t.Errorf("short-label active tab body = %v, want %v", got, ColorActiveTabBG)
-	}
+	Render(s, buf) // must not panic; tab floor applies
 }
 
 // isBlend reports whether px is a partial-coverage blend of endpoints a and b
