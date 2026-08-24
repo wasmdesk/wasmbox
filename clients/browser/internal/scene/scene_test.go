@@ -170,6 +170,58 @@ func TestRenderThemeFallbacks(t *testing.T) {
 	Render(s, newSurface())
 }
 
+// --- migrated leaf widgets ------------------------------------------------
+
+// TestTileComposition proves each favourites tile is composed from toolkit
+// widgets — a Card frame, an accent Avatar carrying the site's initial and a
+// centred Label with its name — rather than hand-drawn shapes, and that the
+// avatar + label land inside the tile's bounds after layout.
+func TestTileComposition(t *testing.T) {
+	s := connected()
+	t0 := s.tiles[0]
+	if t0.avatar.Initials != "W" {
+		t.Errorf("tile[0] avatar initial = %q, want W (weft)", t0.avatar.Initials)
+	}
+	if t0.label.Text().Get() != "weft" {
+		t.Errorf("tile[0] label = %q, want weft", t0.label.Text().Get())
+	}
+	if t0.label.Align != toolkit.AlignCenter {
+		t.Error("tile label should be centre-aligned")
+	}
+	tb, ab, lb := t0.Bounds(), t0.avatar.Bounds(), t0.label.Bounds()
+	if ab.W != tileIconSize || ab.H != tileIconSize {
+		t.Errorf("avatar square = %dx%d, want %d", ab.W, ab.H, tileIconSize)
+	}
+	if !tb.Contains(ab.X, ab.Y) || !tb.Contains(lb.X, lb.Y) {
+		t.Errorf("avatar/label not inside tile: tile=%+v avatar=%+v label=%+v", tb, ab, lb)
+	}
+}
+
+// TestOfflineAndErrorPanels proves the no-frame panels are driven through the
+// stream card's EmptyState message/caption observables: the disconnected panel
+// carries the proxy-not-connected copy, and an error carries the server message.
+func TestOfflineAndErrorPanels(t *testing.T) {
+	// Disconnected: the stream card is active; rendering it populates the panel.
+	s := newState()
+	Render(s, newSurface())
+	if got := s.streamCrd.panel.Message().Get(); got != offlineHead {
+		t.Errorf("offline message = %q, want %q", got, offlineHead)
+	}
+	if got := s.streamCrd.panel.Caption().Get(); got != offlineDetail {
+		t.Errorf("offline caption = %q, want the proxy instructions", got)
+	}
+	// An error swaps the panel to the load-failure head + the server's message.
+	s2 := connected()
+	s2.SetError("kaboom")
+	Render(s2, newSurface())
+	if got := s2.streamCrd.panel.Message().Get(); got != errorHead {
+		t.Errorf("error message = %q, want %q", got, errorHead)
+	}
+	if got := s2.streamCrd.panel.Caption().Get(); got != "kaboom" {
+		t.Errorf("error caption = %q, want kaboom", got)
+	}
+}
+
 // --- state sinks ----------------------------------------------------------
 
 func TestSetConnected(t *testing.T) {
@@ -325,12 +377,23 @@ func TestBackForwardButtons(t *testing.T) {
 	back := func() bool { r := s.backBtn.Bounds(); return s.HandleMouse(r.X+r.W/2, r.Y+r.H/2) }
 	fwd := func() bool { r := s.fwdBtn.Bounds(); return s.HandleMouse(r.X+r.W/2, r.Y+r.H/2) }
 
-	// Disabled while the server reports no history.
-	if back() || fwd() {
-		t.Error("back/forward should be no-ops with no history")
+	// With no history the IconButtons are disabled (greyed + inert): a click is a
+	// no-op, and the model-level goBack/goForward guard also refuses a direct call
+	// and fires nothing.
+	if !s.backBtn.Disabled().Get() || !s.fwdBtn.Disabled().Get() {
+		t.Fatal("back/forward should start disabled while the server reports no history")
 	}
-	// Enable via a state update.
+	if back() || fwd() {
+		t.Error("a disabled back/forward click should be a no-op")
+	}
+	if s.goBack() || s.goForward() || backs != 0 || fwds != 0 {
+		t.Errorf("goBack/goForward must refuse with no history: backs=%d fwds=%d", backs, fwds)
+	}
+	// A state update reporting history un-greys and re-arms both buttons.
 	s.SetState("u", "t", false, true, true)
+	if s.backBtn.Disabled().Get() || s.fwdBtn.Disabled().Get() {
+		t.Fatal("back/forward should be enabled once history is reported")
+	}
 	if !back() || backs != 1 {
 		t.Errorf("Back not fired: backs=%d", backs)
 	}
