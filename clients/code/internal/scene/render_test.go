@@ -148,8 +148,12 @@ func TestRender_FlashNoneDefaultBlue(t *testing.T) {
 	}
 }
 
-// TestRender_TabWithOpenFile draws the active-tab fill (== editor BG) at the
-// tab strip's left, and exercises tabLabel's file-open branch.
+// TestRender_TabWithOpenFile draws the active tab (FolderTabs) with an open
+// file and asserts its body fills the active-tab colour (== editor BG). The
+// sample is taken well inside the tab body -- past the rounded top corners and
+// the top accent bar -- since FolderTabs gives the active tab rounded top
+// corners (the very corner pixels show the strip behind, by design). It also
+// exercises tabLabel's file-open branch.
 func TestRender_TabWithOpenFile(t *testing.T) {
 	w, h := 900, 460
 	s := newSeededState(t, w, h)
@@ -158,8 +162,11 @@ func TestRender_TabWithOpenFile(t *testing.T) {
 	}
 	buf := make([]byte, 4*w*h)
 	Render(s, buf)
-	if got := pixelAt(buf, w, SidebarWidth+5, 4); got != ColorActiveTabBG {
-		t.Errorf("active tab: %v, want %v", got, ColorActiveTabBG)
+	// Interior of the (single) active tab: within the tab's left padding gap
+	// (the label is centred, so this is empty fill), below the rounded-corner
+	// band and the accent bar, above the strip bottom.
+	if got := pixelAt(buf, w, SidebarWidth+8, 20); got != ColorActiveTabBG {
+		t.Errorf("active tab body: %v, want %v", got, ColorActiveTabBG)
 	}
 }
 
@@ -208,9 +215,9 @@ func TestBasename(t *testing.T) {
 	}
 }
 
-// TestRender_ShortTabLabel exercises tabStrip.Draw's minimum-width branch:
-// a one-character basename produces a natural tab narrower than the 100 px
-// floor, so the floor clamps it.
+// TestRender_ShortTabLabel renders with a one-character basename open: the
+// FolderTabs tab sizes to its (very short) label plus padding, and the strip
+// must paint without panicking.
 func TestRender_ShortTabLabel(t *testing.T) {
 	w, h := 900, 460
 	v := sharedvfs.NewInMemoryVFS()

@@ -6,8 +6,9 @@
 // widget tree. The editing model is a go-widgets/toolkit TextView (a superset
 // of the previous hand-rolled TextBuffer: it ships lines + cursor + insert /
 // split / backspace + undo/redo + selection); the sidebar is a ListBox, the
-// tab band a small tabStrip widget, the status bar a Statusbar, and the Live
-// Server popup a Dialog with an Entry + Button. HandleKey / HandleMouse route
+// tab band a FolderTabs, the status bar a Statusbar (with an interactive Live
+// Server segment), and the Live Server popup a Dialog with an Entry + Button.
+// HandleKey / HandleMouse route
 // input into that tree; Render (render.go) paints it.
 //
 // Pure Go, no syscall/js, so the whole package builds + tests natively on
@@ -120,7 +121,7 @@ type SceneState struct {
 	root    *toolkit.Dock
 	body    *toolkit.HBox
 	sidebar *toolkit.ListBox
-	tabs    *tabStrip
+	tabs    *toolkit.FolderTabs
 	status  *toolkit.Statusbar
 
 	// Live Server popup widgets.
@@ -128,9 +129,10 @@ type SceneState struct {
 	urlEntry   *toolkit.Entry
 	connectBtn *toolkit.Button
 
-	// Per-region themes (see render.go's package doc for why four are needed).
+	// Per-region themes (see render.go's package doc for why several are needed).
 	sidebarTheme *toolkit.Theme
 	editorTheme  *toolkit.Theme
+	tabsTheme    *toolkit.Theme
 	popupTheme   *toolkit.Theme
 
 	// dirty is set by a routed control's callback (sidebar OnActivate, popup
@@ -180,9 +182,27 @@ func NewWithVFS(width, height int, vfs sharedvfs.VFS) *SceneState {
 	s.sidebar.RowHeight = SidebarRowHeight
 	s.sidebar.OnActivate = s.activateSidebar
 
-	s.tabs = &tabStrip{label: s.tabLabel}
+	// The active-file tab band is a toolkit FolderTabs (a single-tab folder
+	// strip). Its one label is refreshed at paint time from the open file's
+	// basename; the strip is drawn with tabsTheme so its background reads as
+	// the VS Code tab strip (#2D2D30) and the active tab as the editor BG
+	// (#1E1E1E). See render.go's Paint.
+	s.tabs = toolkit.NewFolderTabs([]string{s.tabLabel()}, 0)
 
-	s.status = toolkit.NewStatusbar([]string{"", "", "", ""})
+	// The status bar is a toolkit Statusbar whose Left group holds the three
+	// text cells (path / Ln,Col / mode) and whose Right group is the single
+	// clickable "Live Server" segment: its OnClick opens the popup, so the
+	// old hand-rolled `x >= W-LiveServerWidth` hit-math is gone -- the widget
+	// owns the hit-test (see HandleMouse).
+	s.status = toolkit.NewStatusbar(nil)
+	s.status.Left = []toolkit.StatusSegment{{}, {}, {}}
+	s.status.Right = []toolkit.StatusSegment{{
+		Text: liveServerLabel,
+		OnClick: func() {
+			s.LiveServerPopupOpen = true
+			s.dirty = true
+		},
+	}}
 
 	s.urlEntry = toolkit.NewEntry("")
 	s.urlEntry.Placeholder = "wss://"
@@ -206,6 +226,22 @@ func NewWithVFS(width, height int, vfs sharedvfs.VFS) *SceneState {
 		OnSurface: rgb(ColorEditorText),
 		Border:    rgb(ColorWindowBG),
 		Accent:    rgb(ColorWindowBG),
+	}
+	// FolderTabs paints its strip with SurfaceAlt, the active tab with Surface,
+	// its label with OnSurface, and (for the active tab) a top accent bar in
+	// Accent plus a 1px bottom Border. Mapping SurfaceAlt->tab strip (#2D2D30),
+	// Surface->active tab (#1E1E1E == editor BG), OnSurface->#CCCCCC, and BOTH
+	// Accent and Border back to those region colours keeps the strip reading as
+	// the flat VS Code tab band (accent + border invisible) -- crucially NOT the
+	// signature blue #007ACC, which the probe scans for to locate the surface,
+	// so an accent bar in that blue would corrupt the window's measured extent.
+	s.tabsTheme = &toolkit.Theme{
+		SurfaceAlt: rgb(ColorTabStripBG),
+		Surface:    rgb(ColorActiveTabBG),
+		OnSurface:  rgb(ColorSidebarTextDim),
+		Background: rgb(ColorTabStripBG),
+		Border:     rgb(ColorTabStripBG),
+		Accent:     rgb(ColorActiveTabBG),
 	}
 	s.popupTheme = &toolkit.Theme{
 		Background: rgb(ColorPopupBG),
@@ -384,13 +420,14 @@ func (s *SceneState) HandleMouse(x, y int) bool {
 	if s.LiveServerPopupOpen {
 		return s.handlePopupMouse(x, y)
 	}
-	// Status bar (bottom band). The Live Server segment is the right region.
+	// Status bar (bottom band): route the click into the Statusbar, which
+	// hit-tests its own segment boxes. The right-most "Live Server" segment's
+	// OnClick opens the popup (and sets dirty); a click on a plain text cell is
+	// a no-op. No hand-rolled `x >= W-LiveServerWidth` math -- the widget owns it.
 	if sb := s.status.Bounds(); y >= sb.Y && y < sb.Y+sb.H {
-		if x >= s.W-LiveServerWidth {
-			s.LiveServerPopupOpen = true
-			return true
-		}
-		return false
+		s.dirty = false
+		s.status.OnEvent(toolkit.Event{Kind: toolkit.EventClick, X: x - sb.X, Y: y - sb.Y})
+		return s.dirty
 	}
 	// Sidebar: route the click into the ListBox (its OnActivate sets dirty).
 	if sd := s.sidebar.Bounds(); sd.Contains(x, y) {
