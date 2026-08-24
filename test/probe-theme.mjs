@@ -124,18 +124,23 @@ async function switchTheme(page, themeIndex) {
   await page.waitForTimeout(400);
 }
 
-// Dock workspace section: left part of the toolbar, 100 px wide, 28 px tall
-// at the bottom of the surface. Sample its midpoint — well clear of the
-// glyph row so the gradient face is what we read.
+// Dock workspace switcher: left part of the toolbar, 100 px wide, 28 px tall
+// at the bottom of the surface. The dock now renders this zone with a toolkit
+// WorkspacePager (a numbered cell strip) inside a DockPanel, so we sample the
+// themed TOOLBAR FACE of a cell rather than a flat gradient section.
+//
+// We deliberately avoid the FIRST cell (the active workspace), which the pager
+// fills with the theme's highlight/accent colour (the active-title family, not
+// the toolbar face) — that colour re-themes too but does not track the
+// inactive-title bevel-gray band this probe asserts. Instead we sample x=30:
+// inside the SECOND cell's fill (workspace 2, not highlighted), left of its
+// centred digit, so we read the pure DockPanel toolbar face — which is exactly
+// the theme's window.inactive.title.bg colour and shifts light -> dark ->
+// warm-white with the compositor theme.
 const WORKSPACE_W = 100;
 const DOCK_H = 28;
-// The workspace section is 100 px wide; its centre carries the label glyph
-// (anti-aliased ink) so we sample at x=10 — past the 1-px bevel on the left
-// edge, well clear of the centred glyph row, painting the pure gradient face.
-// The y coordinate is the dock vertical mid (28 px tall, y in [VIEW_H-28,
-// VIEW_H-1]).
 function workspaceSamplePoint() {
-  return { x: 10, y: VIEW_H - Math.floor(DOCK_H / 2) };
+  return { x: 30, y: VIEW_H - Math.floor(DOCK_H / 2) };
 }
 
 const { server, base } = await startServer();

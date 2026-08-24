@@ -369,6 +369,63 @@ func TestGroundTracksTheme(t *testing.T) {
 	}
 }
 
+// toolkitTheme derives the DockPanel palette from the Openbox theme so the whole
+// bar re-themes on a live switch: the toolbar face (SurfaceAlt / ground) tracks
+// the inactive-title bg, the item face (Surface) the OSD bg, the ink the OSD
+// label, the highlight (Accent) the active-title bg and the separator the border.
+func TestToolkitThemeDerivesFromOpenbox(t *testing.T) {
+	th := theme.Theme{}
+	th.Window.Inactive.Title.Bg.Color = theme.Color{0x11, 0x11, 0x11} // toolbar face
+	th.Window.Active.Title.Bg.Color = theme.Color{0x22, 0x33, 0x44}   // highlight
+	th.Osd.Bg.Color = theme.Color{0x30, 0x30, 0x30}                   // item face
+	th.Osd.Label.Color = theme.Color{0xF0, 0xF0, 0xF0}                // ink
+	th.Border.Color = theme.Color{0x50, 0x50, 0x50}                   // separator
+	tk := toolkitTheme(th)
+	if tk.SurfaceAlt != toolkit.RGB(0x11, 0x11, 0x11) || tk.Background != toolkit.RGB(0x11, 0x11, 0x11) {
+		t.Fatalf("SurfaceAlt/Background = %+v/%+v, want toolbar face", tk.SurfaceAlt, tk.Background)
+	}
+	if tk.Surface != toolkit.RGB(0x30, 0x30, 0x30) {
+		t.Fatalf("Surface = %+v, want OSD bg", tk.Surface)
+	}
+	if tk.OnSurface != toolkit.RGB(0xF0, 0xF0, 0xF0) || tk.OnBackground != toolkit.RGB(0xF0, 0xF0, 0xF0) {
+		t.Fatalf("ink = %+v/%+v, want OSD label", tk.OnSurface, tk.OnBackground)
+	}
+	if tk.Accent != toolkit.RGB(0x22, 0x33, 0x44) {
+		t.Fatalf("Accent = %+v, want active-title bg", tk.Accent)
+	}
+	if tk.Border != toolkit.RGB(0x50, 0x50, 0x50) {
+		t.Fatalf("Border = %+v, want border colour", tk.Border)
+	}
+}
+
+// A live theme switch re-themes the whole bar: the DockPanel palette (tkTheme)
+// tracks the new theme AND the rendered workspace-switcher face pixels shift, so
+// the accessories follow the theme — not just the ground behind them. This is
+// the regression the theme round-trip probe guards.
+func TestLiveThemeSwitchRethemesAccessories(t *testing.T) {
+	s := New(tW, tH)
+	buf1 := newBuf(s)
+	Render(s, buf1)
+	// A non-current workspace cell's face (workspace 2 cell, left of its digit).
+	sampleX, sampleY := WorkspaceW/2-20, tH/2
+	before := buf1[(sampleY*tW+sampleX)*4]
+
+	dark := theme.DefaultFluxboxLight()
+	dark.Window.Inactive.Title.Bg = theme.Bg{Color: theme.Color{0x1a, 0x1a, 0x1a}, ColorTo: theme.Color{0x1a, 0x1a, 0x1a}}
+	dark.Osd.Bg.Color = theme.Color{0x30, 0x30, 0x30}
+	dark.Osd.Label.Color = theme.Color{0xf0, 0xf0, 0xf0}
+	s.SetTheme(dark)
+	if s.tkTheme.SurfaceAlt != toolkit.RGB(0x1a, 0x1a, 0x1a) {
+		t.Fatalf("tkTheme SurfaceAlt did not follow the dark theme: %+v", s.tkTheme.SurfaceAlt)
+	}
+	buf2 := newBuf(s)
+	Render(s, buf2)
+	after := buf2[(sampleY*tW+sampleX)*4]
+	if int(before)-int(after) < 40 {
+		t.Fatalf("workspace-switcher face did not darken on theme switch: before R=%d after R=%d", before, after)
+	}
+}
+
 // SetCursor / SetWorkspace / SetClock store their arguments.
 func TestSetters(t *testing.T) {
 	s := New(tW, tH)

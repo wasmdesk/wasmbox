@@ -254,6 +254,10 @@ type State struct {
 	ground   *toolkit.Backdrop       // full-surface bevel-gray ground
 	border   *toolkit.Backdrop       // 1px top-edge stroke
 	borderOn bool                    // whether the top border is drawn (Border.Width > 0)
+	// tkTheme is the toolkit palette the DockPanel + accessories paint with,
+	// derived from the live Openbox theme (see toolkitTheme) and refreshed by
+	// applyTheme, so a runtime theme switch re-themes the whole bar.
+	tkTheme *toolkit.Theme
 
 	// --- MVVM binding channels (model change → persistent view) ---
 	itemsO  *mvvm.Observable[dockModel]   // launchers + windows + badges + magnify
@@ -704,14 +708,18 @@ func (s *State) applyCursor(c cursorState) {
 	s.dock.SetCursor(c.x, inside)
 }
 
-// applyTheme repaints the ground + top-border palette from the published theme
-// th. The ground is a full-surface Backdrop in the theme's inactive-title bevel
-// gray (the Fluxbox toolbar face behind the accessories); the top border is a
-// Backdrop stroking row 0 in the theme's border colour.
+// applyTheme repaints the whole bar from the published theme th. The ground is a
+// full-surface Backdrop in the theme's inactive-title bevel gray (the Fluxbox
+// toolbar face behind the accessories); the top border is a Backdrop stroking
+// row 0 in the theme's border colour; and tkTheme is the derived toolkit palette
+// the DockPanel + its AppDock / WorkspacePager / Clock paint with, so a runtime
+// theme switch re-themes the iconbar and the accessories too — not just the
+// ground behind them.
 func (s *State) applyTheme(th theme.Theme) {
 	s.ground.Fill = rgba(th.Window.Inactive.Title.Bg.Color)
 	s.border.Fill = rgba(th.Border.Color)
 	s.borderOn = th.Border.Width > 0
+	s.tkTheme = toolkitTheme(th)
 }
 
 // HitTest returns the LAUNCHER index under (x, y) in surface coordinates, or -1
@@ -739,13 +747,33 @@ func (s *State) HitTestWindow(x, y int) int {
 
 // ---- painting ------------------------------------------------------------
 
-// dockToolkitTheme is the toolkit.Theme handed to the widget tree's Draw pass.
-// The AppDock / BevelDockStyle read it — its Surface (item face), SurfaceAlt
-// (ground) and OnSurface (label ink) are the gray Fluxbox-family bevel palette;
-// the WorkspacePager (cell fills = SurfaceAlt, current = Accent) and the Clock
-// (reading ink = OnSurface) read it too. The full-surface bevel ground behind
-// the accessories carries the richer Openbox theme colour instead (applyTheme).
-var dockToolkitTheme = toolkit.DefaultLight()
+// toolkitTheme derives the toolkit palette the DockPanel's widgets paint with
+// from the live Openbox theme, so a runtime theme switch re-themes the whole bar
+// — the AppDock item/ground bevels, the WorkspacePager cells and the Clock ink —
+// not just the ground behind them (this is what the two hand-composed section
+// ends used to do off the same theme.Theme before the DockPanel migration).
+//
+// The dock is a toolbar, so the NEUTRAL toolbar family drives the faces rather
+// than the window accent: the inactive-title bevel gray is the ground / cell
+// fill (SurfaceAlt) and the OSD face the slightly lighter item face (Surface);
+// the OSD label colour is the ink (OnSurface / OnBackground); the active-title
+// colour is the workspace-cell highlight (Accent); the border colour is the
+// separator. It starts from a complete DefaultLight base and overrides only the
+// roles the dock's widgets actually read, so any field left untouched still
+// carries a sane value.
+func toolkitTheme(th theme.Theme) *toolkit.Theme {
+	t := toolkit.DefaultLight() // a fresh, complete base (safe to mutate)
+	ground := rgba(th.Window.Inactive.Title.Bg.Color)
+	ink := rgba(th.Osd.Label.Color)
+	t.Background = ground
+	t.Surface = rgba(th.Osd.Bg.Color)
+	t.SurfaceAlt = ground
+	t.OnBackground = ink
+	t.OnSurface = ink
+	t.Accent = rgba(th.Window.Active.Title.Bg.Color)
+	t.Border = rgba(th.Border.Color)
+	return t
+}
 
 // rgba converts a theme.Color (RGB triple) to an opaque toolkit.RGBA.
 func rgba(c theme.Color) toolkit.RGBA { return toolkit.RGB(c[0], c[1], c[2]) }
@@ -767,15 +795,15 @@ func Render(s *State, buf []byte) {
 	}
 	p := painter.NewPixelPainter(buf, s.W, s.H)
 
-	s.ground.Draw(p, dockToolkitTheme) // bevel-gray toolbar face
-	s.panel.Draw(p, dockToolkitTheme)  // iconbar + workspace switcher + clock
+	s.ground.Draw(p, s.tkTheme) // bevel-gray toolbar face
+	s.panel.Draw(p, s.tkTheme)  // iconbar + workspace switcher + clock
 
 	// Outer border on the very top edge of the toolbar (the bottom edge sits at
 	// the bottom of the canvas, so a bottom border is not visible). A 1-pixel
 	// toolkit.Backdrop spanning the full surface width, drawn last so it strokes
 	// over the ground/panel.
 	if s.borderOn {
-		s.border.Draw(p, dockToolkitTheme)
+		s.border.Draw(p, s.tkTheme)
 	}
 }
 
