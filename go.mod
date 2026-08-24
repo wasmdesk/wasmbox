@@ -4,9 +4,11 @@ go 1.26.4
 
 require (
 	github.com/go-embedded-ruby/ruby v0.0.0-20260809134646-3ce8c91d38e7
+	github.com/go-iconoir/iconoir v0.2.0
 	github.com/go-opentype/fonts v0.8.0
 	github.com/go-ruby-parser/parser v0.1.3
 	github.com/go-webengine/browserproxy v0.0.0-20260808195644-0fab95c6c8b8
+	github.com/go-widgets/mvvm v0.8.0
 	github.com/go-widgets/painter v0.11.0
 	github.com/go-widgets/toolkit v0.241.0
 	github.com/go-widgets/toolkit/rougelex v0.1.0
@@ -95,7 +97,6 @@ require (
 	github.com/go-gfx/gfx v0.6.0 // indirect
 	github.com/go-hiera/hiera v0.0.0-20260708051558-73bff6edd0e9 // indirect
 	github.com/go-hocon/hocon v0.0.0-20260709172937-6d69e3b57178 // indirect
-	github.com/go-iconoir/iconoir v0.2.0 // indirect
 	github.com/go-images/images v0.0.0-20260811115337-bc5d586f8e38 // indirect
 	github.com/go-jose/go-jose/v4 v4.1.4 // indirect
 	github.com/go-kramdown/kramdown v0.1.0 // indirect
@@ -300,7 +301,6 @@ require (
 	github.com/go-viper/mapstructure/v2 v2.5.0 // indirect
 	github.com/go-webauthn/webauthn v0.17.4 // indirect
 	github.com/go-webauthn/x v0.2.6 // indirect
-	github.com/go-widgets/mvvm v0.8.0 // indirect
 	github.com/go-widgets/tui v0.55.0 // indirect
 	github.com/go-xslt/xslt v0.1.0 // indirect
 	github.com/go-zookeeper/zk v1.0.4 // indirect

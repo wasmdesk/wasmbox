@@ -42,7 +42,7 @@ func TestLexTable(t *testing.T) {
 		{"and", "a&&b", []Token{tok(TokWord, "a"), tok(TokAnd, ""), tok(TokWord, "b")}},
 		{"or", "a||b", []Token{tok(TokWord, "a"), tok(TokOr, ""), tok(TokWord, "b")}},
 		{"dollar-q", "echo $?", []Token{tok(TokWord, "echo"), tok(TokWord, dollarQMarker)}},
-		{"dollar-q-in-double", `echo "exit=$?"`, []Token{tok(TokWord, "echo"), tok(TokWord, "exit=" + dollarQMarker)}},
+		{"dollar-q-in-double", `echo "exit=$?"`, []Token{tok(TokWord, "echo"), tok(TokWord, "exit="+dollarQMarker)}},
 		{"dollar-not-q", "echo $X", []Token{tok(TokWord, "echo"), tok(TokWord, "$X")}},
 		{"adjacent-quotes-join", `echo 'a'"b"c`, []Token{tok(TokWord, "echo"), tok(TokWord, "abc")}},
 		{"mixed-op-and-word", "cat /a.txt|grep foo>>/log", []Token{
