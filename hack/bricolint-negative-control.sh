@@ -47,10 +47,14 @@ if ! grep -qF "$ANCHOR_SIG" "$ANCHOR_FILE"; then
 	exit 2
 fi
 
+# Restore the anchor file ONLY once a real backup has been taken (RESTORE=1) and
+# it is non-empty, so a failure before the cp below cannot make the trap copy an
+# empty temp over $ANCHOR_FILE and wipe it.
 BACKUP="$(mktemp)"
-cp "$ANCHOR_FILE" "$BACKUP"
-restore() { cp "$BACKUP" "$ANCHOR_FILE"; rm -f "$BACKUP"; }
+RESTORE=0
+restore() { [ "$RESTORE" = 1 ] && [ -s "$BACKUP" ] && cp "$BACKUP" "$ANCHOR_FILE"; rm -f "$BACKUP"; return 0; }
 trap restore EXIT
+cp "$ANCHOR_FILE" "$BACKUP"; RESTORE=1
 
 vet() { go vet -vettool="$BRICOLINT" ./...; }
 
