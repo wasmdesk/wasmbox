@@ -72,6 +72,35 @@ jobs:
       - name: rbtest — compositor.rb under go-embedded-ruby
         run: go run ./cmd/rbtest
 
+  # bricolint is the fleet-wide "no hand-drawn UI" guard: a go/analysis vettool
+  # that flags go-widgets/painter drawing primitives (FillRect, PutPixel, Text,
+  # …) called in application code, and toolkit.New<Widget> constructors built
+  # inside a Draw/Paint/Render method. Every UI element must be a toolkit widget;
+  # genuine render leaves opt out with //bricolint:allow <reason>. This job is
+  # blocking — the single module go.mod covers every client incl. clients/dock.
+  bricolint:
+    name: Guard against hand-drawn UI
+    runs-on: ubuntu-latest
+    env:
+      GOWORK: "off"
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.26.4"
+          check-latest: true
+          cache: true
+
+      - name: Install bricolint
+        run: go install github.com/go-widgets/bricolint/cmd/bricolint@v0.1.0
+
+      - name: Guard against hand-drawn UI
+        run: go vet -vettool="$(go env GOPATH)/bin/bricolint" ./...
+
+      - name: Negative control (the guard must bite)
+        run: BRICOLINT="$(go env GOPATH)/bin/bricolint" bash hack/bricolint-negative-control.sh
+
   render:
     name: Headless render (boot + persistence + dock)
     runs-on: ubuntu-latest

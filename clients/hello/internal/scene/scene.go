@@ -87,7 +87,7 @@ func (g *gradientWidget) Draw(p painter.Painter, theme *toolkit.Theme) {
 			rr := uint8((gx * uint32(tr)) / 255)
 			gg := uint8((((gx + gy) / 2) * uint32(tg)) / 255)
 			bb := uint8((gy * uint32(tb)) / 255)
-			p.PutPixel(r.X+x, r.Y+y, toolkit.RGBA{R: rr, G: gg, B: bb, A: 0xFF})
+			p.PutPixel(r.X+x, r.Y+y, toolkit.RGBA{R: rr, G: gg, B: bb, A: 0xFF}) //bricolint:allow procedural per-pixel diagonal RGB gradient — a genuine custom render leaf; no stock widget computes this palette-tinted ramp, the toolkit tree already wraps it as a leaf Draw(painter.Painter)
 		}
 	}
 }
