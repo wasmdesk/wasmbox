@@ -7,7 +7,7 @@ require (
 	github.com/go-icons/iconoir v0.2.0
 	github.com/go-opentype/fonts v0.8.0
 	github.com/go-ruby-parser/parser v0.1.3
-	github.com/go-webengine/browserproxy v0.0.0-20260808195644-0fab95c6c8b8
+	github.com/go-webengine/browserproxy v0.0.0-20260830080226-5e414334ee08
 	github.com/go-widgets/mvvm v0.8.0
 	github.com/go-widgets/painter v0.11.0
 	github.com/go-widgets/toolkit v0.284.0
