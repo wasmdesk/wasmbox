@@ -22,17 +22,27 @@ name: pages
 on:
   push:
     branches: [main]
+  # Build on every pull request too, so a change to the sources, the Go
+  # version, the pinned LibreQuake release or one of the actions below has to
+  # prove the whole site still assembles before it lands. Without this the
+  # workflow ran only on main, so a dependency bump arrived with no signal at
+  # all: its checks read "no checks", which is not the same thing as green and
+  # must not be merged as if it were.
+  pull_request:
   workflow_dispatch:
 
+# Nothing here needs more than the source. The ghcr publish (packages: write)
+# is granted to the build job and gated on a push; the Pages publish
+# (pages: write, id-token: write) is granted to the deploy job alone. A pull
+# request therefore builds the whole site and publishes nothing.
 permissions:
   contents: read
-  pages: write
-  id-token: write
-  packages: write   # publish the canonical app images to ghcr.io/wasmdesk/<app>
 
-# One in-flight deploy at a time; let a newer push supersede an older run.
+# Deploys serialise with one another under the main group; each pull request
+# gets a group of its own, so it neither waits behind a deploy nor holds one
+# up, and a newer push supersedes the run still in flight for the same ref.
 concurrency:
-  group: pages
+  group: pages-${{ github.ref }}
   cancel-in-progress: true
 
 env:
@@ -43,6 +53,9 @@ jobs:
   build:
     name: Build desktop + static /v2 mirror
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write   # publish the canonical app images to ghcr.io/wasmdesk/<app>
     steps:
       - uses: actions/checkout@v4
 
@@ -205,8 +218,16 @@ jobs:
 
   deploy:
     name: Deploy to GitHub Pages
+    # Only main publishes. A pull request stops after the build above: it has
+    # proved the site assembles, which is the whole point of the gate, and it
+    # has no business replacing the published site.
+    if: github.event_name != 'pull_request'
     needs: build
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      pages: write
+      id-token: write
     environment:
       name: github-pages
       url: ${{ steps.deployment.outputs.page_url }}
