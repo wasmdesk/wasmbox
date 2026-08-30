@@ -3,10 +3,10 @@ module github.com/wasmdesk/wasmbox
 go 1.26.4
 
 require (
-	github.com/go-embedded-ruby/ruby v0.0.0-20260809134646-3ce8c91d38e7
+	github.com/go-embedded-ruby/ruby v0.0.0-20260830083947-2e3fdf557001
 	github.com/go-iconoir/iconoir v0.2.0
 	github.com/go-opentype/fonts v0.8.0
-	github.com/go-ruby-parser/parser v0.1.3
+	github.com/go-ruby-parser/parser v0.1.4
 	github.com/go-webengine/browserproxy v0.0.0-20260808195644-0fab95c6c8b8
 	github.com/go-widgets/mvvm v0.8.0
 	github.com/go-widgets/painter v0.11.0
@@ -170,7 +170,7 @@ require (
 	github.com/go-ruby-fast-gettext-locale/fast-gettext-locale v0.0.0-20260709170525-affabfaa9f08 // indirect
 	github.com/go-ruby-fast-gettext/fast-gettext v0.0.0-20260709172829-8beb2fbc96a8 // indirect
 	github.com/go-ruby-find/find v0.0.0-20260630081030-35072d185272 // indirect
-	github.com/go-ruby-format/format v0.0.0-20260703115518-8adcf1b4af5f // indirect
+	github.com/go-ruby-format/format v0.0.0-20260815195335-4038d17b79a1 // indirect
 	github.com/go-ruby-friendly-id/friendly-id v0.0.0-20260707195609-ff85fef61060 // indirect
 	github.com/go-ruby-getoptlong/getoptlong v0.0.0-20260629150025-1a1bfd19bc49 // indirect
 	github.com/go-ruby-grape/grape v0.0.0-20260702151528-455377c8c7c3 // indirect
@@ -301,7 +301,7 @@ require (
 	github.com/go-viper/mapstructure/v2 v2.5.0 // indirect
 	github.com/go-webauthn/webauthn v0.17.4 // indirect
 	github.com/go-webauthn/x v0.2.6 // indirect
-	github.com/go-widgets/tui v0.55.0 // indirect
+	github.com/go-widgets/tui v0.58.0 // indirect
 	github.com/go-xslt/xslt v0.1.0 // indirect
 	github.com/go-zookeeper/zk v1.0.4 // indirect
 	github.com/goccy/go-json v0.10.6 // indirect
