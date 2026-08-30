@@ -7,7 +7,7 @@ package scene
 import (
 	"testing"
 
-	"github.com/go-iconoir/iconoir"
+	icons "github.com/go-icons/iconoir"
 	"github.com/go-widgets/painter"
 	"github.com/go-widgets/toolkit"
 	"github.com/wasmdesk/wasmbox/clients/sharedvfs"
@@ -727,9 +727,10 @@ func TestIconStemsRender(t *testing.T) {
 		buf := newSurface(w, h)
 		p := painter.NewPixelPainter(buf, w, h)
 		r := toolkit.Rect{X: 4, Y: 4, W: toolkit.TableIconSize, H: toolkit.TableIconSize}
-		if !iconoir.Draw(p, r, stem, ColorFolderFill) {
+		if !icons.Has(stem) {
 			t.Errorf("iconoir stem %q not found", stem)
 		}
+		toolkit.DrawIconoir(p, r, stem, ColorFolderFill)
 		if n := countIn(buf, w, 4, 4, toolkit.TableIconSize, toolkit.TableIconSize, ColorFolderFill); n < 5 {
 			t.Errorf("iconoir stem %q inked %d full-coverage pixels, want >= 5", stem, n)
 		}

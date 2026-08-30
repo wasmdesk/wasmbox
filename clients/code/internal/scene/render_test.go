@@ -191,11 +191,14 @@ func TestRender_Popup(t *testing.T) {
 	s.LiveServerURL = "wss://test"
 	buf := make([]byte, 4*w*h)
 	Render(s, buf)
-	// The dialog's title bar (SurfaceAlt == #2D2D30) overpaints the editor
-	// near the surface centre, proving the popup rendered over the editor.
+	// The dialog's title bar overpaints the editor near the surface centre,
+	// proving the popup rendered over it. Since toolkit v0.272.0 that bar is
+	// painted in the theme's Accent rather than its SurfaceAlt, so the colour
+	// asked for here is popupTheme's Accent — the toolkit decides the chrome,
+	// this scene only supplies the palette.
 	dialogY := (h - DialogH) / 2
-	if got := pixelAt(buf, w, w/2, dialogY+5); got != ColorTabStripBG {
-		t.Errorf("popup title bar = %v, want %v", got, ColorTabStripBG)
+	if got := pixelAt(buf, w, w/2, dialogY+5); got != ColorPopupButton {
+		t.Errorf("popup title bar = %v, want %v", got, ColorPopupButton)
 	}
 }
 

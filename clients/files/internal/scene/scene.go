@@ -44,7 +44,6 @@ import (
 	"strings"
 	"sync"
 
-	"github.com/go-iconoir/iconoir"
 	"github.com/go-widgets/painter"
 	"github.com/go-widgets/toolkit"
 )
@@ -660,7 +659,7 @@ func newFileTable(s *State) *fileTable {
 			if selected {
 				ink = ColorOnAccent
 			}
-			iconoir.Draw(p, r, stem, ink)
+			toolkit.DrawIconoir(p, toolkit.Rect(r), stem, ink)
 		}, true
 	}
 	return t
@@ -794,7 +793,7 @@ func sidebarSections(entries []SidebarEntry) []toolkit.ListSection {
 // index is the flat selectable-item index, which equals the Sidebar slice index.
 func (s *State) drawSidebarItem(p painter.Painter, theme *toolkit.Theme, rc toolkit.Rect, index int, item string, _ bool, ink toolkit.RGBA) {
 	const icon = 16
-	iconoir.Draw(p, toolkit.Rect{X: rc.X + 12, Y: rc.Y + (rc.H-icon)/2, W: icon, H: icon}, sidebarStem(s.Sidebar[index].Kind), ink)
+	toolkit.DrawIconoir(p, toolkit.Rect{X: rc.X + 12, Y: rc.Y + (rc.H-icon)/2, W: icon, H: icon}, sidebarStem(s.Sidebar[index].Kind), ink)
 	s.sbLabel.Text().Set(item)
 	s.sbLabel.Ink = ink
 	s.sbLabel.SetBounds(toolkit.Rect{X: rc.X + 32, Y: rc.Y, W: rc.W - 32, H: rc.H})

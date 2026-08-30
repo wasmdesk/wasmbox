@@ -5,7 +5,7 @@ package scene
 import (
 	"testing"
 
-	"github.com/go-iconoir/iconoir"
+	icons "github.com/go-icons/iconoir"
 	"github.com/go-widgets/toolkit"
 )
 
@@ -109,7 +109,7 @@ func TestCategoryIconsExist(t *testing.T) {
 		t.Fatalf("catIcons = %d, want %d (one per category)", len(catIcons), len(s.cats))
 	}
 	valid := map[string]bool{}
-	for _, n := range iconoir.Names() {
+	for _, n := range icons.Names() {
 		valid[n] = true
 	}
 	for i, stem := range catIcons {

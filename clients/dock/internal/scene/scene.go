@@ -75,7 +75,6 @@ import (
 	"sync"
 	"time"
 
-	"github.com/go-iconoir/iconoir"
 	"github.com/go-widgets/mvvm"
 	"github.com/go-widgets/painter"
 	"github.com/go-widgets/toolkit"
@@ -825,7 +824,7 @@ func drawGlyph(p painter.Painter, g Glyph, r toolkit.Rect) {
 	case GlyphFiles:
 		toolkit.DrawIconOpen(p, r, ink)
 	default:
-		iconoir.Draw(p, r, glyphStem(g), ink)
+		toolkit.DrawIconoir(p, toolkit.Rect(r), glyphStem(g), ink)
 	}
 }
 
