@@ -33,7 +33,6 @@ package scene
 import (
 	"sync"
 
-	"github.com/go-iconoir/iconoir"
 	"github.com/go-widgets/painter"
 	"github.com/go-widgets/toolkit"
 )
@@ -209,7 +208,7 @@ func (s *State) buildTree() {
 	// resolved ink (OnSurface, or the accent-on ink when selected).
 	s.list.ItemRenderer = func(p painter.Painter, th *toolkit.Theme, rc toolkit.Rect, index int, item string, selected bool, ink toolkit.RGBA) {
 		ir := toolkit.Rect{X: rc.X + catIconPad, Y: rc.Y + (rc.H-catIconSize)/2, W: catIconSize, H: catIconSize}
-		iconoir.Draw(p, ir, catIcons[index], ink)
+		toolkit.DrawIconoir(p, toolkit.Rect(ir), catIcons[index], ink)
 		tx := ir.X + ir.W + catTextGap
 		s.itemLabel.Text().Set(item)
 		s.itemLabel.Ink = ink

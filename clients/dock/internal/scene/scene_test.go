@@ -6,7 +6,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/go-iconoir/iconoir"
+	icons "github.com/go-icons/iconoir"
 	"github.com/go-widgets/painter"
 	"github.com/go-widgets/toolkit"
 	"github.com/wasmdesk/wasmbox/clients/dock/internal/theme"
@@ -484,7 +484,7 @@ func TestGlyphStem(t *testing.T) {
 		{Glyph(99), "square"},
 	}
 	names := map[string]bool{}
-	for _, n := range iconoir.Names() {
+	for _, n := range icons.Names() {
 		names[n] = true
 	}
 	for _, c := range cases {
