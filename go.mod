@@ -3,14 +3,14 @@ module github.com/wasmdesk/wasmbox
 go 1.26.4
 
 require (
-	github.com/go-embedded-ruby/ruby v0.0.0-20260830154855-271a63d1c4f4
+	github.com/go-embedded-ruby/ruby v0.0.0-20260831210744-cf095bc914cc
 	github.com/go-icons/iconoir v0.2.0
 	github.com/go-opentype/fonts v0.9.0
 	github.com/go-ruby-parser/parser v0.1.7
-	github.com/go-webengine/browserproxy v0.0.0-20260830080226-5e414334ee08
+	github.com/go-webengine/browserproxy v0.0.0-20260831125301-fdc22e6b6f9d
 	github.com/go-widgets/mvvm v0.9.0
 	github.com/go-widgets/painter v0.12.0
-	github.com/go-widgets/toolkit v0.293.0
+	github.com/go-widgets/toolkit v0.300.0
 	github.com/go-widgets/toolkit/rougelex v0.2.0
 	github.com/grpc-transports/websocket v0.2.0
 	github.com/wasmdesk/coreutils v0.0.0-20260830125828-7feed1f70fb9
@@ -27,7 +27,7 @@ require (
 	github.com/abtreece/confd v0.41.2 // indirect
 	github.com/ajroetker/go-highway v0.0.4 // indirect
 	github.com/ajroetker/go-jpeg2000 v0.0.2 // indirect
-	github.com/andybalholm/brotli v1.2.2 // indirect
+	github.com/andybalholm/brotli v1.2.3 // indirect
 	github.com/apache/arrow-go/v18 v18.6.0 // indirect
 	github.com/apache/thrift v0.22.0 // indirect
 	github.com/armon/go-metrics v0.4.1 // indirect
@@ -91,15 +91,15 @@ require (
 	github.com/go-composites/null v0.0.0-20260621061849-c8074799d5aa // indirect
 	github.com/go-composites/result v0.0.0-20260621164801-bc2eac479381 // indirect
 	github.com/go-composites/time v0.0.0-20260727203506-b0e9511265ce // indirect
-	github.com/go-crdt/collab v0.33.0 // indirect
-	github.com/go-crdt/crdt v0.35.0 // indirect
+	github.com/go-crdt/collab v0.36.1 // indirect
+	github.com/go-crdt/crdt v0.37.0 // indirect
 	github.com/go-datetime/dates v0.1.0 // indirect
 	github.com/go-facter/facter v0.0.0-20260708052836-752b1a3edee0 // indirect
 	github.com/go-fft/fft v0.0.0-20260805204914-c8a7736375d8 // indirect
-	github.com/go-gfx/gfx v0.18.0 // indirect
+	github.com/go-gfx/gfx v0.19.0 // indirect
 	github.com/go-hiera/hiera v0.0.0-20260708051558-73bff6edd0e9 // indirect
 	github.com/go-hocon/hocon v0.0.0-20260709172937-6d69e3b57178 // indirect
-	github.com/go-images/images v0.0.0-20260815210351-4a50ef5ab734 // indirect
+	github.com/go-images/images v0.0.0-20260830151046-7e8189dc2288 // indirect
 	github.com/go-jose/go-jose/v4 v4.1.4 // indirect
 	github.com/go-kramdown/kramdown v0.1.0 // indirect
 	github.com/go-ldap/ldap/v3 v3.4.14 // indirect
@@ -109,12 +109,12 @@ require (
 	github.com/go-mustache/mustache v0.1.0 // indirect
 	github.com/go-ndarray/ndarray v0.0.0-20260805203447-1a4cfae8f207 // indirect
 	github.com/go-nokogiri/nokogiri v0.1.0 // indirect
-	github.com/go-opentype/opentype v0.6.0 // indirect
+	github.com/go-opentype/opentype v0.12.0 // indirect
 	github.com/go-opentype/shape v0.5.0 // indirect
 	github.com/go-pcore/pcore v0.0.0-20260708052910-1416bf219e47 // indirect
 	github.com/go-puppet/puppet v0.0.0-20260710130746-3ef04469bb7e // indirect
-	github.com/go-regexp/engine v0.1.0 // indirect
-	github.com/go-richdoc/richdoc v0.2.0 // indirect
+	github.com/go-regexp/engine v0.1.3 // indirect
+	github.com/go-richdoc/richdoc v0.3.0 // indirect
 	github.com/go-rouge/rouge v0.2.0 // indirect
 	github.com/go-ruby-aasm/aasm v0.0.0-20260707193337-00a96ee353d7 // indirect
 	github.com/go-ruby-abbrev/abbrev v0.0.0-20260717061206-761e82f6c6c3 // indirect
@@ -172,7 +172,7 @@ require (
 	github.com/go-ruby-fast-gettext-locale/fast-gettext-locale v0.0.0-20260709170525-affabfaa9f08 // indirect
 	github.com/go-ruby-fast-gettext/fast-gettext v0.0.0-20260709172829-8beb2fbc96a8 // indirect
 	github.com/go-ruby-find/find v0.0.0-20260630081030-35072d185272 // indirect
-	github.com/go-ruby-format/format v0.0.0-20260815195335-4038d17b79a1 // indirect
+	github.com/go-ruby-format/format v0.0.0-20260831115501-f58c7d12507c // indirect
 	github.com/go-ruby-friendly-id/friendly-id v0.0.0-20260707195609-ff85fef61060 // indirect
 	github.com/go-ruby-getoptlong/getoptlong v0.0.0-20260629150025-1a1bfd19bc49 // indirect
 	github.com/go-ruby-grape/grape v0.0.0-20260702151528-455377c8c7c3 // indirect
