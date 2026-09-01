@@ -57,11 +57,11 @@ jobs:
       contents: read
       packages: write   # publish the canonical app images to ghcr.io/wasmdesk/<app>
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       # The ociapps-pack + ociapps-static CLIs come from the sibling repo.
       - name: Checkout wasmdesk/ociapps
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
         with:
           repository: wasmdesk/ociapps
           path: _ociapps
@@ -70,7 +70,7 @@ jobs:
       # sibling (asset-less synthbsp mode — no copyrighted pak, ~12 MB wasm,
       # well under the Pages 100 MB/file limit).
       - name: Checkout go-quake1/engine
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
         with:
           repository: go-quake1/engine
           path: _engine
