@@ -75,7 +75,7 @@ jobs:
           repository: go-quake1/engine
           path: _engine
 
-      - uses: actions/setup-go@v5
+      - uses: actions/setup-go@v7
         with:
           go-version: "1.26.4"
           check-latest: true
