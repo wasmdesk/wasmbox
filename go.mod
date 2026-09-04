@@ -3,17 +3,17 @@ module github.com/wasmdesk/wasmbox
 go 1.26.4
 
 require (
-	github.com/go-embedded-ruby/ruby v0.0.0-20260831210744-cf095bc914cc
+	github.com/go-embedded-ruby/ruby v0.0.0-20260904134842-0cf28d3e74f7
 	github.com/go-icons/iconoir v0.2.0
 	github.com/go-opentype/fonts v0.9.0
 	github.com/go-ruby-parser/parser v0.1.7
-	github.com/go-webengine/browserproxy v0.0.0-20260831125301-fdc22e6b6f9d
+	github.com/go-webengine/browserproxy v0.0.0-20260902185530-047ea0a744e1
 	github.com/go-widgets/mvvm v0.9.0
 	github.com/go-widgets/painter v0.12.0
-	github.com/go-widgets/toolkit v0.300.0
+	github.com/go-widgets/toolkit v0.301.0
 	github.com/go-widgets/toolkit/rougelex v0.2.0
 	github.com/grpc-transports/websocket v0.2.0
-	github.com/wasmdesk/coreutils v0.0.0-20260830125828-7feed1f70fb9
+	github.com/wasmdesk/coreutils v0.0.0-20260901145837-daf31568e739
 	google.golang.org/grpc v1.83.2
 )
 
@@ -91,15 +91,15 @@ require (
 	github.com/go-composites/null v0.0.0-20260621061849-c8074799d5aa // indirect
 	github.com/go-composites/result v0.0.0-20260621164801-bc2eac479381 // indirect
 	github.com/go-composites/time v0.0.0-20260727203506-b0e9511265ce // indirect
-	github.com/go-crdt/collab v0.36.1 // indirect
-	github.com/go-crdt/crdt v0.37.0 // indirect
+	github.com/go-crdt/collab v0.37.0 // indirect
+	github.com/go-crdt/crdt v0.39.0 // indirect
 	github.com/go-datetime/dates v0.1.0 // indirect
 	github.com/go-facter/facter v0.0.0-20260708052836-752b1a3edee0 // indirect
 	github.com/go-fft/fft v0.0.0-20260805204914-c8a7736375d8 // indirect
 	github.com/go-gfx/gfx v0.19.0 // indirect
 	github.com/go-hiera/hiera v0.0.0-20260708051558-73bff6edd0e9 // indirect
 	github.com/go-hocon/hocon v0.0.0-20260709172937-6d69e3b57178 // indirect
-	github.com/go-images/images v0.0.0-20260830151046-7e8189dc2288 // indirect
+	github.com/go-images/images v0.0.0-20260831115433-23d959d868e3 // indirect
 	github.com/go-jose/go-jose/v4 v4.1.4 // indirect
 	github.com/go-kramdown/kramdown v0.1.0 // indirect
 	github.com/go-ldap/ldap/v3 v3.4.14 // indirect
@@ -247,7 +247,7 @@ require (
 	github.com/go-ruby-ransack/ransack v0.0.0-20260707193940-08f791c256b0 // indirect
 	github.com/go-ruby-rdoc/rdoc v0.0.0-20260702162339-c866323cc54e // indirect
 	github.com/go-ruby-redis/redis v0.0.0-20260701125752-5de216f6ad92 // indirect
-	github.com/go-ruby-regexp/regexp v0.0.0-20260807185050-0533785e97b7 // indirect
+	github.com/go-ruby-regexp/regexp v0.0.0-20260831115702-e14375e92d68 // indirect
 	github.com/go-ruby-reline/reline v0.0.0-20260630130257-c3cc9ab10454 // indirect
 	github.com/go-ruby-resolv/resolv v0.0.0-20260629153520-df410a5796ac // indirect
 	github.com/go-ruby-resque/resque v0.0.0-20260706120225-d8a1746bdaca // indirect
