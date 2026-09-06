@@ -126,7 +126,7 @@ jobs:
         run: node popup-sdk.test.mjs
 
       - name: Build wasm + clients + serve (task build)
-        uses: arduino/setup-task@v2
+        uses: arduino/setup-task@v3.0.0
         with:
           version: 3.x
           repo-token: ${{ secrets.GITHUB_TOKEN }}
@@ -386,7 +386,7 @@ jobs:
           path: .ociapps
 
       - name: Install Task
-        uses: arduino/setup-task@v2
+        uses: arduino/setup-task@v3.0.0
         with:
           version: 3.x
           repo-token: ${{ secrets.GITHUB_TOKEN }}
@@ -462,7 +462,7 @@ jobs:
           repository: go-quake1/engine
           path: .engine
       - name: Install Task
-        uses: arduino/setup-task@v2
+        uses: arduino/setup-task@v3.0.0
         with:
           version: 3.x
           repo-token: ${{ secrets.GITHUB_TOKEN }}
