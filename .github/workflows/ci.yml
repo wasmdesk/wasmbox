@@ -45,7 +45,7 @@ jobs:
       # that test skips cleanly.
       - uses: actions/setup-node@v4
         with:
-          node-version: "22"
+          node-version: "24"
 
       - name: go vet
         run: go vet ./...
@@ -115,7 +115,7 @@ jobs:
 
       - uses: actions/setup-node@v4
         with:
-          node-version: "20"
+          node-version: "24"
 
       - name: Seqlock fence unit test (no deps)
         working-directory: test
@@ -375,7 +375,7 @@ jobs:
 
       - uses: actions/setup-node@v4
         with:
-          node-version: "20"
+          node-version: "24"
 
       # The build-time OCI tooling (ociapps-pack / ociapps-static) lives in the
       # public sibling repo; check it out and point OCIAPPS_DIR at it.
@@ -450,7 +450,7 @@ jobs:
           cache: true
       - uses: actions/setup-node@v4
         with:
-          node-version: "20"
+          node-version: "24"
       - name: Checkout wasmdesk/ociapps (OCI packaging CLIs)
         uses: actions/checkout@v7
         with:
