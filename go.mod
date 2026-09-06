@@ -3,14 +3,14 @@ module github.com/wasmdesk/wasmbox
 go 1.26.4
 
 require (
-	github.com/go-embedded-ruby/ruby v0.0.0-20260905173923-79f9196860e5
+	github.com/go-embedded-ruby/ruby v0.0.0-20260906190733-3f57e4d43435
 	github.com/go-icons/iconoir v0.2.0
 	github.com/go-opentype/fonts v0.9.0
-	github.com/go-ruby-parser/parser v0.1.7
+	github.com/go-ruby-parser/parser v0.1.8
 	github.com/go-webengine/browserproxy v0.0.0-20260905061713-985c5ac620e6
 	github.com/go-widgets/mvvm v0.9.0
 	github.com/go-widgets/painter v0.13.0
-	github.com/go-widgets/toolkit v0.306.0
+	github.com/go-widgets/toolkit v0.313.0
 	github.com/go-widgets/toolkit/rougelex v0.2.0
 	github.com/grpc-transports/websocket v0.2.0
 	github.com/wasmdesk/coreutils v0.0.0-20260901145837-daf31568e739
@@ -91,8 +91,8 @@ require (
 	github.com/go-composites/null v0.0.0-20260621061849-c8074799d5aa // indirect
 	github.com/go-composites/result v0.0.0-20260621164801-bc2eac479381 // indirect
 	github.com/go-composites/time v0.0.0-20260727203506-b0e9511265ce // indirect
-	github.com/go-crdt/collab v0.40.0 // indirect
-	github.com/go-crdt/crdt v0.42.0 // indirect
+	github.com/go-crdt/collab v0.45.0 // indirect
+	github.com/go-crdt/crdt v0.46.0 // indirect
 	github.com/go-datetime/dates v0.1.0 // indirect
 	github.com/go-facter/facter v0.0.0-20260708052836-752b1a3edee0 // indirect
 	github.com/go-fft/fft v0.0.0-20260805204914-c8a7736375d8 // indirect
