@@ -1,6 +1,6 @@
 module github.com/wasmdesk/wasmbox
 
-go 1.26.4
+go 1.27.1
 
 require (
 	github.com/go-embedded-ruby/ruby v0.0.0-20261002144622-0e38f04000a9
