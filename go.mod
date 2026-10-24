@@ -3,17 +3,17 @@ module github.com/wasmdesk/wasmbox
 go 1.27.2
 
 require (
-	github.com/go-embedded-ruby/ruby v0.6.0
+	github.com/go-embedded-ruby/ruby v0.8.1
 	github.com/go-icons/iconoir v0.3.0
-	github.com/go-opentype/fonts v0.12.0
+	github.com/go-opentype/fonts v0.14.0
 	github.com/go-ruby-parser/parser v0.13.1
-	github.com/go-webengine/browserproxy v0.1.3
+	github.com/go-webengine/browserproxy v0.1.6
 	github.com/go-widgets/mvvm v0.15.0
 	github.com/go-widgets/painter v0.16.0
-	github.com/go-widgets/toolkit v0.329.0
+	github.com/go-widgets/toolkit v0.340.0
 	github.com/go-widgets/toolkit/rougelex v0.2.0
 	github.com/grpc-transports/websocket v0.4.0
-	github.com/wasmdesk/coreutils v0.0.0-20261011043251-da11e8ef4e9e
+	github.com/wasmdesk/coreutils v0.0.0-20261021205337-0d2ca5644f7e
 	google.golang.org/grpc v1.86.0-dev
 )
 
@@ -25,7 +25,6 @@ require (
 	github.com/BurntSushi/toml v1.6.0 // indirect
 	github.com/RoaringBitmap/roaring/v2 v2.14.5 // indirect
 	github.com/abtreece/confd v0.41.2 // indirect
-	github.com/ajroetker/go-highway v0.0.12 // indirect
 	github.com/andybalholm/brotli v1.2.6 // indirect
 	github.com/apache/arrow-go/v18 v18.8.0 // indirect
 	github.com/apache/thrift v0.24.0 // indirect
@@ -90,19 +89,19 @@ require (
 	github.com/go-composites/null v0.0.0-20260903220223-c1d743488d23 // indirect
 	github.com/go-composites/result v0.0.0-20260927170344-f2c7344faeef // indirect
 	github.com/go-composites/time v0.0.0-20260929013028-aa3c57ae1371 // indirect
-	github.com/go-crdt/collab v0.77.1 // indirect
+	github.com/go-crdt/collab v0.77.4 // indirect
 	github.com/go-crdt/crdt v0.57.0 // indirect
 	github.com/go-datetime/dates v0.1.0 // indirect
 	github.com/go-encryptions/unixcrypt v0.1.0 // indirect
 	github.com/go-facter/facter v0.0.0-20260830120958-454b72e642ab // indirect
 	github.com/go-fft/fft v0.23.0 // indirect
-	github.com/go-gfx/gfx v0.35.0 // indirect
+	github.com/go-gfx/gfx v0.36.0 // indirect
 	github.com/go-hiera/hiera v0.0.0-20260830144306-f9304f6bec92 // indirect
 	github.com/go-hocon/hocon v0.0.0-20260831114632-08e716b40e6d // indirect
 	github.com/go-images/gif v0.2.0 // indirect
 	github.com/go-images/images v0.1.0 // indirect
 	github.com/go-images/jpeg v0.3.0 // indirect
-	github.com/go-images/jpeg2000 v0.13.3 // indirect
+	github.com/go-images/jpeg2000 v0.13.7 // indirect
 	github.com/go-images/png v0.2.0 // indirect
 	github.com/go-jose/go-jose/v4 v4.1.4 // indirect
 	github.com/go-kramdown/kramdown v0.2.0 // indirect
@@ -111,14 +110,17 @@ require (
 	github.com/go-logr/logr v1.4.4 // indirect
 	github.com/go-logr/stdr v1.2.2 // indirect
 	github.com/go-mustache/mustache v0.1.0 // indirect
-	github.com/go-ndarray/ndarray v0.11.0 // indirect
+	github.com/go-ndarray/ndarray v0.12.0 // indirect
 	github.com/go-nokogiri/nokogiri v0.1.0 // indirect
-	github.com/go-opentype/opentype v0.15.0 // indirect
+	github.com/go-numerics/integrate v0.2.0 // indirect
+	github.com/go-numerics/optimize v0.2.0 // indirect
+	github.com/go-numerics/special v0.1.0 // indirect
+	github.com/go-opentype/opentype v0.16.0 // indirect
 	github.com/go-opentype/shape v0.7.0 // indirect
 	github.com/go-pcore/pcore v0.0.0-20260831114716-f9c3e7f59eaa // indirect
 	github.com/go-puppet/puppet v0.0.0-20260918012035-fc6b0424cdbd // indirect
-	github.com/go-regexp/engine v0.3.0 // indirect
-	github.com/go-richdoc/richdoc v0.6.0 // indirect
+	github.com/go-regexp/engine v0.3.2 // indirect
+	github.com/go-richdoc/richdoc v0.7.0 // indirect
 	github.com/go-rouge/rouge v0.3.0 // indirect
 	github.com/go-ruby-aasm/aasm v0.0.0-20260717061120-cec0976ec205 // indirect
 	github.com/go-ruby-abbrev/abbrev v0.0.0-20260916090008-ac08b8471830 // indirect
@@ -251,7 +253,7 @@ require (
 	github.com/go-ruby-ransack/ransack v0.0.0-20260717072959-06ca1d7c6829 // indirect
 	github.com/go-ruby-rdoc/rdoc v0.0.0-20260916101528-7ed1d61f5088 // indirect
 	github.com/go-ruby-redis/redis v0.0.0-20260916101628-3b91d134e9dc // indirect
-	github.com/go-ruby-regexp/regexp v0.1.0 // indirect
+	github.com/go-ruby-regexp/regexp v0.1.1 // indirect
 	github.com/go-ruby-reline/reline v0.0.0-20260916101734-37c7d2c11d74 // indirect
 	github.com/go-ruby-resolv/resolv v0.0.0-20260916101809-a2b1b027ae6d // indirect
 	github.com/go-ruby-resque/resque v0.0.0-20260903192756-dc5f8e3f2e80 // indirect
@@ -302,7 +304,9 @@ require (
 	github.com/go-simd/base64 v0.0.0-20260903220000-c04f5883bb18 // indirect
 	github.com/go-simd/crc32 v0.0.0-20260903220012-5f164e0e0487 // indirect
 	github.com/go-simd/hex v0.0.0-20260903220024-a8d22a843218 // indirect
+	github.com/go-simd/highway v0.0.14 // indirect
 	github.com/go-sql-driver/mysql v1.10.1 // indirect
+	github.com/go-statistics/stats v0.1.0 // indirect
 	github.com/go-typeset/bidi v0.3.1 // indirect
 	github.com/go-viper/mapstructure/v2 v2.5.0 // indirect
 	github.com/go-webauthn/webauthn v0.18.2 // indirect
@@ -393,7 +397,7 @@ require (
 	go.yaml.in/yaml/v3 v3.0.5 // indirect
 	golang.org/x/crypto v0.58.0 // indirect
 	golang.org/x/exp v0.0.0-20260218203240-3dfff04db8fa // indirect
-	golang.org/x/image v0.46.0 // indirect
+	golang.org/x/image v0.47.0 // indirect
 	golang.org/x/net v0.61.0 // indirect
 	golang.org/x/sync v0.24.0 // indirect
 	golang.org/x/sys v0.49.0 // indirect
