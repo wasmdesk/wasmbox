@@ -455,11 +455,15 @@ func TestEachGlyphPaints(t *testing.T) {
 			buf[i], buf[i+1], buf[i+2], buf[i+3] = 0xC8, 0xC8, 0xC8, 0xFF
 		}
 		drawGlyph(p, g, toolkit.Rect{X: 10, Y: 10, W: IconGlyphPx, H: IconGlyphPx})
+		// The toolkit rasterises the glyph anti-aliased at its true 16-px size
+		// (go-widgets/toolkit#512), as Chromium does: a 1.5-unit Iconoir stroke
+		// covers few pixels fully, so "ink" is any pixel at least half-way from
+		// the 0xC8 ground to the 0x1a ink, not only near-full coverage.
 		painted := 0
 		for y := 10; y < 10+IconGlyphPx; y++ {
 			for x := 10; x < 10+IconGlyphPx; x++ {
 				off := (y*tW + x) * 4
-				if buf[off] < 0x40 {
+				if buf[off] <= (0xC8+0x1a)/2 {
 					painted++
 				}
 			}
