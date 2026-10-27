@@ -106,6 +106,32 @@ function pixelAt(png, x, y) {
 
 function eqColor(px, c) { return px[0] === c[0] && px[1] === c[1] && px[2] === c[2]; }
 
+// folderCoverage measures the row-1 folder RowIcon as ink coverage: over the
+// ICON_SIZE box, the sum of how far each pixel has moved from the row ground
+// (sampled just left of the box) towards COLOR_FOLDER_FILL, clamped to [0,1].
+// The toolkit rasterises Iconoir glyphs anti-aliased at their true size
+// (go-widgets/toolkit#512), as Chromium's own drawImage does: a 16-px folder
+// has ~0 exactly-coloured pixels and ~57 px of coverage, so an exact-colour
+// count reads a healthy icon as "not painting". Mirrors coverageIn in
+// clients/files/internal/scene/scene_test.go.
+function folderCoverage(png, surface) {
+  const x = surface.x + NAME_COL_X;
+  const y = surface.y + HEADER_BAR_HEIGHT + COLUMN_HEADER_HEIGHT + ROW_HEIGHT + (ROW_HEIGHT - ICON_SIZE) / 2;
+  const g = pixelAt(png, x - 1, y + ICON_SIZE / 2);
+  const d = [0, 1, 2].map((i) => COLOR_FOLDER_FILL[i] - g[i]);
+  const den = d[0] * d[0] + d[1] * d[1] + d[2] * d[2];
+  if (den === 0) return 0;
+  let sum = 0;
+  for (let yy = y; yy < y + ICON_SIZE; yy++) {
+    for (let xx = x; xx < x + ICON_SIZE; xx++) {
+      const p = pixelAt(png, xx, yy);
+      const c = ((p[0] - g[0]) * d[0] + (p[1] - g[1]) * d[1] + (p[2] - g[2]) * d[2]) / den;
+      sum += Math.min(Math.max(c, 0), 1);
+    }
+  }
+  return sum;
+}
+
 // findSidebarBounds locates the file browser surface by its unique sidebar
 // background colour (no other compositor pane uses Adwaita's sidebar #f0f0f0).
 // Returns the bounding box of the contiguous sidebar pixel block.
@@ -191,13 +217,7 @@ try {
     const png = PNG.sync.read(await page.screenshot({ type: "png", fullPage: false }));
     const s = fileSurface(png);
     if (!s) continue;
-    let folderPx = 0;
-    for (let k = 0; k + 2 < png.data.length; k += 4) {
-      if (png.data[k] === COLOR_FOLDER_FILL[0] && png.data[k + 1] === COLOR_FOLDER_FILL[1] && png.data[k + 2] === COLOR_FOLDER_FILL[2]) {
-        folderPx++;
-      }
-    }
-    if (folderPx > 30) { png1 = png; surface = s; break; }
+    if (folderCoverage(png, s) >= 20) { png1 = png; surface = s; break; }
   }
   if (!png1) {
     // Fall back to whatever the last frame shows so the failure below is
@@ -349,14 +369,13 @@ try {
     //     FILLED the box). An outline inks far fewer pixels than a filled box, so
     //     the threshold checks the glyph is painting (its strokes are present),
     //     not that a solid box is filled -- "not painting" would be ~0.
+    //     It is measured as anti-aliased ink coverage (folderCoverage).
     const listY0 = surface.y + HEADER_BAR_HEIGHT + COLUMN_HEADER_HEIGHT;
-    const iconRowY = listY0 + ROW_HEIGHT + (ROW_HEIGHT - ICON_SIZE) / 2;
-    const iconRowX = surface.x + NAME_COL_X;
-    const folderPixels = countIn(png1, iconRowX, iconRowY, ICON_SIZE, ICON_SIZE, COLOR_FOLDER_FILL);
-    if (folderPixels < 8) {
-      fail(`folder-icon pixels on list row 1 = ${folderPixels} (need >= 8 of ${COLOR_FOLDER_FILL} for the iconoir folder outline); icons not painting`);
+    const folderCov = folderCoverage(png1, surface);
+    if (folderCov < 20) {
+      fail(`folder-icon ink coverage on list row 1 = ${folderCov.toFixed(1)} px (need >= 20 of ${COLOR_FOLDER_FILL} for the iconoir folder outline); icons not painting`);
     } else {
-      console.log(`ok  list-row folder icon: ${folderPixels} ColorFolderFill pixels in ${ICON_SIZE}x${ICON_SIZE} box`);
+      console.log(`ok  list-row folder icon: ${folderCov.toFixed(1)} px of ColorFolderFill coverage in ${ICON_SIZE}x${ICON_SIZE} box`);
     }
 
     // (b) List row 1 NAME label in primary ink (file/folder name on the
