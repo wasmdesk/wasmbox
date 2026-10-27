@@ -10,7 +10,7 @@ require (
 	github.com/go-webengine/browserproxy v0.1.6
 	github.com/go-widgets/mvvm v0.15.0
 	github.com/go-widgets/painter v0.16.0
-	github.com/go-widgets/toolkit v0.340.0
+	github.com/go-widgets/toolkit v0.345.1
 	github.com/go-widgets/toolkit/rougelex v0.2.0
 	github.com/grpc-transports/websocket v0.4.0
 	github.com/wasmdesk/coreutils v0.0.0-20261021205337-0d2ca5644f7e
@@ -25,7 +25,7 @@ require (
 	github.com/BurntSushi/toml v1.6.0 // indirect
 	github.com/RoaringBitmap/roaring/v2 v2.14.5 // indirect
 	github.com/abtreece/confd v0.41.2 // indirect
-	github.com/andybalholm/brotli v1.2.6 // indirect
+	github.com/andybalholm/brotli v1.2.7 // indirect
 	github.com/apache/arrow-go/v18 v18.8.0 // indirect
 	github.com/apache/thrift v0.24.0 // indirect
 	github.com/armon/go-metrics v0.4.1 // indirect
@@ -76,6 +76,7 @@ require (
 	github.com/coreos/go-semver v0.3.1 // indirect
 	github.com/coreos/go-systemd/v22 v22.7.0 // indirect
 	github.com/crewjam/saml v0.5.1 // indirect
+	github.com/dsnet/compress v0.0.2-0.20230904184137-39efe44ab707 // indirect
 	github.com/dustin/go-humanize v1.0.1 // indirect
 	github.com/fatih/color v1.18.0 // indirect
 	github.com/fsnotify/fsnotify v1.10.1 // indirect
@@ -89,19 +90,18 @@ require (
 	github.com/go-composites/null v0.0.0-20260903220223-c1d743488d23 // indirect
 	github.com/go-composites/result v0.0.0-20260927170344-f2c7344faeef // indirect
 	github.com/go-composites/time v0.0.0-20260929013028-aa3c57ae1371 // indirect
-	github.com/go-crdt/collab v0.77.4 // indirect
 	github.com/go-crdt/crdt v0.57.0 // indirect
 	github.com/go-datetime/dates v0.1.0 // indirect
 	github.com/go-encryptions/unixcrypt v0.1.0 // indirect
 	github.com/go-facter/facter v0.0.0-20260830120958-454b72e642ab // indirect
 	github.com/go-fft/fft v0.23.0 // indirect
-	github.com/go-gfx/gfx v0.36.0 // indirect
+	github.com/go-gfx/gfx v0.36.1 // indirect
 	github.com/go-hiera/hiera v0.0.0-20260830144306-f9304f6bec92 // indirect
 	github.com/go-hocon/hocon v0.0.0-20260831114632-08e716b40e6d // indirect
 	github.com/go-images/gif v0.2.0 // indirect
-	github.com/go-images/images v0.1.0 // indirect
+	github.com/go-images/images v0.1.1-0.20261026203936-4ac989d310a1 // indirect
 	github.com/go-images/jpeg v0.3.0 // indirect
-	github.com/go-images/jpeg2000 v0.13.7 // indirect
+	github.com/go-images/jpeg2000 v0.13.8 // indirect
 	github.com/go-images/png v0.2.0 // indirect
 	github.com/go-jose/go-jose/v4 v4.1.4 // indirect
 	github.com/go-kramdown/kramdown v0.2.0 // indirect
@@ -115,7 +115,7 @@ require (
 	github.com/go-numerics/integrate v0.2.0 // indirect
 	github.com/go-numerics/optimize v0.2.0 // indirect
 	github.com/go-numerics/special v0.1.0 // indirect
-	github.com/go-opentype/opentype v0.16.0 // indirect
+	github.com/go-opentype/opentype v0.16.2-0.20261027113239-5e69589e9a5e // indirect
 	github.com/go-opentype/shape v0.7.0 // indirect
 	github.com/go-pcore/pcore v0.0.0-20260831114716-f9c3e7f59eaa // indirect
 	github.com/go-puppet/puppet v0.0.0-20260918012035-fc6b0424cdbd // indirect

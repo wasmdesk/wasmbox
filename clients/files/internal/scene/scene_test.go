@@ -45,6 +45,48 @@ func countIn(buf []byte, w, x, y, rw, rh int, c toolkit.RGBA) int {
 	return n
 }
 
+// coverageIn sums, over (x,y,rw,rh), how far each pixel has moved from bg
+// towards ink, clamped to [0,1] per pixel: the alpha-weighted ink coverage of
+// an anti-aliased glyph, in pixels. Exact-colour counts (countIn) only see
+// fully covered pixels, and a line icon rasterised at its true size has
+// almost none: Chromium's own 16-px drawImage of the Iconoir folder, page,
+// star, computer and trash SVGs has 0 fully covered pixels and 38-64 px of
+// coverage. The toolkit (go-widgets/toolkit#512) matches it to a mean alpha
+// error of 0.013-0.032 per pixel; the 64-px-then-nearest-neighbour path it
+// replaced produced 30-48 full pixels Chromium does not, at 0.13-0.20 error.
+func coverageIn(buf []byte, w, x, y, rw, rh int, ink, bg toolkit.RGBA) float64 {
+	dr, dg, db := float64(ink.R)-float64(bg.R), float64(ink.G)-float64(bg.G), float64(ink.B)-float64(bg.B)
+	den := dr*dr + dg*dg + db*db
+	if den == 0 {
+		return 0
+	}
+	sum := 0.0
+	for yy := y; yy < y+rh; yy++ {
+		for xx := x; xx < x+rw; xx++ {
+			p := pixelAt(buf, w, xx, yy)
+			pr, pg, pb := float64(p[0])-float64(bg.R), float64(p[1])-float64(bg.G), float64(p[2])-float64(bg.B)
+			c := (pr*dr + pg*dg + pb*db) / den
+			sum += min(max(c, 0), 1)
+		}
+	}
+	return sum
+}
+
+// blueIn counts pixels in (x,y,rw,rh) whose blue channel exceeds red by more
+// than 64 -- ColorFolderFill's hue at half coverage or more over a neutral
+// ground, which a white or grey glyph never produces at any coverage.
+func blueIn(buf []byte, w, x, y, rw, rh int) int {
+	n := 0
+	for yy := y; yy < y+rh; yy++ {
+		for xx := x; xx < x+rw; xx++ {
+			if p := pixelAt(buf, w, xx, yy); int(p[2])-int(p[0]) > 64 {
+				n++
+			}
+		}
+	}
+	return n
+}
+
 // list-row geometry helpers (surface coordinates). The list is a toolkit.Table,
 // so the body starts below the Table's own header row and rows advance at the
 // Table's row pitch.
@@ -184,13 +226,16 @@ func TestPixelParity(t *testing.T) {
 	// Foreground content: folder icon + name + sidebar text (the "frame with
 	// nothing inside" regression guard). The RowIcon glyph paints in the Name
 	// column gutter at table.X + TableCellPadX, in a TableIconSize box. The glyph
-	// is now the iconoir "folder" line icon stroked in ColorFolderFill, so the
-	// full-coverage blue pixels are the stroke, not a solid fill -- ~15 in a 16px
-	// box, so the guard is >= 8 (was >= 30 for the old solid two-tone folder).
+	// is the iconoir "folder" line icon stroked in ColorFolderFill and
+	// anti-aliased at its true size, so it is measured as ink coverage over the
+	// row ground (sampled just left of the icon box), not as exact-colour
+	// pixels: ~57 px of coverage in a 16-px box, guard >= 20 (see coverageIn).
 	iconX := SidebarWidth + toolkit.TableCellPadX
 	iconY := rowTop(1) + (toolkit.TableRowHeight-toolkit.TableIconSize)/2
-	if n := countIn(buf, surfW, iconX, iconY, toolkit.TableIconSize, toolkit.TableIconSize, ColorFolderFill); n < 8 {
-		t.Errorf("list row 1 folder-fill pixels = %d, want >= 8", n)
+	g := pixelAt(buf, surfW, iconX-1, iconY+toolkit.TableIconSize/2)
+	rowGround := toolkit.RGB(g[0], g[1], g[2])
+	if c := coverageIn(buf, surfW, iconX, iconY, toolkit.TableIconSize, toolkit.TableIconSize, ColorFolderFill, rowGround); c < 20 {
+		t.Errorf("list row 1 folder ink coverage = %.1f px, want >= 20", c)
 	}
 	// Name text lands after the gutter (TableCellPadX + TableIconSize) plus the
 	// cell's own left pad.
@@ -731,8 +776,8 @@ func TestIconStemsRender(t *testing.T) {
 			t.Errorf("iconoir stem %q not found", stem)
 		}
 		toolkit.DrawIconoir(p, r, stem, ColorFolderFill)
-		if n := countIn(buf, w, 4, 4, toolkit.TableIconSize, toolkit.TableIconSize, ColorFolderFill); n < 5 {
-			t.Errorf("iconoir stem %q inked %d full-coverage pixels, want >= 5", stem, n)
+		if c := coverageIn(buf, w, 4, 4, toolkit.TableIconSize, toolkit.TableIconSize, ColorFolderFill, toolkit.RGBA{}); c < 20 {
+			t.Errorf("iconoir stem %q inked %.1f px of coverage, want >= 20", stem, c)
 		}
 	}
 }
@@ -755,8 +800,13 @@ func TestRowIconSelectedVariant(t *testing.T) {
 		t.Fatal("RowIcon(1) returned no painter")
 	}
 	draw(p, rect, ColorTextPrimary)
-	if countIn(buf, w, 4, 4, toolkit.TableIconSize, toolkit.TableIconSize, ColorFolderFill) < 8 {
-		t.Error("unselected folder RowIcon has no blue glyph")
+	if c := coverageIn(buf, w, 4, 4, toolkit.TableIconSize, toolkit.TableIconSize, ColorFolderFill, toolkit.RGBA{}); c < 20 {
+		t.Errorf("unselected folder RowIcon blue coverage = %.1f px, want >= 20", c)
+	}
+	// Planted positive for blueIn: the blue glyph must register, or the
+	// "no blue" check below would pass by being blind.
+	if n := blueIn(buf, w, 4, 4, toolkit.TableIconSize, toolkit.TableIconSize); n < 8 {
+		t.Errorf("blueIn sees %d pixels of the blue folder, want >= 8", n)
 	}
 
 	// Selected row 0 folder -> white fill (ColorOnAccent), no blue.
@@ -767,11 +817,11 @@ func TestRowIconSelectedVariant(t *testing.T) {
 		t.Fatal("RowIcon(0) returned no painter")
 	}
 	draw(p, rect, ColorOnAccent)
-	if countIn(buf, w, 4, 4, toolkit.TableIconSize, toolkit.TableIconSize, ColorFolderFill) != 0 {
-		t.Error("selected folder RowIcon still painted blue")
+	if n := blueIn(buf, w, 4, 4, toolkit.TableIconSize, toolkit.TableIconSize); n != 0 {
+		t.Errorf("selected folder RowIcon still painted %d blue pixels", n)
 	}
-	if countIn(buf, w, 4, 4, toolkit.TableIconSize, toolkit.TableIconSize, ColorOnAccent) < 8 {
-		t.Error("selected folder RowIcon has no white glyph")
+	if c := coverageIn(buf, w, 4, 4, toolkit.TableIconSize, toolkit.TableIconSize, ColorOnAccent, toolkit.RGBA{}); c < 20 {
+		t.Errorf("selected folder RowIcon white coverage = %.1f px, want >= 20", c)
 	}
 
 	// Out-of-range rows yield no icon (both guard arms).
