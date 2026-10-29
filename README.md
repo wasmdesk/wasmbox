@@ -100,6 +100,33 @@ toolkit consumers; one is authored entirely in Ruby:
 | `browser` | a WhiteSur/Safari-styled browser shell (see note below) |
 | `rubytk` | a Tip Calculator whose **whole UI + logic are Ruby** via `require "widgets"` |
 | `quake` | pure-Go Quake 1 from the sibling [`go-quake1`](https://github.com/go-quake1) repo, streaming its assets from an OCI registry |
+| `doom` | pure-Go Doom from the sibling [`go-doom`](https://github.com/go-doom/engine) repo (software renderer, 4:3-locked window), streaming the [Freedoom](https://freedoom.github.io) IWAD (BSD-3-Clause, sha256-pinned) from the same-origin `/v2/doom-assets` mirror |
+
+### Doom
+
+*Applications → Doom* in the root menu. The client (go-doom/engine
+`cmd/doom-wasmbox`, built by the Pages workflow or `task build:doom`) drives the
+protocol from Go, like Quake. It presents Doom's 320×200 frame at 640×480 with a
+4:3 aspect lock and takes the classic keys: arrows to move, Ctrl to fire, Space to
+use, Shift to run, Alt or `,` `.` to strafe, Escape for the menu, Enter, and digits
+for weapons. The left mouse button fires and the right one uses. The client sets
+the new `hello` field `inhibit_shortcuts` (the analog of Wayland's
+keyboard-shortcuts inhibitor, see [`docs/protocol.md`](docs/protocol.md)), so
+while Doom has the keyboard, Ctrl+Alt+arrow, Ctrl+Space, Ctrl/Alt+Tab and F3 go
+to the game instead of snapping the window or opening Spotlight, the switcher or
+Exposé. Click another window or the dock to leave.
+
+The game data is Freedoom: Phase 1 0.13.0, which is never committed. The
+workflows download the official release, check the zip against the sha256 in
+Freedoom's signed `CHECKSUM` file, check the extracted `freedoom1.wad` against
+the digest the client pins, then pack it with `packs/doom-assets.toml` into
+`/v2/doom-assets`. The client fetches only from its own origin, recomputes the
+digest, and bounds the WAD's lump directory before the engine reads it. Sound is
+wired, but Chromium exposes no `AudioContext` to a worker, so Doom is silent there
+(`DOOM: ... audio=unavailable` in the console). `test/probe-doom-smoke.mjs` is the
+cross-browser check: it boots the client, opens the menu with Escape, starts E1M1
+and walks, asserting on the client's `DOOM: state=...` log lines and on frames
+read inside the compositor worker.
 
 Clients are spawned two ways: from a static worker URL (the compositor's own
 asset tree) or pulled at runtime as an **OCI artifact** via
@@ -189,8 +216,8 @@ task clean    # remove the build artifacts
 `wasmbox` is a Go module that imports the interpreter, so `task build` is a plain
 `go build` for the `js/wasm` target (`GOOS=js GOARCH=wasm CGO_ENABLED=0`) — Go
 fetches the interpreter as a dependency; there is no separate checkout to clone.
-External clients built from sibling repos (the dock, Quake) resolve those repos
-via `DOCK_DIR` / `ENGINE_DIR` (see the Taskfile).
+External clients built from sibling repos (the dock, Quake, Doom) resolve those
+repos via `DOCK_DIR` / `ENGINE_DIR` / `DOOM_DIR` (see the Taskfile).
 
 The `SharedArrayBuffer` client surfaces require **cross-origin isolation**
 (COOP/COEP), which `python3 -m http.server` does not set — that is why the demo

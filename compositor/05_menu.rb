@@ -241,6 +241,7 @@ module RootMenu
     "files"     => "Files",
     "hello"     => "Hello (wasm)",
     "quake"     => "Quake",
+    "doom"      => "Doom",
     "hello-oci" => "Hello (OCI)",
     # "VS Code" is the pure-Go editor client (clients/code) — it loads
     # same-origin on any static host incl. GitHub Pages. The code-server

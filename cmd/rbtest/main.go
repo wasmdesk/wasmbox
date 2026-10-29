@@ -875,6 +875,9 @@ assert(app_labels.include?("Editor"),   "Applications includes Editor")
 assert(app_labels.include?("Files"),    "Applications includes Files")
 assert(app_labels.include?("Hello (wasm)"), "Applications includes Hello (wasm)")
 assert(app_labels.include?("Quake"),    "Applications includes Quake")
+assert(app_labels.include?("Doom"),     "Applications includes Doom")
+assert_eq(app_labels.index("Doom"), app_labels.index("Quake") + 1,
+          "Doom is listed right after Quake")
 # The hidden hello-oci id is NOT exposed (probe-only).
 assert(!app_labels.include?("Hello (OCI)"),
        "Applications hides hello-oci (probe-only id)")
@@ -923,6 +926,11 @@ assert_eq(wmr.launchable_url("hello"), "clients/hello/worker.js",
           "hello maps to the bundled hello worker")
 assert_eq(wmr.launchable_url("quake"), "clients/quake/worker.js",
           "quake maps to the bundled quake worker")
+assert(wmr.launchable?("doom"), "doom is launchable")
+assert_eq(wmr.launchable_url("doom"), "clients/doom/worker.js",
+          "doom maps to the bundled doom worker")
+assert_eq(wmr.desktop_entry("doom")[:comment], "Pure-Go Doom with Freedoom",
+          "doom has its APP_MANIFEST desktop entry")
 
 # ---- Theme machinery: defaults, switch, broadcast contract -----------
 wmt = WindowManager.new
@@ -1054,6 +1062,20 @@ wmla.register_external("dock", 480, 28, "panel")
 pana = wmla.last_registered
 res = wmla.handle_client_message({ type: "set_lock_aspect", window_id: pana.id, ratio: 1.5 })
 assert_eq(res, :ignored, "set_lock_aspect on a panel id is :ignored")
+
+# ---- keyboard-shortcuts inhibitor: hello.inhibit_shortcuts -------------
+wmki = WindowManager.new
+wmki.handle_client_message({ type: "hello", title: "game", w: 320, h: 200,
+                             sab: :sabk1, stride: 1280, inhibit_shortcuts: true })
+assert_eq(wmki.last_registered.inhibit_shortcuts, true, "hello inhibit_shortcuts: true is stored")
+wmki.handle_client_message({ type: "hello", title: "plain", w: 200, h: 150, sab: :sabk2, stride: 800 })
+assert_eq(wmki.last_registered.inhibit_shortcuts, false, "hello without inhibit_shortcuts: false")
+wmki.handle_client_message({ type: "hello", title: "str", w: 200, h: 150, sab: :sabk3, stride: 800,
+                             inhibit_shortcuts: "yes" })
+assert_eq(wmki.last_registered.inhibit_shortcuts, false, "only a literal true inhibits")
+wmki.handle_client_message({ type: "hello", title: "dock", w: 400, h: 60, sab: :sabk4, stride: 1600,
+                             role: "panel", inhibit_shortcuts: true })
+assert_eq(wmki.last_registered.inhibit_shortcuts, false, "a panel cannot inhibit shortcuts")
 
 # ---- aspect-ratio lock: hello.lock_aspect optional field ---------------
 # A forward-compat client that knows its aspect can declare it in hello.

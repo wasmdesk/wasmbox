@@ -645,8 +645,10 @@ class Compositor
     # 0 never), the app_icon glyph name, inline image-data (base64 RGBA at
     # `image_w`x`image_h`) and the resident hint. `actions` is shared with the
     # native path (the compact "Label|key;..." scalar, key = the echoed action).
+    # `inhibit_shortcuts` rides on `hello` (the keyboard-shortcuts inhibitor,
+    # see Window#inhibit_shortcuts).
     %w[window_id w h stride title role app index workspace name parent rel_x rel_y lock_aspect ratio
-       body kind icon icon_w icon_h timeout action_label action actions id glyph tooltip
+       inhibit_shortcuts body kind icon icon_w icon_h timeout action_label action actions id glyph tooltip
        summary urgency expire_timeout app_icon image_data image_w image_h resident].each do |k|
       v = data.get(k)
       h[k.to_sym] = v unless v.nil?
@@ -1118,7 +1120,13 @@ class Compositor
     # Exposé toggle chord: F3 fans every window on the workspace into the spread
     # (17_expose.rb). Checked before the switcher + `case key` so the key never
     # falls through to a client. Self-gated on Compositor::EXPOSE.
-    if EXPOSE && expose_trigger?(key)
+    # Keyboard-shortcuts inhibitor (Window#inhibit_shortcuts, the analog of
+    # Wayland's zwp_keyboard_shortcuts_inhibitor_v1): while the focused window
+    # holds one, none of the chords below is matched and the key goes to the
+    # client. The grabs above still win (an overlay or popup the user opened
+    # with the mouse keeps the keyboard), and the mouse stays the way out.
+    inhibit = shortcuts_inhibited?
+    if !inhibit && EXPOSE && expose_trigger?(key)
       e.call("preventDefault")
       expose_toggle
       return
@@ -1135,7 +1143,7 @@ class Compositor
     # Spotlight OPEN chord: ⌘/Ctrl+Space raises the palette (16_spotlight.rb).
     # Checked before the switcher + `case key` so the chord never falls through
     # to a client as a literal space. Self-gated on Compositor::SPOTLIGHT.
-    if SPOTLIGHT && spotlight_open_chord?(key, e)
+    if !inhibit && SPOTLIGHT && spotlight_open_chord?(key, e)
       e.call("preventDefault")
       spotlight_open
       return
@@ -1161,12 +1169,12 @@ class Compositor
       # further Tab is caught by the grab block above. Plain Shift+Tab (no Alt)
       # keeps the instant quick-cycle. Bare Tab forwards to the focused window so
       # the terminal can use it for autocompletion (and an editor for indent).
-      if ALTTAB && alttab_modifier?(e)
+      if !inhibit && ALTTAB && alttab_modifier?(e)
         e.call("preventDefault")
         alttab_key(e[:shiftKey] ? true : false)
         return
       end
-      if e[:shiftKey]
+      if !inhibit && e[:shiftKey]
         e.call("preventDefault")
         @wm.cycle
         notify_windows_changed
@@ -1178,17 +1186,30 @@ class Compositor
       # half, Up = maximize, Down = restore / un-snap). Only fires with the snap
       # modifier held AND a decorated window focused; otherwise the arrow falls
       # through to the client (a terminal/editor uses arrows for navigation).
-      if SNAPPING && snap_modifier?(e) && handle_snap_key(key)
+      if !inhibit && SNAPPING && snap_modifier?(e) && handle_snap_key(key)
         e.call("preventDefault")
         return
       end
       # fall through to forward_key_to_client
     when "Escape"
-      @menu = nil
-      return
+      # Escape closes an open root/window menu and stops there. With no menu up
+      # it belongs to the focused client: it is Doom's menu key, and a terminal
+      # program (vi, less) needs it too.
+      unless @menu.nil?
+        @menu = nil
+        return
+      end
+      # fall through to forward_key_to_client
     end
     win = @wm.focused
     forward_key_to_client(win, "keydown", e) if win&.external?
+  end
+
+  # True when the focused window asked the compositor to stand its keyboard
+  # shortcuts down (hello `inhibit_shortcuts: true`, see Window).
+  def shortcuts_inhibited?
+    f = @wm.focused
+    !f.nil? && f.inhibit_shortcuts == true
   end
 
   # The snap chord modifier. The primary binding is Super/⌘ (metaKey), matching

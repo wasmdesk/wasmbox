@@ -526,3 +526,93 @@ jobs:
         run: |
           if [ -f serve.pid ]; then kill "$(cat serve.pid)" 2>/dev/null || true; fi
           echo "---- serve.log ----"; cat serve.log || true
+
+  doom-smoke:
+    name: Doom client smoke + interaction (cross-browser, log-based)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-go@v7
+        with:
+          go-version: "1.27.2"
+          check-latest: true
+          cache: true
+      - uses: actions/setup-node@v7
+        with:
+          node-version: "24"
+      - name: Checkout wasmdesk/ociapps (OCI packaging CLIs)
+        uses: actions/checkout@v7
+        with:
+          repository: wasmdesk/ociapps
+          path: .ociapps
+      - name: Checkout go-doom/engine (Doom client)
+        uses: actions/checkout@v7
+        with:
+          repository: go-doom/engine
+          path: .doom
+      - name: Install Task
+        uses: arduino/setup-task@v3.0.0
+        with:
+          version: 3.x
+          repo-token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build compositor + hello + dock + serve + ociapps CLIs
+        env:
+          OCIAPPS_DIR: .ociapps
+        run: task build:compositor build:hello build:dock build:serve build:ociapps-cli
+
+      - name: Build the Doom client
+        run: |
+          GOWORK=off GOOS=js GOARCH=wasm go -C .doom build -trimpath -ldflags "-s -w" \
+            -o "$PWD/clients/doom/doom.wasm" ./cmd/doom-wasmbox/
+
+      - name: Fetch + pack the Freedoom IWAD into the /v2/doom-assets mirror
+        run: |
+          set -e
+          FD=0.13.0
+          curl -fsSL -o /tmp/freedoom.zip \
+            "https://github.com/freedoom/freedoom/releases/download/v$FD/freedoom-$FD.zip"
+          got=$(sha256sum /tmp/freedoom.zip | cut -d' ' -f1)
+          want=3f9b264f3e3ce503b4fb7f6bdcb1f419d93c7b546f4df3e874dd878db9688f59
+          [ "$got" = "$want" ] || { echo "::error::freedoom-$FD.zip sha256 mismatch (want $want got $got)"; exit 1; }
+          rm -rf /tmp/freedoom && mkdir -p /tmp/freedoom
+          unzip -oq /tmp/freedoom.zip "freedoom-$FD/freedoom1.wad" -d /tmp/freedoom
+          got=$(sha256sum "/tmp/freedoom/freedoom-$FD/freedoom1.wad" | cut -d' ' -f1)
+          want=7323bcc168c5a45ff10749b339960e98314740a734c30d4b9f3337001f9e703d
+          [ "$got" = "$want" ] || { echo "::error::freedoom1.wad sha256 mismatch (want $want got $got)"; exit 1; }
+          ./bin/ociapps-pack -in "/tmp/freedoom/freedoom-$FD" -manifest packs/doom-assets.toml \
+            -out /tmp/oci-doom-assets -ref doom-assets:latest
+          SITE=/tmp/doom-site
+          rm -rf "$SITE" && mkdir -p "$SITE"
+          cp index.html coi-serviceworker.js bridge.js a11y-bridge.js boot-config.js compositor.worker.js \
+             ociapps-loader.js wasm_exec.js wasmbox.wasm "$SITE/"
+          cp -R clients "$SITE/clients"
+          touch "$SITE/.nojekyll"
+          ./bin/ociapps-static -in /tmp/oci-doom-assets -repo doom-assets -out "$SITE"
+
+      - name: Serve the site (COOP/COEP for SAB)
+        run: |
+          ./bin/wasmbox-serve -addr :8139 -dir /tmp/doom-site > serve.log 2>&1 &
+          echo "$!" > serve.pid
+          for i in $(seq 1 40); do
+            if curl -fsS -o /dev/null "http://127.0.0.1:8139/wasmbox.wasm"; then echo "serve up"; break; fi
+            sleep 0.5
+          done
+
+      - name: Install probe deps + Chromium & Firefox
+        working-directory: test
+        run: |
+          npm install
+          npx playwright install --with-deps chromium firefox
+
+      - name: Run the cross-browser Doom smoke + interaction (chromium + firefox)
+        working-directory: test
+        env:
+          WASMBOX_BASE_URL: "http://127.0.0.1:8139"
+        run: node probe-doom-smoke.mjs
+
+      - name: Stop the doom server
+        if: always()
+        run: |
+          if [ -f serve.pid ]; then kill "$(cat serve.pid)" 2>/dev/null || true; fi
+          echo "---- serve.log ----"; cat serve.log || true
