@@ -455,11 +455,12 @@ try {
   // testing from), NOT the coarse ITEM_H=24 the earlier steps use, so the click
   // lands on the exact centre of a deep row. Applications entries follow
   // APP_LABELS order (05_menu.rb), every id launchable, so:
-  //   0 Terminal  1 Editor  2 Files  3 Hello (wasm)  4 Quake  5 VS Code
-  //   6 VS Code (code-server)  7 Loom  8 Toolkit Showcase  9 Calculator ...
-  // Row 9 (Calculator, index >= 7 → inside the old bug zone) launches a client
+  //   0 Terminal  1 Editor  2 Files  3 Hello (wasm)  4 Quake  5 Doom
+  //   6 VS Code  7 VS Code (code-server)  8 Loom  9 Toolkit Showcase
+  //   10 Calculator ...
+  // Row 10 (Calculator, index >= 7 → inside the old bug zone) launches a client
   // whose window title is a deterministic "Calculator". If the routing drifted
-  // by even one row, a DIFFERENT app (row 8 "Toolkit Showcase") would spawn and
+  // by even one row, a DIFFERENT app (row 9 "Toolkit Showcase") would spawn and
   // the title assertion would fail — so this proves the deep row resolves to
   // its OWN entry.
   const ROW_H = 22;        // toolkit MenuRowH (the painted row height)
@@ -475,7 +476,7 @@ try {
   // its own row k centre = submenuTop + MENU_TOP_PAD + k*ROW_H + ROW_H/2.
   const appSubX = ROOT3_X + MENU_W - 1;
   const appSubTop = ROOT3_Y + MENU_TOP_PAD;
-  const CALC_ROW = 9;
+  const CALC_ROW = 10;
   const calcY = appSubTop + MENU_TOP_PAD + CALC_ROW * ROW_H + Math.floor(ROW_H / 2);
   await page.mouse.click(appSubX + 20, calcY);
   await page.waitForTimeout(2500); // let the Calculator worker register + commit

@@ -35,6 +35,8 @@ vars:
   # in the reference. Default points at the local registry the engine's
   # `task oci-push` (or this Taskfile's oci-push mirror) writes to.
   QUAKE_OCI_REFERENCE: '{{default "http://localhost:5000/quake-assets:1.0" .QUAKE_OCI_REFERENCE}}'
+  # The sibling go-doom/engine checkout that builds clients/doom/doom.wasm.
+  DOOM_DIR: '{{default "../../go-doom/engine" .DOOM_DIR}}'
 
 tasks:
   default:
@@ -115,6 +117,28 @@ tasks:
     generates:
       - clients/quake/quake.wasm
       - clients/quake/quake-wasm.json
+
+  build:doom:
+    desc: Build the cmd/doom-wasmbox client from the sibling go-doom/engine repo into clients/doom/doom.wasm. At runtime it streams freedoom1.wad from the same-origin /v2/doom-assets mirror (see the Pages workflow for how that mirror is assembled and verified). Override DOOM_DIR if the engine lives elsewhere.
+    env:
+      GOWORK: "off"
+      GOOS: js
+      GOARCH: wasm
+      CGO_ENABLED: "0"
+    cmds:
+      - mkdir -p clients/doom
+      - |
+        if [ ! -d "{{.DOOM_DIR}}" ]; then
+          echo "go-doom engine dir not found: {{.DOOM_DIR}}" >&2
+          echo "set DOOM_DIR=/path/to/go-doom/engine" >&2
+          exit 1
+        fi
+      - go -C "{{.DOOM_DIR}}" build -trimpath -ldflags '-s -w' -o "$(pwd)/clients/doom/doom.wasm" ./cmd/doom-wasmbox/
+      - 'echo "build:doom: wrote clients/doom/doom.wasm ($(wc -c < clients/doom/doom.wasm) bytes)"'
+      - sh scripts/wasm-manifest.sh clients/doom/doom.wasm
+    generates:
+      - clients/doom/doom.wasm
+      - clients/doom/doom-wasm.json
 
   build:quake:embed:
     desc: Legacy build of cmd/quake-wasmbox with pak + music baked into the wasm via //go:embed (~200 MB, unusable in browser but kept for native-debug). Use `build:quake` for the OCI-streaming default.

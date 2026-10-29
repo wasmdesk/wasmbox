@@ -1,6 +1,13 @@
 # ---------------------------------------------------------------------------
 class Window
   attr_accessor :id, :title, :x, :y, :w, :h, :fill, :focused, :role, :minimized, :workspace, :shaded, :lock_aspect
+  # Keyboard-shortcuts inhibitor (the analog of Wayland's
+  # zwp_keyboard_shortcuts_inhibitor_v1): while this window has keyboard focus
+  # the compositor does not match its own chords (Exposé, Spotlight, the window
+  # switcher, snapping) and forwards those keys to the client. Set from the
+  # hello's optional `inhibit_shortcuts: true`; games need it (Doom fires with
+  # Ctrl and strafes with Alt, so Ctrl+Alt+arrow must not snap the window).
+  attr_accessor :inhibit_shortcuts
   # Window-snapping / half-tiling state (WindowManager#snap, 04_window_manager.rb).
   # @snap_state is nil for a free (un-snapped) window, or one of :left / :right /
   # :max once the window has been snapped to a screen zone. @pre_snap holds the
@@ -27,6 +34,7 @@ class Window
     # welcome lands). The lock is purely a UI policy; the SAB native_w/native_h
     # are unchanged, so the scale-fit blit still works at any locked size.
     @lock_aspect = 0.0
+    @inhibit_shortcuts = false
     # role is "window" (normal, decorated, cascade-placed) or "panel" (the dock:
     # undecorated, bottom-center anchored, always-on-top). An unknown role MUST
     # behave like a normal window, so anything that is not exactly "panel" is

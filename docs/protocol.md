@@ -95,8 +95,21 @@ The first message a client sends after `Worker` instantiation completes.
   ctl: SharedArrayBuffer,     // optional 1×Int32 seqlock control word (tear-free; see below)
   parent: 7,                  // popups only: parent window_id to anchor to
   rel_x: 20, rel_y: 30,       // popups only: offset inside the parent's body
+  lock_aspect: 4.0 / 3.0,     // optional resize-grip aspect lock (see set_lock_aspect)
+  inhibit_shortcuts: true,    // optional: keyboard-shortcuts inhibitor (see below)
 }
 ```
+
+`inhibit_shortcuts: true` is the analog of Wayland's
+`zwp_keyboard_shortcuts_inhibitor_v1` (wayland-protocols,
+keyboard-shortcuts-inhibit-unstable-v1). While the window has keyboard focus,
+the compositor does not match its own chords: F3 Exposé, ⌘/Ctrl+Space Spotlight,
+Alt/⌘/Ctrl+Tab and Shift+Tab switching, and Super or Ctrl+Alt+arrow snapping.
+Those keys are forwarded to the client instead. Games need this: Doom fires
+with Ctrl, strafes with Alt and loads a game with F3. Grabs the user opened
+with the mouse (a menu, popup or overlay) still take the keyboard first, and
+the mouse remains the way back to the desktop. Only a boolean `true` counts,
+and only for `role: "window"`. There is no `active`/`inactive` event yet.
 
 The SAB is transferred by reference (it is shared, not copied). The compositor
 keeps it for the lifetime of the window and reads `damage` rectangles out of
@@ -190,7 +203,8 @@ The lock may also be declared at hello time via an optional `lock_aspect`
 field on the `hello` payload (same semantics: positive Float, or absent).
 
 Used by the Quake client (4:3) so dragging the grip cannot stretch the
-software-rasterised framebuffer into 16:9.
+software-rasterised framebuffer into 16:9. The Doom client (go-doom/engine
+`cmd/doom-wasmbox`) declares the same 4:3 lock in its `hello`.
 
 ### `launch`  (C → S)
 
@@ -230,6 +244,13 @@ Coordinates are translated from screen-space to surface-local space.
 Only events that land on the focused window are dispatched. Decoration hits
 (titlebar drag, close box, resize grip) are intercepted by the compositor
 and never reach the client.
+
+The compositor keeps a few keys for itself: its chords (Alt/Ctrl+Tab, Super or
+Ctrl+Alt+arrows, F3, ⌘/Ctrl+Space) and every key while one of its overlays
+(Exposé, the switcher, Spotlight) or a popup holds the keyboard. A window
+whose `hello` set `inhibit_shortcuts` receives the chords too. Escape closes
+an open root or window menu; with no menu up it goes to the focused client like
+any other key (it is Doom's menu key).
 
 ### `closed`  (S → C)
 

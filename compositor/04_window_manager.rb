@@ -84,6 +84,11 @@ class WindowManager
     # is part of the wasmbox tree, so the descriptor is always safe — the worker
     # surfaces an error window when the wasm is missing, never the compositor.
     "quake"     => "clients/quake/worker.js",
+    # Bundled Doom client (pure-Go Doom engine, from the sibling go-doom repo,
+    # software renderer). Like quake, its wasm is built by the Pages/CI
+    # workflows; it streams the Freedoom IWAD (BSD-3-Clause, sha256-pinned)
+    # from the same-origin /v2/doom-assets mirror.
+    "doom"      => "clients/doom/worker.js",
     # OCI demo ids (resolved against WASMBOX_OCI_REGISTRIES or the default
     # http://127.0.0.1:5000 registry). The id "hello-oci" mirrors the bundled
     # hello client but pulls it from the registry instead of from disk; it
@@ -150,6 +155,9 @@ class WindowManager
                       categories: ["Utility"] },
     "quake"      => { name: "Quake", generic_name: "Game",
                       comment: "Pure-Go Quake 1", icon: "applications-games",
+                      categories: ["Game", "ActionGame"] },
+    "doom"       => { name: "Doom", generic_name: "Game",
+                      comment: "Pure-Go Doom with Freedoom", icon: "applications-games",
                       categories: ["Game", "ActionGame"] },
     "code"       => { name: "VS Code", generic_name: "Code Editor",
                       comment: "Pure-Go code editor client", icon: "text-editor",
@@ -987,6 +995,14 @@ class WindowManager
       # user drags the grip. Absent / zero / negative -> free resize.
       la = msg[:lock_aspect]
       win.lock_aspect = la.to_f if !la.nil? && la.to_f > 0
+      # Optional keyboard-shortcuts inhibitor (see Window#inhibit_shortcuts).
+      # Only a boolean true counts (from the browser it may arrive as a bridged
+      # JS value, so its string form is compared too; a String "true" is not a
+      # boolean and does not count), and only for a normal window: a panel or a
+      # popup never holds the keyboard focus the inhibitor is tied to.
+      inh = msg[:inhibit_shortcuts]
+      inh_true = inh == true || (!inh.nil? && !inh.is_a?(String) && inh.to_s == "true")
+      win.inhibit_shortcuts = true if inh_true && role == "window"
       :welcome
     when "launch"
       # A client asks the compositor to start another client. Validate the app

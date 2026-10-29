@@ -13,7 +13,9 @@
 # the public go-quake1/engine sibling and streams LibreQuake's BSD-licensed
 # pak0 (~44 MB, free/libre content with maps/start.bsp, sha256-verified) from a
 # same-origin /v2/quake-assets mirror -- GPL engine + BSD assets = a fully free
-# stack, no id proprietary data. The "vscode" code-server dom-window still needs a live
+# stack, no id proprietary data. Doom does the same: built from the public
+# go-doom/engine sibling, it streams Freedoom's BSD-licensed freedoom1.wad
+# (~29 MB, sha256-verified twice) from /v2/doom-assets. The "vscode" code-server dom-window still needs a live
 # backend, so on this static host use the pure-Go "code" client (labelled "VS
 # Code" in the menu). The /v2 mirror + ghcr publish below are the additive
 # OCI-streaming demo path, not the launch path.
@@ -75,6 +77,14 @@ jobs:
           repository: go-quake1/engine
           path: _engine
 
+      # The Doom client is built the same way from the public go-doom/engine
+      # sibling (cmd/doom-wasmbox, software renderer).
+      - name: Checkout go-doom/engine
+        uses: actions/checkout@v7
+        with:
+          repository: go-doom/engine
+          path: _doom
+
       - uses: actions/setup-go@v7
         with:
           go-version: "1.27.2"
@@ -121,6 +131,11 @@ jobs:
           GOWORK=off GOOS=js GOARCH=wasm go -C _engine build -trimpath -tags no_embed_assets \
             -ldflags "-s -w -X main.OCIReference=/quake-assets:latest" \
             -o "$PWD/clients/quake/quake.wasm" ./cmd/quake-wasmbox/
+          # Doom: streams the Freedoom IWAD from the same-origin
+          # /v2/doom-assets mirror assembled below (the wasm pins its sha256);
+          # clients/doom/worker.js loads ../../wasm_exec.js like quake.
+          GOWORK=off GOOS=js GOARCH=wasm go -C _doom build -trimpath -ldflags "-s -w" \
+            -o "$PWD/clients/doom/doom.wasm" ./cmd/doom-wasmbox/
           # Content-hash manifests for EVERY lazily-loaded client wasm, read by
           # coi-serviceworker.js to cache each app in CacheStorage keyed by its
           # sha256 -- re-downloaded only when its bytes change. GitHub Pages'
@@ -150,6 +165,31 @@ jobs:
           GOWORK=off go -C _engine run ./cmd/oci-pack-quake \
             -pak /tmp/lite/id1/pak0.pak -music-dir /tmp/empty-music -out /tmp/oci-quake-assets
 
+      - name: Fetch + pack the Freedoom IWAD (OCI /v2/doom-assets mirror)
+        run: |
+          set -e
+          # Freedoom (https://freedoom.github.io) is a free Doom IWAD under the
+          # BSD 3-clause licence -- GPL engine + BSD content, no id Software
+          # data. Two pins: the release zip against the sha256 the Freedoom
+          # project lists in its signed freedoom-$FD-CHECKSUM release asset,
+          # and the extracted freedoom1.wad against the digest the client
+          # (go-doom/engine cmd/doom-wasmbox main.WADSHA256) accepts.
+          FD=0.13.0
+          curl -fsSL -o /tmp/freedoom.zip \
+            "https://github.com/freedoom/freedoom/releases/download/v$FD/freedoom-$FD.zip"
+          got=$(sha256sum /tmp/freedoom.zip | cut -d' ' -f1)
+          want=3f9b264f3e3ce503b4fb7f6bdcb1f419d93c7b546f4df3e874dd878db9688f59
+          echo "freedoom-$FD.zip sha256: $got (want $want)"
+          [ "$got" = "$want" ] || { echo "::error::freedoom-$FD.zip sha256 mismatch (want $want, got $got)"; exit 1; }
+          rm -rf /tmp/freedoom && mkdir -p /tmp/freedoom
+          unzip -oq /tmp/freedoom.zip "freedoom-$FD/freedoom1.wad" -d /tmp/freedoom
+          got=$(sha256sum "/tmp/freedoom/freedoom-$FD/freedoom1.wad" | cut -d' ' -f1)
+          want=7323bcc168c5a45ff10749b339960e98314740a734c30d4b9f3337001f9e703d
+          echo "freedoom1.wad sha256: $got (want $want)"
+          [ "$got" = "$want" ] || { echo "::error::freedoom1.wad sha256 mismatch (want $want, got $got)"; exit 1; }
+          ./bin/ociapps-pack -in "/tmp/freedoom/freedoom-$FD" -manifest packs/doom-assets.toml \
+            -out /tmp/oci-doom-assets -ref doom-assets:latest
+
       - name: Assemble the Pages site (desktop + shared SDK + static /v2 mirror)
         run: |
           set -e
@@ -176,6 +216,9 @@ jobs:
           # -X main.OCIReference=/quake-assets:latest, streams pak0 from here
           # (resolved against the site root by clients/quake/worker.js).
           ./bin/ociapps-static -in /tmp/oci-quake-assets -repo quake-assets -out "$SITE"
+          # Same-origin Doom asset mirror (freedoom1.wad), pulled by
+          # clients/doom from <site root>/v2/doom-assets.
+          ./bin/ociapps-static -in /tmp/oci-doom-assets -repo doom-assets -out "$SITE"
           echo "assembled $SITE: $(find "$SITE/v2" -type f | wc -l) /v2 files"
 
       # Publish the canonical app images to ghcr (the source of truth). The

@@ -57,6 +57,9 @@ var expectedFiles = map[string][]string{
 	"files":    {"worker.js", "wasm_exec.js", "sdk.js", "files.wasm"},
 	"code":     {"worker.js", "wasm_exec.js", "sdk.js", "code.wasm"},
 	"quake":    {"worker.js", "wasm_exec.js", "quake.wasm"},
+	// Not an app image: the Doom client's game data (Freedoom), streamed by
+	// clients/doom from the same-origin /v2/doom-assets mirror.
+	"doom-assets": {"freedoom1.wad"},
 }
 
 func repoRoot(t *testing.T) string {

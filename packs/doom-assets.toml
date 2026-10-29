@@ -1,0 +1,14 @@
+# ociapps-pack manifest for the Doom client's game data.
+#
+# One layer: freedoom1.wad, Freedoom: Phase 1 0.13.0 (BSD-3-Clause,
+# https://freedoom.github.io). It is never committed: the Pages and CI
+# workflows download freedoom-0.13.0.zip from the official GitHub release,
+# check it against the sha256 in the release's signed CHECKSUM file, extract
+# freedoom1.wad, check that sha256 too, and pack it with this manifest into
+# the same-origin /v2/doom-assets mirror. The client (go-doom/engine
+# cmd/doom-wasmbox) pins the same sha256 and accepts no other bytes.
+
+mediatype = "application/vnd.oci.image.manifest.v1+json"
+
+[files]
+"freedoom1.wad" = "freedoom1.wad"
