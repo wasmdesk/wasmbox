@@ -3,17 +3,17 @@ module github.com/wasmdesk/wasmbox
 go 1.27.2
 
 require (
-	github.com/go-embedded-ruby/ruby v0.8.1
+	github.com/go-embedded-ruby/ruby v0.8.3
 	github.com/go-icons/iconoir v0.3.0
 	github.com/go-opentype/fonts v0.14.0
 	github.com/go-ruby-parser/parser v0.13.1
 	github.com/go-webengine/browserproxy v0.1.6
 	github.com/go-widgets/mvvm v0.15.0
 	github.com/go-widgets/painter v0.16.0
-	github.com/go-widgets/toolkit v0.345.1
+	github.com/go-widgets/toolkit v0.345.2
 	github.com/go-widgets/toolkit/rougelex v0.2.0
 	github.com/grpc-transports/websocket v0.4.0
-	github.com/wasmdesk/coreutils v0.0.0-20261021205337-0d2ca5644f7e
+	github.com/wasmdesk/coreutils v0.5.0
 	google.golang.org/grpc v1.86.0-dev
 )
 
@@ -152,7 +152,7 @@ require (
 	github.com/go-ruby-capistrano/capistrano v0.0.0-20260927173236-3b90af3c6888 // indirect
 	github.com/go-ruby-capybara/capybara v0.0.0-20260910084630-0731c9ea8d6d // indirect
 	github.com/go-ruby-cgi/cgi v0.0.0-20260916091525-3d328d3ff447 // indirect
-	github.com/go-ruby-chronic/chronic v0.0.0-20260916091614-bd47d560b6f4 // indirect
+	github.com/go-ruby-chronic/chronic v0.1.0 // indirect
 	github.com/go-ruby-cmath/cmath v0.0.0-20260916091648-4963ab4145f7 // indirect
 	github.com/go-ruby-concurrent-ruby/concurrent-ruby v0.0.0-20260916091840-b820f7a57284 // indirect
 	github.com/go-ruby-confd/confd v0.0.0-20260825131031-1ac780d51c57 // indirect
