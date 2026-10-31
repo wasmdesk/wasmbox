@@ -38,6 +38,8 @@
 
 importScripts("./bridge.js");
 importScripts("./ociapps-loader.js");
+importScripts("./audio-proto.js");
+importScripts("./audio-relay.js");
 importScripts("./wasm_exec.js");
 
 const B = globalThis.WASMBOX_BRIDGE;
@@ -435,7 +437,7 @@ globalThis.wasmboxSpawnWorker = function (url) {
     },
     addEventListener(name, cb) { channel.port1.addEventListener(name, cb); },
     removeEventListener(name, cb) { channel.port1.removeEventListener(name, cb); },
-    terminate() { try { channel.port1.close(); } catch (_) {} worker.terminate(); },
+    terminate() { globalThis.wasmboxAudioClose(channel.port1); try { channel.port1.close(); } catch (_) {} worker.terminate(); },
   };
 };
 
@@ -525,6 +527,7 @@ globalThis.wasmboxSpawnFromOCI = async function (ref) {
     addEventListener(name, cb) { channel.port1.addEventListener(name, cb); },
     removeEventListener(name, cb) { channel.port1.removeEventListener(name, cb); },
     terminate() {
+      globalThis.wasmboxAudioClose(channel.port1);
       try { channel.port1.close(); } catch (_) {}
       // Revoke blob URLs to free memory. Safe to call after the worker has
       // already imported them.
@@ -834,6 +837,7 @@ globalThis.wasmboxPostMessage = function (worker, msg) { worker.postMessage(msg)
 // _port handle) AFTER attaching so the SDK's `hello` is not dropped.
 globalThis.wasmboxAttachWorker = function (worker, busId) {
   worker.addEventListener("message", function (e) {
+    if (globalThis.wasmboxAudioIntercept(worker, e.data)) return;   // audio_*: relayed to the page, not Ruby
     const bus = fakeDocument.getElementById(busId);
     if (!bus) return;
     bus.dispatchEvent(new CustomEvent("wasmbox-msg", { detail: e.data }));
@@ -1284,6 +1288,7 @@ globalThis.wasmboxSpawnFromOCIAndAttach = function (ref, busId) {
     }
     // Same listener shape as wasmboxAttachWorker.
     wrapper.addEventListener("message", function (e) {
+      if (globalThis.wasmboxAudioIntercept(wrapper, e.data)) return;
       bus.dispatchEvent(new CustomEvent("wasmbox-msg", { detail: e.data }));
     });
     if (wrapper._port && typeof wrapper._port.start === "function") {

@@ -69,6 +69,20 @@ jobs:
       - name: Native scene tests
         run: go test ./...
 
+      # audioring is its own module (clients import it without the compositor's
+      # dependency tree), so `go test ./...` above does not reach it.
+      - name: audioring — native tests (100% coverage), fuzz smoke
+        working-directory: audioring
+        run: |
+          go vet ./...
+          go test -cover ./...
+          go test -run '^$' -fuzz FuzzIndexArithmetic -fuzztime 10s .
+          go test -run '^$' -fuzz FuzzFree -fuzztime 5s .
+
+      - name: audioring — GOOS=js SharedArrayBuffer adapter under node (100% coverage)
+        working-directory: audioring
+        run: GOOS=js GOARCH=wasm go test -cover -exec "$(go env GOROOT)/lib/wasm/go_js_wasm_exec" ./...
+
       - name: rbtest — compositor.rb under go-embedded-ruby
         run: go run ./cmd/rbtest
 
@@ -159,6 +173,12 @@ jobs:
         env:
           WASMBOX_BASE_URL: "http://127.0.0.1:8137"
         run: node render.mjs
+
+      - name: Run headless audio-relay probe (AudioContext running, worklet frames played, planted negative, hostile opens)
+        working-directory: test
+        env:
+          WASMBOX_BASE_URL: "http://127.0.0.1:8137"
+        run: node probe-audio.mjs
 
       - name: Run headless popup probe (open + grab-dismiss)
         working-directory: test

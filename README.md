@@ -144,6 +144,21 @@ never a path or command line.
 > offline WhiteSur/Safari shell (the page is `COEP: require-corp`, so it cannot
 > embed live cross-origin sites directly — tiles open local placeholder pages).
 
+### Audio
+
+A worker has no `AudioContext`, so clients cannot play sound themselves. wasmbox
+relays it: a client writes interleaved float32 PCM into a lock-free
+single-producer/single-consumer ring in a `SharedArrayBuffer` and sends
+`audio_open`; the page owns one `AudioContext` and plays each ring through an
+`AudioWorkletNode` that reads it on the audio thread (no `postMessage` per buffer),
+one `GainNode` per window. The context resumes on the first click or key. Rates,
+channel count and ring size are validated at both hops. Go clients import
+`github.com/wasmdesk/wasmbox/audioring`, JS clients `clients/sdk/audio.js`; the wire
+format is in [`docs/protocol.md`](docs/protocol.md#audio-audio_open-audio_welcome-audio_close).
+`test/probe-audio.mjs` is the headless-Chromium check (context running after a
+gesture, frames played by the worklet, a planted negative, hostile opens). The
+Quake and Doom clients are being moved onto it; until they are, they stay silent.
+
 ## Pick a window decoration
 
 Wasmbox ships **16 registered decoration presets** (2 layouts × 7 GTK palettes,
