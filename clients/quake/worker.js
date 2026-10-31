@@ -200,6 +200,12 @@ self.addEventListener("message", function bootPortHandler(ev) {
 
 const isOCI = self.location.protocol === "blob:";
 
+// Test hook (test/probe-audio.mjs, the planted negative): ?nowrite=1 makes the
+// engine's audio relay open its ring but never write to it.
+try {
+  if (new URLSearchParams(self.location.search).get("nowrite") === "1") self.__wasmboxNoAudioWrite = true;
+} catch (_) {}
+
 (async () => {
   // Pick the SAB / framebuffer dims FIRST + publish them on globals
   // before instantiating quake.wasm. The Go side reads __quake_fb_w

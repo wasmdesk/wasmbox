@@ -121,9 +121,9 @@ workflows download the official release, check the zip against the sha256 in
 Freedoom's signed `CHECKSUM` file, check the extracted `freedoom1.wad` against
 the digest the client pins, then pack it with `packs/doom-assets.toml` into
 `/v2/doom-assets`. The client fetches only from its own origin, recomputes the
-digest, and bounds the WAD's lump directory before the engine reads it. Sound is
-wired, but Chromium exposes no `AudioContext` to a worker, so Doom is silent there
-(`DOOM: ... audio=unavailable` in the console). `test/probe-doom-smoke.mjs` is the
+digest, and bounds the WAD's lump directory before the engine reads it. Sound
+effects and OPL music play through the [audio relay](#audio) (the console shows
+`DOOM: ... audio=relay`). `test/probe-doom-smoke.mjs` is the
 cross-browser check: it boots the client, opens the menu with Escape, starts E1M1
 and walks, asserting on the client's `DOOM: state=...` log lines and on frames
 read inside the compositor worker.
@@ -156,8 +156,10 @@ channel count and ring size are validated at both hops. Go clients import
 `github.com/wasmdesk/wasmbox/audioring`, JS clients `clients/sdk/audio.js`; the wire
 format is in [`docs/protocol.md`](docs/protocol.md#audio-audio_open-audio_welcome-audio_close).
 `test/probe-audio.mjs` is the headless-Chromium check (context running after a
-gesture, frames played by the worklet, a planted negative, hostile opens). The
-Quake and Doom clients are being moved onto it; until they are, they stay silent.
+gesture, frames played by the worklet, a planted negative with the writer disabled,
+hostile opens); with `AUDIO_CLIENT=quake` or `doom` it runs against the real
+engines, which both use the relay (Quake 11025 Hz, Doom 44.1 kHz). Unfocused windows
+are not ducked: all open windows mix at unity gain.
 
 ## Pick a window decoration
 

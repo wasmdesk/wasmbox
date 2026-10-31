@@ -541,6 +541,13 @@ jobs:
           WASMBOX_BASE_URL: "http://127.0.0.1:8138"
         run: node probe-quake-smoke.mjs
 
+      - name: Run the audio relay probe against the real Quake client (running context, frames played, planted negative)
+        working-directory: test
+        env:
+          WASMBOX_BASE_URL: "http://127.0.0.1:8138"
+          AUDIO_CLIENT: quake
+        run: node probe-audio.mjs
+
       - name: Stop the quake server
         if: always()
         run: |
@@ -630,6 +637,13 @@ jobs:
         env:
           WASMBOX_BASE_URL: "http://127.0.0.1:8139"
         run: node probe-doom-smoke.mjs
+
+      - name: Run the audio relay probe against the real Doom client (running context, frames played, planted negative)
+        working-directory: test
+        env:
+          WASMBOX_BASE_URL: "http://127.0.0.1:8139"
+          AUDIO_CLIENT: doom
+        run: node probe-audio.mjs
 
       - name: Stop the doom server
         if: always()

@@ -31,6 +31,14 @@ const UNDERRUN_BOUND = Number(process.env.UNDERRUN_BOUND || 5);
 const WINDOW_MS = Number(process.env.AUDIO_WINDOW_MS || 2000);
 const wait = (ms) => new Promise((r) => setTimeout(r, ms));
 const BOOT_MS = 60000;
+// AUDIO_CLIENT: tone (clients/audiotest, default), quake or doom (the real
+// engines, which need their asset mirror served: see the quake-smoke and
+// doom-smoke jobs). A real engine boots slowly, so wait for its first samples.
+const CLIENT = process.env.AUDIO_CLIENT || "tone";
+const CLIENT_URL = { tone: "clients/audiotest/worker.js", quake: "clients/quake/worker.js", doom: "clients/doom/worker.js" }[CLIENT];
+if (!CLIENT_URL) throw new Error(`AUDIO_CLIENT must be tone, quake or doom, got ${CLIENT}`);
+const REAL = CLIENT !== "tone";
+const FIRST_SAMPLES_MS = Number(process.env.AUDIO_FIRST_SAMPLES_MS || 120000);
 
 // ev evaluates WITHOUT a user gesture. Playwright's page.evaluate runs with
 // userGesture:true, which would activate the page and let the AudioContext
@@ -64,9 +72,9 @@ async function boot(browser, clientURL) {
 }
 
 // measure runs the positive assertions on a page and returns {ok, why, ...}.
-async function measure(p) {
+async function measure(p, NEGATIVE = false) {
   const out = { ok: false, why: "" };
-  if (!(await until(p, "globalThis.__wasmboxAudio && globalThis.__wasmboxAudio.stats().some((s) => s.attached)", 15000))) {
+  if (!(await until(p, "globalThis.__wasmboxAudio && globalThis.__wasmboxAudio.stats().some((s) => s.attached)", REAL ? BOOT_MS : 15000))) {
     out.why = "no attached audio session"; return out;
   }
   out.stateBeforeGesture = await ev(p, "globalThis.__wasmboxAudio.state()");
@@ -78,6 +86,13 @@ async function measure(p) {
     await p.waitForFunction(() => globalThis.__wasmboxAudio.state() === "running", { timeout: 5000 });
   } catch (_) { out.why = `AudioContext not running after gesture (state=${await p.evaluate(() => globalThis.__wasmboxAudio.state())})`; return out; }
   out.contextRate = await p.evaluate(() => globalThis.__wasmboxAudio.contextRate());
+  if (REAL) {
+    // The ring opens at engine start; samples flow once the assets are loaded
+    // and the first frames run. In the planted negative they never do, so this
+    // wait is short there.
+    const limit = NEGATIVE ? 8000 : FIRST_SAMPLES_MS;
+    await until(p, "globalThis.__wasmboxAudio.stats().some((s) => s.played > 0)", limit);
+  }
   await wait(300); // let the stream prime
   const a = await p.evaluate(() => globalThis.__wasmboxAudio.stats()[0]);
   await wait(WINDOW_MS);
@@ -120,10 +135,10 @@ const browser = await pw.chromium.launch({
 try {
   // --- positive ---
   {
-    const { p, errs } = await boot(browser, "clients/audiotest/worker.js");
+    const { p, errs } = await boot(browser, CLIENT_URL);
     const r = await measure(p);
     console.log("positive:", JSON.stringify(r));
-    check(r.ok, "tone client: context running, frames played, underruns under bound", r.ok ? "" : r.why);
+    check(r.ok, `${CLIENT} client: context running, frames played, underruns under bound`, r.ok ? "" : r.why);
     if (r.ok) {
       const ms = (r.capacityFrames / r.contextRate * 1000).toFixed(1);
       console.log(`latency: ring ${r.capacityFrames} frames @ client ${r.clientRate} Hz = ${(r.capacityFrames / r.clientRate * 1000).toFixed(1)} ms capacity; resampled to ${r.contextRate} Hz; underruns ${r.underruns}/${WINDOW_MS} ms; overruns ${r.overruns}  (${ms} ms at context rate)`);
@@ -137,14 +152,14 @@ try {
   }
   // --- planted negative ---
   {
-    const { p } = await boot(browser, "clients/audiotest/worker.js?nowrite=1");
-    const r = await measure(p);
+    const { p } = await boot(browser, CLIENT_URL + "?nowrite=1");
+    const r = await measure(p, true);
     console.log("negative:", JSON.stringify(r));
     check(!r.ok && r.playedFrames === 0 && r.why === "worklet played 0 frames", "planted negative (ring writer disabled) is DETECTED: played stays 0 and the assertions fail", r.why);
     await p.close();
   }
-  // --- hostile ---
-  {
+  // --- hostile (the synthetic client only: real engines never send malformed opens) ---
+  if (CLIENT === "tone") {
     const { p } = await boot(browser, "clients/audiotest/worker.js?evil=1");
     await wait(2500);
     const cw = await compositorWorker(p);
