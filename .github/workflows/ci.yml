@@ -69,6 +69,20 @@ jobs:
       - name: Native scene tests
         run: go test ./...
 
+      # audioring is its own module (clients import it without the compositor's
+      # dependency tree), so `go test ./...` above does not reach it.
+      - name: audioring — native tests (100% coverage), fuzz smoke
+        working-directory: audioring
+        run: |
+          go vet ./...
+          go test -cover ./...
+          go test -run '^$' -fuzz FuzzIndexArithmetic -fuzztime 10s .
+          go test -run '^$' -fuzz FuzzFree -fuzztime 5s .
+
+      - name: audioring — GOOS=js SharedArrayBuffer adapter under node (100% coverage)
+        working-directory: audioring
+        run: GOOS=js GOARCH=wasm go test -cover -exec "$(go env GOROOT)/lib/wasm/go_js_wasm_exec" ./...
+
       - name: rbtest — compositor.rb under go-embedded-ruby
         run: go run ./cmd/rbtest
 
@@ -159,6 +173,12 @@ jobs:
         env:
           WASMBOX_BASE_URL: "http://127.0.0.1:8137"
         run: node render.mjs
+
+      - name: Run headless audio-relay probe (AudioContext running, worklet frames played, planted negative, hostile opens)
+        working-directory: test
+        env:
+          WASMBOX_BASE_URL: "http://127.0.0.1:8137"
+        run: node probe-audio.mjs
 
       - name: Run headless popup probe (open + grab-dismiss)
         working-directory: test
@@ -404,7 +424,7 @@ jobs:
         run: |
           SITE=/tmp/wasmbox-site
           rm -rf "$SITE" && mkdir -p "$SITE/clients/sdk"
-          cp index.html coi-serviceworker.js bridge.js a11y-bridge.js boot-config.js \
+          cp index.html coi-serviceworker.js bridge.js a11y-bridge.js audio-proto.js audio-host.js audio-relay.js audio-worklet.js boot-config.js \
              compositor.worker.js ociapps-loader.js wasm_exec.js wasmbox.wasm "$SITE/"
           cp clients/sdk/sdk.js "$SITE/clients/sdk/sdk.js"
           touch "$SITE/.nojekyll"
@@ -494,7 +514,7 @@ jobs:
             -pak /tmp/lite/id1/pak0.pak -music-dir /tmp/empty-music -out /tmp/oci-quake-assets
           SITE=/tmp/quake-site
           rm -rf "$SITE" && mkdir -p "$SITE"
-          cp index.html coi-serviceworker.js bridge.js a11y-bridge.js boot-config.js compositor.worker.js \
+          cp index.html coi-serviceworker.js bridge.js a11y-bridge.js audio-proto.js audio-host.js audio-relay.js audio-worklet.js boot-config.js compositor.worker.js \
              ociapps-loader.js wasm_exec.js wasmbox.wasm "$SITE/"
           cp -R clients "$SITE/clients"
           touch "$SITE/.nojekyll"
@@ -584,7 +604,7 @@ jobs:
             -out /tmp/oci-doom-assets -ref doom-assets:latest
           SITE=/tmp/doom-site
           rm -rf "$SITE" && mkdir -p "$SITE"
-          cp index.html coi-serviceworker.js bridge.js a11y-bridge.js boot-config.js compositor.worker.js \
+          cp index.html coi-serviceworker.js bridge.js a11y-bridge.js audio-proto.js audio-host.js audio-relay.js audio-worklet.js boot-config.js compositor.worker.js \
              ociapps-loader.js wasm_exec.js wasmbox.wasm "$SITE/"
           cp -R clients "$SITE/clients"
           touch "$SITE/.nojekyll"

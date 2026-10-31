@@ -206,6 +206,86 @@ Used by the Quake client (4:3) so dragging the grip cannot stretch the
 software-rasterised framebuffer into 16:9. The Doom client (go-doom/engine
 `cmd/doom-wasmbox`) declares the same 4:3 lock in its `hello`.
 
+### Audio: `audio_open`, `audio_welcome`, `audio_close`
+
+`AudioContext` does not exist in a DedicatedWorker, and every client (and the
+compositor) is one. A client therefore does not play sound itself: it writes PCM
+into a ring in a `SharedArrayBuffer`, and the **page** (main thread) owns the one
+`AudioContext` and plays each client's ring through an `AudioWorkletNode`. The
+worklet reads the ring on the audio thread, so there is no `postMessage` per
+buffer and no main-thread work in steady state.
+
+```
+client worker ── audio_open{sab,…} ──► compositor worker ── validate ──► page
+      │ writes PCM into the ring           (audio-relay.js)      (audio-host.js)
+      └──────────── SharedArrayBuffer ◄──── AudioWorkletNode reads it (audio-worklet.js)
+```
+
+```js
+// C → S (once per client port)
+{ type: "audio_open", window_id: 7,   // informative label only
+  sampleRate: 48000,                  // integer, 8000..192000
+  channels: 2,                        // 1 or 2
+  capacityFrames: 1024,               // power of two, 256..65536
+  sab: SharedArrayBuffer }            // exactly 64 + capacityFrames*channels*4 bytes
+// S → C
+{ type: "audio_welcome", ok: true, id: 3 }
+{ type: "audio_welcome", ok: false, reason: "sab size does not match the parameters" }
+// C → S
+{ type: "audio_close" }
+```
+
+`audio_*` messages are consumed by the compositor's JS layer and never reach the
+Ruby window manager. A client's audio session is closed by `audio_close` or when
+its worker is terminated.
+
+**Ring layout.** 16 `Int32` header words (64 bytes), then `capacityFrames *
+channels` interleaved `float32` (nominal -1..1):
+
+| word | owner | meaning |
+|---|---|---|
+| 0 write | client | frames written, free-running `uint32` |
+| 1 read | worklet | frames consumed, free-running `uint32` |
+| 2 underruns | worklet | starvation events after playback started |
+| 3 played | worklet | frames output |
+| 4 overruns | client | frames dropped because the ring was full |
+| 5 state | either | 0 open, 1 closed (the worklet stops; writers refuse) |
+
+Single producer, single consumer, no locks: the client stores the samples and
+then the write index (`Atomics.store`, a release); the worklet loads the write
+index (`Atomics.load`, an acquire) and then reads the samples. A power-of-two
+capacity keeps the free-running counters correct across the 2^32 wrap. The
+writer never blocks: what does not fit is dropped and counted.
+
+**Playback.** One `AudioContext` for the desktop; each ring is
+`AudioWorkletNode → GainNode → destination`, so the browser mixes the windows.
+The processor handles the 128-frame render quantum, zero-pads and counts an
+underrun once per starvation event (then re-primes two quanta, so a gap is one
+gap rather than a stutter), and resamples with linear interpolation when the
+client rate differs from the context rate. Latency is the ring's fill level,
+bounded by `capacityFrames`; clients aim for about half of it.
+
+**Mixing policy.** All open windows are mixed at unity gain. Unfocused windows
+are **not** ducked or muted: focus lives in the Ruby window manager, and the
+per-window `GainNode` is already there (`__wasmboxAudio.setGain(id, v)`) for a
+later policy.
+
+**Autoplay.** The context is created on the first `audio_open` and is suspended
+until the first user gesture on the page (pointer, key, touch), which resumes it;
+an earlier gesture is honoured through `navigator.userActivation`.
+
+**Security.** `sampleRate`, `channels`, `capacityFrames` and the buffer are
+untrusted. They are bounded as above, copied once, and the SAB must be a
+`SharedArrayBuffer` of exactly the implied size; the page validates again after
+the compositor worker. At most 8 sessions exist at once, one per client port.
+The session is bound to the compositor-side port, never to a client-supplied id,
+and the page hands a ring only to the worklet created for it: a client holds no
+reference to another client's ring and cannot read it.
+
+**Clients.** Go: `github.com/wasmdesk/wasmbox/audioring` (`audioring.Open`,
+`Writer.Write`). JavaScript: `clients/sdk/audio.js` (`WasmboxAudio`). Test client
+and probe: `clients/audiotest`, `test/probe-audio.mjs`.
+
 ### `launch`  (C → S)
 
 A client (typically the dock `panel`) asks the compositor to start another

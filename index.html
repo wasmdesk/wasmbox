@@ -115,6 +115,10 @@
      read + drive the canvas-painted desktop. Self-contained; wired to the
      worker below via WASMBOX_A11Y.attachWorker. -->
 <script src="a11y-bridge.js"></script>
+<!-- Audio relay: the page owns the AudioContext (a worker has none); client
+     rings are played by an AudioWorklet. See docs/protocol.md, "Audio". -->
+<script src="audio-proto.js"></script>
+<script src="audio-host.js"></script>
 <script>
 // ---------------------------------------------------------------------------
 // Step C bootstrap. The main thread is a thin shell:
@@ -263,6 +267,7 @@ const worker = new Worker(workerURL, { type: "classic" });
 // screen reader activates a window control. Guarded so a build that omits
 // a11y-bridge.js still boots.
 if (globalThis.WASMBOX_A11Y) globalThis.WASMBOX_A11Y.attachWorker(worker);
+if (globalThis.WASMBOX_AUDIO_HOST) globalThis.WASMBOX_AUDIO_HOST.attach(worker);
 
 // Boot the compositor: send the canvas + the initial viewport + the current
 // localStorage snapshot so restore_layout sees what survived the reload.
