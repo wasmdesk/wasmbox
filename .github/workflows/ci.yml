@@ -424,7 +424,7 @@ jobs:
         run: |
           SITE=/tmp/wasmbox-site
           rm -rf "$SITE" && mkdir -p "$SITE/clients/sdk"
-          cp index.html coi-serviceworker.js bridge.js a11y-bridge.js boot-config.js \
+          cp index.html coi-serviceworker.js bridge.js a11y-bridge.js audio-proto.js audio-host.js audio-relay.js audio-worklet.js boot-config.js \
              compositor.worker.js ociapps-loader.js wasm_exec.js wasmbox.wasm "$SITE/"
           cp clients/sdk/sdk.js "$SITE/clients/sdk/sdk.js"
           touch "$SITE/.nojekyll"
@@ -514,7 +514,7 @@ jobs:
             -pak /tmp/lite/id1/pak0.pak -music-dir /tmp/empty-music -out /tmp/oci-quake-assets
           SITE=/tmp/quake-site
           rm -rf "$SITE" && mkdir -p "$SITE"
-          cp index.html coi-serviceworker.js bridge.js a11y-bridge.js boot-config.js compositor.worker.js \
+          cp index.html coi-serviceworker.js bridge.js a11y-bridge.js audio-proto.js audio-host.js audio-relay.js audio-worklet.js boot-config.js compositor.worker.js \
              ociapps-loader.js wasm_exec.js wasmbox.wasm "$SITE/"
           cp -R clients "$SITE/clients"
           touch "$SITE/.nojekyll"
@@ -604,7 +604,7 @@ jobs:
             -out /tmp/oci-doom-assets -ref doom-assets:latest
           SITE=/tmp/doom-site
           rm -rf "$SITE" && mkdir -p "$SITE"
-          cp index.html coi-serviceworker.js bridge.js a11y-bridge.js boot-config.js compositor.worker.js \
+          cp index.html coi-serviceworker.js bridge.js a11y-bridge.js audio-proto.js audio-host.js audio-relay.js audio-worklet.js boot-config.js compositor.worker.js \
              ociapps-loader.js wasm_exec.js wasmbox.wasm "$SITE/"
           cp -R clients "$SITE/clients"
           touch "$SITE/.nojekyll"
