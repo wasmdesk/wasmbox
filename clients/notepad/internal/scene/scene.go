@@ -136,7 +136,7 @@ func New(w, h int) *State {
 
 	// Editor on the right.
 	s.editor = toolkit.NewTextView(s.docSet[s.activeIdx].Content)
-	s.editor.Focused().Set(true)
+	s.editor.HasFocus().Set(true)
 	s.editor.Text().Subscribe(func(string) { s.updateStatus() })
 
 	// Status bar.

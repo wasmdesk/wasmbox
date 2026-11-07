@@ -176,7 +176,7 @@ func NewWithVFS(width, height int, vfs sharedvfs.VFS) *SceneState {
 	// the editor pane's backgrounds pixel-identical to the pre-migration
 	// renderer (the native + browser probes sample flat #1E1E1E bands).
 	s.Editor.HighlightCurrentLine = false
-	s.Editor.Focused().Set(true)
+	s.Editor.HasFocus().Set(true)
 
 	s.sidebar = toolkit.NewListBox(nil)
 	s.sidebar.RowHeight = SidebarRowHeight
@@ -350,7 +350,7 @@ func (s *SceneState) OpenFile(path string) bool {
 	}
 	s.Editor.SetText(string(data))
 	s.Editor.Language = languageForPath(path)
-	s.Editor.Focused().Set(true)
+	s.Editor.HasFocus().Set(true)
 	s.CurrentPath = path
 	s.Flash = FlashNone
 	s.LiveServerPopupOpen = false
@@ -496,5 +496,5 @@ func (s *SceneState) placeCursorAt(x, y int) {
 	}
 	s.Editor.CursorLine().Set(row)
 	s.Editor.CursorCol().Set(col)
-	s.Editor.Focused().Set(true)
+	s.Editor.HasFocus().Set(true)
 }
