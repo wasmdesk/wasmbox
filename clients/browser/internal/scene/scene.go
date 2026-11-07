@@ -216,7 +216,7 @@ func New(w, h int) *State {
 		TextPad:     addrTextPad,
 	}
 	s.addr.Commit = mvvm.NewCommand(func() { s.dirty = s.startNavigate(s.addr.Editing().Get()) }, nil)
-	for _, o := range []mvvm.Changeable{s.addr.Editing(), s.addr.Focused()} {
+	for _, o := range []mvvm.Changeable{s.addr.Editing(), s.addr.HasFocus()} {
 		o.SubscribeChanged(func() { s.dirty = true })
 	}
 
@@ -426,7 +426,7 @@ func (s *State) HandleWheel(dy int) bool {
 // Otherwise, when a page is shown, the key is forwarded to the proxy (for
 // server-side scrolling). Returns true if the key changed something worth a redraw.
 func (s *State) HandleKey(key string) bool {
-	if s.addr.Focused().Get() {
+	if s.addr.HasFocus().Get() {
 		s.dirty = false
 		if isPrintable(key) {
 			s.addr.OnEvent(toolkit.Event{Kind: toolkit.EventChar, Code: key})

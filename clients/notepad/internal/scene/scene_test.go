@@ -125,7 +125,7 @@ func TestHandleMouseRoutes(t *testing.T) {
 	// Click on the editor (right pane) — focuses it.
 	er := s.editor.Bounds()
 	s.HandleMouse(er.X+10, er.Y+10)
-	if !s.editor.Focused().Get() {
+	if !s.editor.HasFocus().Get() {
 		t.Fatal("editor click should focus")
 	}
 	// Click on the status bar — no widget path, no-op.
@@ -292,12 +292,12 @@ func TestGoldenLayoutRects(t *testing.T) {
 // the container translates the surface point into the editor's local space.
 func TestClickRoutesToEditorCenter(t *testing.T) {
 	s := New(surfaceW, surfaceH)
-	s.editor.Focused().Set(false)
+	s.editor.HasFocus().Set(false)
 	er := s.editor.Bounds()
 	if !s.HandleMouse(er.X+20, er.Y+20) {
 		t.Fatal("HandleMouse in the editor region must return true")
 	}
-	if !s.editor.Focused().Get() {
+	if !s.editor.HasFocus().Get() {
 		t.Fatal("a click in the Center region should focus the editor")
 	}
 }

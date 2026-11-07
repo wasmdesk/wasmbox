@@ -129,7 +129,7 @@ func TestAddressField(t *testing.T) {
 		t.Errorf("address value = %q, want the url", v)
 	}
 	// While focused it shows the in-progress edit buffer instead.
-	s.addr.Focused().Set(true)
+	s.addr.HasFocus().Set(true)
 	s.addr.Editing().Set("typing")
 	if v := s.addr.Value(); v != "typing" {
 		t.Errorf("focused address value = %q, want typing", v)
@@ -167,7 +167,7 @@ func TestRenderContentModes(t *testing.T) {
 func TestRenderFocusedChrome(t *testing.T) {
 	s := connected()
 	s.SetState("https://ex/", "T", false, true, true) // canBack + canForward
-	s.addr.Focused().Set(true)
+	s.addr.HasFocus().Set(true)
 	s.addr.Editing().Set("typing")
 	Render(s, newSurface())
 }
@@ -261,7 +261,7 @@ func TestSetStateTracksAddress(t *testing.T) {
 		t.Errorf("history flags = back:%v fwd:%v", s.canBack, s.canFwd)
 	}
 	// While editing, the shown value stays the edit buffer, not the pushed URL.
-	s.addr.Focused().Set(true)
+	s.addr.HasFocus().Set(true)
 	s.addr.Editing().Set("user typing")
 	s.SetState("https://b/", "B", false, true, true)
 	if v := s.addr.Value(); v != "user typing" {
@@ -313,7 +313,7 @@ func TestAddressEditing(t *testing.T) {
 	if !s.HandleMouse(r.X+5, r.Y+5) {
 		t.Fatal("clicking the address bar should focus it")
 	}
-	if !s.addr.Focused().Get() {
+	if !s.addr.HasFocus().Get() {
 		t.Fatal("address bar not focused after click")
 	}
 	// Type (character events), backspace (an edit key), then Enter.
@@ -338,7 +338,7 @@ func TestAddressEditing(t *testing.T) {
 	if navigated != "https://example" {
 		t.Errorf("navigated to %q, want https://example", navigated)
 	}
-	if s.addr.Focused().Get() {
+	if s.addr.HasFocus().Get() {
 		t.Error("Enter should blur the address bar")
 	}
 }
@@ -346,12 +346,12 @@ func TestAddressEditing(t *testing.T) {
 func TestAddressEscapeCancels(t *testing.T) {
 	s := connected()
 	s.SetState("https://keep/", "", false, false, false)
-	s.addr.Focused().Set(true)
+	s.addr.HasFocus().Set(true)
 	s.addr.Editing().Set("throwaway")
 	if !s.HandleKey("Escape") {
 		t.Fatal("Escape not consumed")
 	}
-	if s.addr.Focused().Get() {
+	if s.addr.HasFocus().Get() {
 		t.Error("Escape should defocus the address bar")
 	}
 	if v := s.addr.Value(); v != "https://keep/" {
@@ -363,12 +363,12 @@ func TestEnterEmptyAddressIsNoop(t *testing.T) {
 	s := connected()
 	var navigated bool
 	s.OnNavigate = func(string) { navigated = true }
-	s.addr.Focused().Set(true) // empty edit buffer
+	s.addr.HasFocus().Set(true) // empty edit buffer
 	s.HandleKey("Enter")
 	if navigated {
 		t.Error("Enter on an empty address should not navigate")
 	}
-	if s.addr.Focused().Get() {
+	if s.addr.HasFocus().Get() {
 		t.Error("Enter should defocus even when the buffer is empty")
 	}
 	// A blank/whitespace target normalises to empty and starts nothing.

@@ -9,8 +9,8 @@ require (
 	github.com/go-ruby-parser/parser v0.13.1
 	github.com/go-webengine/browserproxy v0.1.6
 	github.com/go-widgets/mvvm v0.15.0
-	github.com/go-widgets/painter v0.16.0
-	github.com/go-widgets/toolkit v0.345.1
+	github.com/go-widgets/painter v0.17.0
+	github.com/go-widgets/toolkit v0.357.0
 	github.com/go-widgets/toolkit/rougelex v0.2.0
 	github.com/grpc-transports/websocket v0.4.0
 	github.com/wasmdesk/coreutils v0.0.0-20261021205337-0d2ca5644f7e
@@ -95,13 +95,13 @@ require (
 	github.com/go-encryptions/unixcrypt v0.1.0 // indirect
 	github.com/go-facter/facter v0.0.0-20260830120958-454b72e642ab // indirect
 	github.com/go-fft/fft v0.23.0 // indirect
-	github.com/go-gfx/gfx v0.36.1 // indirect
+	github.com/go-gfx/gfx v0.41.0 // indirect
 	github.com/go-hiera/hiera v0.0.0-20260830144306-f9304f6bec92 // indirect
 	github.com/go-hocon/hocon v0.0.0-20260831114632-08e716b40e6d // indirect
 	github.com/go-images/gif v0.2.0 // indirect
 	github.com/go-images/images v0.1.1-0.20261026203936-4ac989d310a1 // indirect
 	github.com/go-images/jpeg v0.3.0 // indirect
-	github.com/go-images/jpeg2000 v0.13.8 // indirect
+	github.com/go-images/jpeg2000 v0.14.0 // indirect
 	github.com/go-images/png v0.2.0 // indirect
 	github.com/go-jose/go-jose/v4 v4.1.4 // indirect
 	github.com/go-kramdown/kramdown v0.2.0 // indirect
@@ -311,6 +311,7 @@ require (
 	github.com/go-viper/mapstructure/v2 v2.5.0 // indirect
 	github.com/go-webauthn/webauthn v0.18.2 // indirect
 	github.com/go-webauthn/x v0.3.1 // indirect
+	github.com/go-widgets/textinput v0.1.0 // indirect
 	github.com/go-widgets/tui v0.61.0 // indirect
 	github.com/go-xslt/xslt v0.1.0 // indirect
 	github.com/go-zookeeper/zk v1.0.4 // indirect
@@ -366,8 +367,6 @@ require (
 	github.com/remyoudompheng/bigfft v0.0.0-20230129092748-24d4a6f8daec // indirect
 	github.com/russellhaering/goxmldsig v1.6.1 // indirect
 	github.com/ryanuber/go-glob v1.0.0 // indirect
-	github.com/sergeymakinen/go-bmp v1.0.0 // indirect
-	github.com/sergeymakinen/go-ico v1.0.0 // indirect
 	github.com/tannevaled/gobig2 v0.2.0 // indirect
 	github.com/tinylib/msgp v1.6.4 // indirect
 	github.com/twmb/franz-go v1.22.1 // indirect
