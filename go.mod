@@ -1,6 +1,6 @@
 module github.com/wasmdesk/wasmbox
 
-go 1.27.2
+go 1.27.3
 
 require (
 	github.com/go-embedded-ruby/ruby v0.8.1
@@ -13,7 +13,7 @@ require (
 	github.com/go-widgets/toolkit v0.357.0
 	github.com/go-widgets/toolkit/rougelex v0.2.0
 	github.com/grpc-transports/websocket v0.4.0
-	github.com/wasmdesk/coreutils v0.0.0-20261021205337-0d2ca5644f7e
+	github.com/wasmdesk/coreutils v0.6.0
 	google.golang.org/grpc v1.86.0-dev
 )
 
