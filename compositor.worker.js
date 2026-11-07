@@ -190,6 +190,8 @@ const elementsById = new Map();
 // The OffscreenCanvas transferred from main at boot. We register it under
 // "screen" so compositor.rb's getElementById("screen") returns it.
 let offscreenScreen = null;
+// Cached 2D context of offscreenScreen, created once at boot on this thread.
+let offscreenCtx = null;
 
 // __wasmboxReadRegion(x,y,w,h): TEST HOOK. Reads the composited desktop pixels
 // straight from the worker-owned OffscreenCanvas via getImageData -- the only
@@ -200,9 +202,7 @@ let offscreenScreen = null;
 // freeze deterministically. Read from the page via
 // `worker.evaluate(({x,y,w,h}) => globalThis.__wasmboxReadRegion(x,y,w,h), r)`.
 globalThis.__wasmboxReadRegion = function (x, y, w, h) {
-  if (!offscreenScreen) return null;
-  let ctx;
-  try { ctx = offscreenScreen.getContext("2d"); } catch (_) { return null; }
+  const ctx = offscreenCtx;
   if (!ctx) return null;
   let img;
   try { img = ctx.getImageData(x | 0, y | 0, w | 0, h | 0); } catch (_) { return null; }
@@ -235,9 +235,7 @@ globalThis.__wasmboxReadRegion = function (x, y, w, h) {
 // disk and a human/agent can SEE what was composited (screenshots miss it).
 // Async: OffscreenCanvas has no toDataURL, so we round-trip through convertToBlob.
 globalThis.__wasmboxGrabRegion = async function (x, y, w, h) {
-  if (!offscreenScreen) return null;
-  let ctx;
-  try { ctx = offscreenScreen.getContext("2d"); } catch (_) { return null; }
+  const ctx = offscreenCtx;
   if (!ctx) return null;
   let img;
   try { img = ctx.getImageData(x | 0, y | 0, w | 0, h | 0); } catch (_) { return null; }
@@ -1332,6 +1330,20 @@ self.addEventListener("message", async (ev) => {
       if (booted) return;
       booted = true;
       offscreenScreen = m.canvas;
+      // The 2D context is created once, by the compositor on this worker's own
+      // thread (compositor/06_core.rb getContext("2d")). Cache that very object
+      // so the test hooks never call getContext themselves: Firefox refuses a
+      // second getContext on a transferred canvas ("Cannot update created
+      // context to different thread"), whether it comes from worker.evaluate
+      // or from this handler running before the compositor's own call.
+      {
+        const canvas = offscreenScreen, orig = canvas.getContext;
+        canvas.getContext = function (...args) {
+          const c = orig.apply(this, args);
+          if (args[0] === "2d" && c) offscreenCtx = c;
+          return c;
+        };
+      }
       viewportW = m.w | 0;
       viewportH = m.h | 0;
       // Seed storage before the Ruby boot block runs restore_layout.

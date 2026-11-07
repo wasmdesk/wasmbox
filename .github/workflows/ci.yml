@@ -150,7 +150,7 @@ jobs:
 
       - name: Install render-test deps
         working-directory: test
-        run: npm install
+        run: npm ci
 
       - name: Install Playwright browsers (chromium + firefox + webkit)
         working-directory: test
@@ -443,7 +443,7 @@ jobs:
       - name: Install probe deps + Chromium
         working-directory: test
         run: |
-          npm install
+          npm ci
           npx playwright install --with-deps chromium
 
       - name: Run the Pages-OCI probe (crossOriginIsolated + same-origin /v2 pull)
@@ -532,7 +532,7 @@ jobs:
       - name: Install probe deps + Chromium & Firefox
         working-directory: test
         run: |
-          npm install
+          npm ci
           npx playwright install --with-deps chromium firefox
 
       - name: Run the cross-browser Quake smoke (chromium + firefox)
@@ -629,7 +629,7 @@ jobs:
       - name: Install probe deps + Chromium & Firefox
         working-directory: test
         run: |
-          npm install
+          npm ci
           npx playwright install --with-deps chromium firefox
 
       - name: Run the cross-browser Doom smoke + interaction (chromium + firefox)

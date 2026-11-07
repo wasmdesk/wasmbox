@@ -92,6 +92,19 @@ function hashPNG(buf) {
   return { hash: h >>> 0, painted, bytes: png.data.length };
 }
 
+// Number of distinct colours in the left 960 px (the desktop, not the HTML panel).
+function distinctColours(buf) {
+  const png = PNG.sync.read(buf);
+  const seen = new Set();
+  for (let y = 0; y < png.height; y++) {
+    for (let x = 0; x < Math.min(960, png.width); x++) {
+      const i = (y * png.width + x) * 4;
+      seen.add((png.data[i] << 16) | (png.data[i + 1] << 8) | png.data[i + 2]);
+    }
+  }
+  return seen.size;
+}
+
 // Compare two PNGs pixel-exact, EXCLUDING the HUD band (bottom-left, where the
 // fps + composited-frame counter text legitimately differ between two frames).
 function diffPNG(a, b) {
@@ -167,6 +180,11 @@ try {
   }
 
   // S1: the region-composited settled scene.
+  // WebKit (Playwright 1.65 / WebKit 2388) omits the placeholder canvas of a
+  // transferControlToOffscreen() element from the FIRST snapshot of a page; the
+  // page's own rendering is live (the worker readback above shows 100% painted
+  // pixels). A throw-away snapshot primes it, no resize needed.
+  await page.screenshot({ type: "png" });
   await sleep(150);
   const s1 = await page.screenshot({ type: "png" });
 
@@ -178,6 +196,23 @@ try {
   await page.setViewportSize({ width: 1280, height: 720 });
   await sleep(400);
   const s2 = await page.screenshot({ type: "png" });
+
+  // Guard against the capture artefact above: a "settled" S1 that is blank
+  // outside the HTML panel would make the comparison meaningless.
+  if (distinctColours(s1) < 50) fail("S1 has no desktop content (canvas missing from the snapshot)");
+  else ok("S1 contains desktop content");
+
+  // PLANTED NEGATIVE: the comparator must flag a 5x5 block changed outside the
+  // HUD band and must ignore a change inside the HUD band. If either check
+  // misbehaves the probe could pass vacuously.
+  {
+    const bad = PNG.sync.read(s1), hudOnly = PNG.sync.read(s1);
+    for (let y = 100; y < 105; y++) for (let x = 600; x < 605; x++) bad.data[(y * bad.width + x) * 4] ^= 0xff;
+    hudOnly.data[((bad.height - 10) * bad.width + 10) * 4] ^= 0xff;
+    const pb = diffPNG(s1, PNG.sync.write(bad)), ph = diffPNG(s1, PNG.sync.write(hudOnly));
+    if (pb.diff === 25 && ph.diff === 0 && ph.hud === 1) ok("planted negative: comparator flags a 25 px defect and ignores the HUD band");
+    else fail(`planted negative broken: defect diff=${pb.diff} (want 25), hud-only diff=${ph.diff}/hud=${ph.hud} (want 0/1)`);
+  }
 
   const h1 = hashPNG(s1), h2 = hashPNG(s2);
   const d = diffPNG(s1, s2);
