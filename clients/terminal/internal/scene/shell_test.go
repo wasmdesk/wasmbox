@@ -5,6 +5,7 @@
 package scene
 
 import (
+	"regexp"
 	"strings"
 	"testing"
 
@@ -106,16 +107,20 @@ func TestExecuteClear(t *testing.T) {
 	}
 }
 
-// `date` routes to the coreutils date builtin (UTC RFC1123). We only
-// pattern-match on the suffix so the test stays clock-agnostic.
+// gnuDate is GNU date's default output, "%a %b %e %H:%M:%S %Z %Y", in the
+// local zone: "Sat Nov  7 21:59:54 CET 2026".
+var gnuDate = regexp.MustCompile(`^[A-Z][a-z]{2} [A-Z][a-z]{2} [ 1-3][0-9] [0-2][0-9]:[0-5][0-9]:[0-6][0-9] \S+ [0-9]{4}$`)
+
+// `date` routes to the coreutils date builtin, which since coreutils v0.6.0
+// prints GNU's default format. The pattern keeps the test clock-agnostic.
 func TestExecuteDate(t *testing.T) {
 	sh := newTestShell()
 	out := sh.Execute("date")
 	if len(out) != 1 {
 		t.Fatalf("date = %v, want 1 line", out)
 	}
-	if !strings.HasSuffix(out[0], " UTC") {
-		t.Fatalf("date %q lacks UTC suffix", out[0])
+	if !gnuDate.MatchString(out[0]) {
+		t.Fatalf("date %q is not GNU date's default format", out[0])
 	}
 }
 
@@ -239,12 +244,12 @@ func TestExecuteCatMultiple(t *testing.T) {
 	}
 }
 
-// `cat` with no args reports an error.
+// `cat` with no args copies standard input, as GNU cat does (coreutils
+// v0.6.0); the shell gives a command an empty one, so nothing is printed.
 func TestExecuteCatNoArgs(t *testing.T) {
 	sh := newTestShell()
-	out := sh.Execute("cat")
-	if len(out) != 1 || out[0][:4] != "cat:" {
-		t.Fatalf("bare cat = %v", out)
+	if out := sh.Execute("cat"); len(out) != 0 {
+		t.Fatalf("bare cat = %v, want no output", out)
 	}
 }
 
