@@ -5,10 +5,12 @@
 package scene
 
 import (
+	"context"
 	"regexp"
 	"strings"
 	"testing"
 
+	"github.com/go-widgets/shellterm"
 	"github.com/wasmdesk/wasmbox/clients/sharedvfs"
 )
 
@@ -19,17 +21,11 @@ func newTestShell() *Shell {
 	return NewShellWithVFS(sharedvfs.NewInMemoryVFS())
 }
 
-// NewShell stamps the default prompt + cwd + a seeded demo VFS.
+// NewShell stamps the default cwd + a seeded demo VFS.
 func TestNewShellDefaults(t *testing.T) {
 	sh := NewShell()
-	if sh.Prompt != " $ " {
-		t.Fatalf("default prompt = %q, want %q", sh.Prompt, " $ ")
-	}
 	if sh.Cwd != "/" {
 		t.Fatalf("default cwd = %q, want %q", sh.Cwd, "/")
-	}
-	if sh.Line != nil || len(sh.History) != 0 {
-		t.Fatalf("freshly built shell has non-empty edit state: %+v", sh)
 	}
 	// The default constructor wires a seeded demo VFS so /Documents exists.
 	if !sh.VFS.IsDir("/Documents") {
@@ -37,35 +33,53 @@ func TestNewShellDefaults(t *testing.T) {
 	}
 }
 
-// PromptString composes cwd + Prompt so the wasm renderer can paint the
-// path the user is standing in without an extra pwd. When the last command
-// failed (LastExit != 0) the prompt prepends "[N] " so the user notices
-// without typing echo $?.
-func TestPromptString(t *testing.T) {
+// Run is the shellterm.Shell contract: the output (with a closing newline),
+// the exit status, and whether to clear the screen.
+func TestRunContract(t *testing.T) {
+	var _ shellterm.Shell = (*Shell)(nil)
 	sh := newTestShell()
-	if got, want := sh.PromptString(), "/ $ "; got != want {
-		t.Errorf("PromptString at root = %q, want %q", got, want)
+	ctx := context.Background()
+	run := func(line string) (string, int, bool) {
+		var b strings.Builder
+		code, clear := sh.Run(ctx, line, &b)
+		return b.String(), code, clear
 	}
-	sh.Cwd = "/Documents"
-	if got, want := sh.PromptString(), "/Documents $ "; got != want {
-		t.Errorf("PromptString after cd = %q, want %q", got, want)
+
+	if out, code, clear := run("echo hi"); out != "hi\n" || code != 0 || clear {
+		t.Errorf("echo hi = %q %d %v", out, code, clear)
 	}
-	sh.LastExit = 7
-	if got, want := sh.PromptString(), "[7] /Documents $ "; got != want {
-		t.Errorf("PromptString with LastExit = %q, want %q", got, want)
+	// A command that ends without a newline still leaves the next prompt on a fresh line.
+	if out, _, _ := run(`printf 'no newline'`); out != "no newline\n" {
+		t.Errorf("printf without newline = %q", out)
+	}
+	// Escape sequences pass through untouched.
+	if out, _, _ := run(`printf '\033[31mred\033[0m\n'`); out != "\x1b[31mred\x1b[0m\n" {
+		t.Errorf("colour output = %q", out)
+	}
+	if out, code, _ := run("frobnicate"); out != "frobnicate: command not found\n" || code != 127 {
+		t.Errorf("unknown = %q %d", out, code)
+	}
+	if out, code, _ := run("echo $?"); out != "127\n" || code != 0 {
+		t.Errorf("$? = %q %d, want the previous status", out, code)
+	}
+	if out, code, clear := run("clear"); out != "" || code != 0 || !clear {
+		t.Errorf("clear = %q %d %v", out, code, clear)
+	}
+	if out, code, clear := run("   "); out != "" || code != 0 || clear {
+		t.Errorf("blank line = %q %d %v", out, code, clear)
+	}
+	if out, code, _ := run("cd /nowhere"); out != "cd: /nowhere: not a directory\n" || code != 1 {
+		t.Errorf("failed cd = %q %d", out, code)
 	}
 }
 
-// Empty / whitespace-only lines produce no output and do NOT enter history.
+// Empty / whitespace-only lines produce no output.
 func TestExecuteEmptyLine(t *testing.T) {
 	sh := newTestShell()
 	for _, in := range []string{"", "   ", "\t  \t"} {
 		if out := sh.Execute(in); out != nil {
 			t.Fatalf("Execute(%q) = %v, want nil", in, out)
 		}
-	}
-	if len(sh.History) != 0 {
-		t.Fatalf("empty lines polluted history: %v", sh.History)
 	}
 }
 
@@ -408,19 +422,6 @@ func TestExecuteUnknown(t *testing.T) {
 	out := sh.Execute("frobnicate -x")
 	if len(out) != 1 || out[0] != "frobnicate: command not found" {
 		t.Fatalf("unknown = %v", out)
-	}
-}
-
-// Execute populates history with the trimmed line.
-func TestExecuteHistory(t *testing.T) {
-	sh := newTestShell()
-	sh.Execute("  echo a  ")
-	sh.Execute("ls")
-	if len(sh.History) != 2 {
-		t.Fatalf("history len = %d, want 2", len(sh.History))
-	}
-	if string(sh.History[0]) != "echo a" || string(sh.History[1]) != "ls" {
-		t.Fatalf("history content = %q, %q", sh.History[0], sh.History[1])
 	}
 }
 

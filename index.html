@@ -332,6 +332,9 @@ worker.addEventListener("message", (ev) => {
     case B.C2M_IFRAME_DETACH:
       iframeDetach(m.window_id);
       return;
+    case B.C2M_CLIPBOARD_WRITE:
+      clipboardWrite(m.text);
+      return;
   }
 });
 
@@ -422,8 +425,84 @@ function relayKey(kind) {
     });
   };
 }
-window.addEventListener("keydown", relayKey("keydown"));
 window.addEventListener("keyup",   relayKey("keyup"));
+
+// --- clipboard bridge (docs/protocol.md "Clipboard") ----------------------
+// The compositor and the clients run in workers, which cannot reach the
+// browser's clipboard: the page does it. The model is go-widgets/webcanvas's
+// clipboard bridge.
+//
+//   Copy:  a client's `clipboard_write` reaches clipboardWrite(), which calls
+//          navigator.clipboard.writeText. The Clipboard API allows it during a
+//          user activation, and the copy runs on the heels of the keydown that
+//          asked for it (a few ms through the worker hops, well inside the
+//          transient activation window).
+//   Paste: the only synchronous, prompt-free read is a `paste` event's
+//          clipboardData. A paste shortcut (V with Ctrl or Meta) is therefore
+//          HELD here, not relayed and not prevented, so the browser fires the
+//          paste event; its text goes to the compositor first (a `paste`
+//          dom_event, forwarded to the focused client), then the held key. The
+//          client's own paste action (a terminal's Meta+V / Ctrl+Shift+V) then
+//          finds the text the user copied. If no paste event comes within
+//          PASTE_WAIT_MS (Chromium's Ctrl+Shift+V on a non-editable page), the
+//          page falls back to navigator.clipboard.readText(); whatever happens,
+//          the key is relayed exactly once, unchanged -- only its timing moves.
+const MAX_CLIPBOARD = 1 << 20;      // bytes of text kept either way
+const PASTE_WAIT_MS = 200;
+let heldPaste = null;               // { e, timer }: the paste keydown being held
+
+function isPasteKey(e) {
+  return (e.key === "v" || e.key === "V") && (e.ctrlKey || e.metaKey) && !e.altKey;
+}
+function clipboardWrite(text) {
+  try {
+    const p = navigator.clipboard.writeText(String(text).slice(0, MAX_CLIPBOARD));
+    if (p && p.catch) p.catch(() => {}); // refused: the text still pastes in-page
+  } catch (_) { /* no Clipboard API (insecure context) */ }
+}
+function relayPaste(text) {
+  worker.postMessage({
+    type: B.M2C_DOM_EVENT,
+    target: B.TARGET_WINDOW,
+    kind: "paste",
+    text: String(text).slice(0, MAX_CLIPBOARD),
+  });
+}
+// releasePaste relays the held key (once) and forgets it.
+function releasePaste() {
+  const h = heldPaste;
+  heldPaste = null;
+  if (!h) return;
+  clearTimeout(h.timer);
+  relayKeyDown(h.e);
+}
+// pasteTimeout: no paste event came; try the async read, then release.
+function pasteTimeout(h) {
+  if (heldPaste !== h) return;
+  const done = (text) => {
+    if (heldPaste !== h) return;
+    if (text) relayPaste(text);
+    releasePaste();
+  };
+  try {
+    navigator.clipboard.readText().then(done, () => done(""));
+  } catch (_) { done(""); }
+}
+
+const relayKeyDown = relayKey("keydown");
+window.addEventListener("keydown", (e) => {
+  if (heldPaste) releasePaste();     // a second shortcut: let the first go
+  if (!isPasteKey(e)) { relayKeyDown(e); return; }
+  const h = { e: e, timer: 0 };
+  h.timer = setTimeout(() => pasteTimeout(h), PASTE_WAIT_MS);
+  heldPaste = h;
+});
+window.addEventListener("paste", (e) => {
+  const text = e.clipboardData ? e.clipboardData.getData("text/plain") : "";
+  e.preventDefault();
+  if (text) relayPaste(text);        // text first, then the key it belongs to
+  releasePaste();
+});
 
 function relayMouse(kind) {
   return (e) => {

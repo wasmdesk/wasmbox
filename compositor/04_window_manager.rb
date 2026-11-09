@@ -1021,6 +1021,17 @@ class WindowManager
       return :ignored unless win
       win.title = msg[:title].to_s
       :title
+    when "clipboard_write"
+      # A client copied text. Only the window that has the keyboard (the focused
+      # window, or the popup holding the grab) may write the shared clipboard:
+      # a background window must not be able to overwrite what the user copied.
+      # The caller (Compositor) hands :clipboard_write's msg[:text] to the page.
+      win = find(msg[:window_id])
+      return :ignored unless win&.external?
+      target = key_target
+      return :ignored unless target && target.id == win.id
+      return :ignored if msg[:text].to_s.empty?
+      :clipboard_write
     when "request_close"
       win = find(msg[:window_id])
       return :ignored unless win

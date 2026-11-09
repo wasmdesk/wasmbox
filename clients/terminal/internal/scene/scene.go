@@ -2,71 +2,54 @@
 // Use of this source code is governed by a BSD-3-Clause license that can be
 // found in the LICENSE file at the root of this repository.
 
-// Package scene drives the terminal client: a Grid (character buffer + cursor),
-// a Shell (line-editor + builtin dispatch wired to a clients/sharedvfs VFS),
-// and a renderer that rasterises the Grid into the SAB pixel buffer the
-// compositor blits.
+// Package scene drives the terminal client. The terminal itself is
+// go-widgets/shellterm, shared with the go-wasmcontainers dashboard:
 //
-// The terminal is a real (if tiny) interactive shell: typing printable ASCII
-// extends the edit line, Backspace shrinks it, Enter executes via Shell, and
-// the shell's output lines are painted into the Grid above a fresh prompt.
-// File commands (cat / cd / mkdir / touch / rm / ls / echo > path) speak the
-// SAME VFS the files browser paints, so writes from the terminal show up in
-// the file browser (and survive page reloads when the VFS is IDB-backed).
+//   - a toolkit.Terminal draws the screen (escape sequences, colours,
+//     scrollback, selection, copy and paste);
+//   - a shellterm.Session is the model: a go-widgets/lineedit line editor
+//     (cursor motion, kill/yank, history, Tab completion, Ctrl-R) in front of
+//     a Shell;
+//   - Shell (shell.go) is this client's part: shellparse + the coreutils
+//     multicall over the shared VFS, with its Tab completion in completer.go.
 //
-// Everything in this file is pure Go (no syscall/js) so the layer is unit-
+// Everything in this package is pure Go (no syscall/js), so it is unit-
 // testable on any host. The wasm entry point (main.go) feeds keystrokes in
-// through HandleKey() and pulls bytes out through Render() every frame.
+// through HandleKey, runs the Post queue through Drain, and pulls bytes out
+// through Render.
+//
+// Threads: shellterm runs keys and commands on goroutines of its own and hands
+// everything the view must show to Options.Post, which State queues; Drain
+// runs the queue on the UI goroutine. A mutex serialises Drain, HandleKey and
+// Render, so the Terminal is only ever touched by one at a time.
 package scene
 
 import (
-	"strings"
+	"sync"
 
 	"github.com/go-widgets/painter"
+	"github.com/go-widgets/shellterm"
 	"github.com/go-widgets/toolkit"
-	"github.com/wasmdesk/coreutils/multicall"
 	"github.com/wasmdesk/wasmbox/clients/sharedvfs"
-	"github.com/wasmdesk/wasmbox/clients/terminal/internal/complete"
 )
 
-// localBuiltinsForCompletion is the set of pure-shell builtins (cd / clear /
-// help) the shell handles locally. The completion command-position candidate
-// set is this list UNIONed with multicall.Names() -- so Tab after a fresh
-// prompt sees every command the user can actually run.
-var localBuiltinsForCompletion = []string{"cd", "clear", "help"}
-
-// completionBuiltins returns the merged + sorted list. We build it on every
-// Tab rather than cache it because multicall.Names() is already O(N log N)
-// over a tiny N and the resulting slice is small (~45 entries).
-func completionBuiltins() []string {
-	tools := multicall.Names()
-	out := make([]string, 0, len(localBuiltinsForCompletion)+len(tools))
-	out = append(out, localBuiltinsForCompletion...)
-	out = append(out, tools...)
-	// sort.Strings would pull a fresh import; reuse complete.LongestCommonPrefix
-	// for sorting? no -- inline insertion sort over a small N is fine.
-	for i := 1; i < len(out); i++ {
-		for j := i; j > 0 && out[j] < out[j-1]; j-- {
-			out[j], out[j-1] = out[j-1], out[j]
-		}
-	}
-	return out
-}
-
-// State is the top-of-package handle the wasm entry point holds. It carries
-// the surface size, the character grid, and the shell. Surface size is fixed
-// at construction time -- the compositor never re-grants a different surface
-// after welcome -- so we do not auto-resize.
+// State is the top-of-package handle the wasm entry point holds. Surface size
+// is fixed at construction time -- the compositor never re-grants a different
+// surface after welcome -- so we do not auto-resize.
 type State struct {
-	W, H  int
-	Grid  *Grid
-	Shell *Shell
+	W, H    int
+	Term    *toolkit.Terminal
+	Shell   *Shell
+	Session *shellterm.Session
 
-	// theme is passed to the TerminalView's Draw. The view only consults it as
-	// a colour fallback for cells whose own / default colours are unset; since
-	// the Grid always sets an explicit pen + panel background it never actually
-	// reads the theme, but Draw requires a non-nil value.
 	theme *toolkit.Theme
+
+	ui      sync.Mutex // serialises Drain, HandleKey, HandleMouse, Render
+	pressed bool       // a mouse press (a selection drag) is in progress
+
+	qmu   sync.Mutex
+	queue []func()
+	wake  chan struct{}
 }
 
 // New constructs a State for a width x height pixel surface backed by a
@@ -79,248 +62,164 @@ func New(width, height int) *State {
 	return NewWithVFS(width, height, v)
 }
 
-// NewWithVFS constructs a State whose Shell talks to the supplied VFS. Used
-// by the wasm boot path to share an IDB-backed VFS with the files browser
-// (and by tests that want a deterministic empty tree).
+// NewWithVFS constructs a State whose Shell talks to the supplied VFS (used
+// by the wasm boot path to share an IDB-backed VFS with the files browser,
+// and by tests that want a deterministic tree).
 func NewWithVFS(width, height int, v sharedvfs.VFS) *State {
 	// The cell size is fixed (cellW×cellH), so the grid dimensions fall straight
 	// out of the surface size -- the SAME arithmetic the previous renderer used
 	// (width/16 × height/16), which keeps the column/row/pitch geometry the
 	// pixel-calibrated probes expect.
-	cols := width / cellW
-	rows := height / cellH
-	if cols < 1 {
-		cols = 1
-	}
-	if rows < 1 {
-		rows = 1
-	}
-	g := NewGrid(cols, rows)
+	cols, rows := max(width/cellW, 1), max(height/cellH, 1)
+	term := newTerminal(cols, rows)
 
 	// Centre the grid in the surface. The margin outside the view's bounds is
 	// painted with the panel background in Render, so the whole surface reads as
-	// one terminal panel -- matching the previous centred, full-panel look.
-	gridW := cols * cellW
-	gridH := rows * cellH
-	g.SetBounds(toolkit.Rect{X: (width - gridW) / 2, Y: (height - gridH) / 2, W: gridW, H: gridH})
+	// one terminal panel.
+	gridW, gridH := cols*cellW, rows*cellH
+	term.SetBounds(toolkit.Rect{X: (width - gridW) / 2, Y: (height - gridH) / 2, W: gridW, H: gridH})
 
 	s := &State{
-		W:     width,
-		H:     height,
-		Grid:  g,
+		W: width, H: height,
+		Term:  term,
 		Shell: NewShellWithVFS(v),
-		theme: toolkit.DefaultLight(),
+		theme: newTheme(),
+		wake:  make(chan struct{}, 1),
 	}
-	// Wire the widget event path: root.OnEvent forwards to OnKey, which drives
-	// the shell through the same HandleKey the wasm host calls directly. This
-	// keeps the shell logic the single source of truth for input handling.
-	g.OnKey = func(ev toolkit.Event) { s.HandleKey(ev.Code) }
-	s.writePrompt()
+	s.Session = shellterm.New(shellterm.Options{Post: s.post, Prompt: s.Shell.Prompt})
+	s.Session.SetShell(s.Shell, s.Shell.Completer())
+	// Wire the Terminal and the session together: typed bytes go to the
+	// session, its output comes back through the Post queue. The grid was
+	// built at its final size, so the width is told explicitly.
+	shellterm.Bind(term, s.Session, nil)
+	s.Session.Resize(cols)
 	return s
 }
 
+// post queues f for Drain and wakes whoever waits on Wake. It never blocks.
+func (s *State) post(f func()) {
+	s.qmu.Lock()
+	s.queue = append(s.queue, f)
+	s.qmu.Unlock()
+	select {
+	case s.wake <- struct{}{}:
+	default:
+	}
+}
+
+// Wake is signalled when the session queued something for Drain.
+func (s *State) Wake() <-chan struct{} { return s.wake }
+
+// Drain runs what the session queued, on the calling (UI) goroutine, and
+// reports how many functions ran -- when it is non-zero the screen changed and
+// the caller should render.
+func (s *State) Drain() int {
+	n := 0
+	for {
+		s.qmu.Lock()
+		q := s.queue
+		s.queue = nil
+		s.qmu.Unlock()
+		if len(q) == 0 {
+			return n
+		}
+		s.ui.Lock()
+		for _, f := range q {
+			f()
+		}
+		s.ui.Unlock()
+		n += len(q)
+	}
+}
+
 // Render fills buf (a 4*W*H byte slice, RGBA32 row-major) with the current
-// grid. Panics on size mismatch -- a misshaped buffer is a caller bug. The
+// screen. Panics on size mismatch -- a misshaped buffer is a caller bug. The
 // panel background is painted into the four margin strips around the centred
-// grid (the TerminalView's own Draw fills its bounds), so the whole surface
-// reads as one terminal panel without redundantly filling the grid area twice.
+// grid (the Terminal's own Draw fills its bounds), so the whole surface reads
+// as one terminal panel without redundantly filling the grid area twice.
 func Render(s *State, buf []byte) {
 	if len(buf) != 4*s.W*s.H {
 		panic("scene: Render buffer size mismatch")
 	}
+	s.ui.Lock()
+	defer s.ui.Unlock()
 	p := painter.NewPixelPainter(buf, s.W, s.H)
-	b := s.Grid.Bounds()
+	b := s.Term.Bounds()
 	// Top, bottom, left, right margins (any of which may be empty).
 	fillBox(p, toolkit.Rect{X: 0, Y: 0, W: s.W, H: b.Y}, panelBG)
 	fillBox(p, toolkit.Rect{X: 0, Y: b.Y + b.H, W: s.W, H: s.H - (b.Y + b.H)}, panelBG)
 	fillBox(p, toolkit.Rect{X: 0, Y: b.Y, W: b.X, H: b.H}, panelBG)
 	fillBox(p, toolkit.Rect{X: b.X + b.W, Y: b.Y, W: s.W - (b.X + b.W), H: b.H}, panelBG)
-	s.Grid.Draw(p, s.theme)
+	s.Term.Draw(p, s.theme)
 }
 
-// HandleKey routes one DOM-style keydown into the shell. Recognised keys:
-//   - single printable ASCII (key.length == 1): append + echo into the grid.
-//   - "Enter":     execute the line, paint output, render fresh prompt.
-//   - "Backspace": pop one byte off the line + reverse-cursor the grid.
-//   - "ArrowUp" / "ArrowDown": walk the in-memory command history Bash-style
-//     (most-recent first; first Up from a fresh line stashes the in-progress
-//     edit so a matching Down can restore it).
-//   - anything else (ArrowLeft / ArrowRight, modifiers): ignored.
-//
-// Returns true when the grid changed, so the caller can decide whether to
-// re-render. We chose key-string dispatch over keycodes because the SDK
-// already normalises e.key to the printable character for printable keys.
-func (s *State) HandleKey(key string) bool {
-	switch key {
-	case "":
-		return false
-	case "ArrowUp":
-		if line, ok := s.Shell.HistoryUp(); ok {
-			s.replaceLine(line)
-			return true
-		}
-		return false
-	case "ArrowDown":
-		if line, ok := s.Shell.HistoryDown(); ok {
-			s.replaceLine(line)
-			return true
-		}
-		return false
-	case "Enter":
-		s.Shell.HistoryReset()
-		s.Grid.CRLF()
-		line := string(s.Shell.Line)
-		s.Shell.Line = s.Shell.Line[:0]
-		if IsClear(line) {
-			s.Grid.Clear()
-			s.writePrompt()
-			return true
-		}
-		out := s.Shell.Execute(line)
-		for _, ln := range out {
-			s.Grid.PrintString(ln)
-			s.Grid.CRLF()
-		}
-		s.writePrompt()
-		return true
-	case "Backspace":
-		s.Shell.HistoryReset()
-		if len(s.Shell.Line) == 0 {
-			return false
-		}
-		s.Shell.Line = s.Shell.Line[:len(s.Shell.Line)-1]
-		s.Grid.Backspace()
-		return true
-	case "Tab":
-		s.Shell.HistoryReset()
-		return s.handleTab()
-	default:
-		if len(key) == 1 {
-			b := key[0]
-			if b >= 0x20 && b <= 0x7E {
-				s.Shell.HistoryReset()
-				s.Shell.Line = append(s.Shell.Line, b)
-				s.Grid.Print(b)
-				return true
-			}
-		}
-		return false
-	}
+// Key is one keydown as the compositor relays it: the DOM key plus the
+// modifier state.
+type Key struct {
+	Key                    string // KeyboardEvent.key: "a", "Enter", "ArrowUp", ...
+	Ctrl, Meta, Alt, Shift bool
 }
 
-// replaceLine swaps the current in-progress edit (Shell.Line + the on-grid
-// echo of it) for newLine. Used by ArrowUp / ArrowDown to display a recalled
-// history entry. The redraw is a two-step "erase + repaint":
-//
-//  1. Backspace the grid len(Shell.Line) times to wipe the echoed bytes
-//     (Backspace clamps at column 0 so wrapped lines erase cleanly up to
-//     the row start). If a history line was longer than the surface width
-//     and wrapped, we cannot perfectly undo the wrap -- the grid lacks the
-//     history of how many rows the echo consumed -- but recalled commands
-//     in practice fit one row, and the next Enter / Backspace will repaint
-//     correctly. We accept this v0 limitation rather than tracking a per-
-//     line "wrap rows" counter.
-//  2. Replace Shell.Line with newLine and Print each byte so the echo and
-//     the internal line stay in lockstep.
-func (s *State) replaceLine(newLine []byte) {
-	for i := 0; i < len(s.Shell.Line); i++ {
-		s.Grid.Backspace()
-	}
-	s.Shell.Line = append(s.Shell.Line[:0], newLine...)
-	for i := 0; i < len(s.Shell.Line); i++ {
-		s.Grid.Print(s.Shell.Line[i])
-	}
-}
-
-// writePrompt paints the shell's prompt into the grid at the current cursor.
-// The prompt is composed of the cwd (in cyan, so it stands out as a path)
-// followed by the trailing prompt string (also cyan, matching the previous
-// `$ ` look). Tinting both keeps the line visually distinct from echoed
-// input which lands in the default ink.
-func (s *State) writePrompt() {
-	prev := s.Grid.FG
-	s.Grid.FG = 1 // cyan
-	p := s.Shell.PromptString()
-	for i := 0; i < len(p); i++ {
-		s.Grid.Print(p[i])
-	}
-	s.Grid.FG = prev
-}
-
-// ExecuteForTest is a thin re-export of Shell.Execute that lets the scene_test
-// harness drive the shell without reaching into the Shell field. Kept as a
-// method on *State (not free function) so the doc shows up next to State.
-func (s *State) ExecuteForTest(line string) []string {
-	return s.Shell.Execute(strings.TrimRight(line, "\n"))
-}
-
-// handleTab runs one Tab autocompletion against the current edit line. The
-// cursor is always at len(Line) because the scene has no cursor-motion keys
-// (left/right arrows do nothing); we still pass it explicitly so a future
-// arrow-key wiring can pipe a real cursor through unchanged.
-//
-// Outcomes (mirroring bash with show-all-if-ambiguous):
-//
-//   - 0 matches: ring a soft "no change" (return false) -- the user sees
-//     the line untouched.
-//   - 1 match:   splice the match in place of the partial word, advancing
-//     the grid cursor for each new byte.
-//   - >1 matches AND longest common prefix extends beyond Target:
-//     autocomplete to that prefix WITHOUT listing -- exactly what
-//     `fo` -> `foo` looks like when matches are foo.txt + foobar.txt.
-//   - >1 matches AND no further common prefix: print the candidates in
-//     column-packed rows (Bash readline default), then re-paint the
-//     prompt + the unchanged edit line so the user can keep typing.
-func (s *State) handleTab() bool {
-	line := string(s.Shell.Line)
-	cursor := len(line)
-	r := complete.Complete(line, cursor, completionBuiltins(), s.Shell.VFS, s.Shell.Cwd)
-	switch len(r.Matches) {
-	case 0:
-		return false
-	case 1:
-		return s.extendLine(r.Matches[0][len(r.Target):])
-	default:
-		// Try to advance by the longest common prefix first. If the LCP is
-		// strictly longer than the target the user has typed, just extend
-		// the line up to that prefix -- bash does this silently before ever
-		// printing the menu, and it dramatically reduces redraw noise when
-		// the user is one keystroke away from disambiguating.
-		lcp := complete.LongestCommonPrefix(r.Matches)
-		if len(lcp) > len(r.Target) {
-			return s.extendLine(lcp[len(r.Target):])
-		}
-		// LCP didn't make progress -- show the menu in column-packed form
-		// then redraw the prompt + the unchanged edit line.
-		s.Grid.CRLF()
-		for _, row := range complete.FormatColumns(s.Grid.Cols, r.Matches) {
-			s.Grid.PrintString(row)
-			s.Grid.CRLF()
-		}
-		s.writePrompt()
-		// Re-echo the unchanged edit line into the grid so the user sees
-		// what they have typed so far -- the prompt above wrote only the
-		// PromptString, not the line bytes.
-		for i := 0; i < len(s.Shell.Line); i++ {
-			s.Grid.Print(s.Shell.Line[i])
-		}
-		return true
-	}
-}
-
-// extendLine appends add to Shell.Line and paints each new byte into the
-// grid (advancing the cursor identically to a user typing the bytes). It is
-// the shared core of both single-match autocompletion and the multi-match
-// "advance by longest common prefix" path. Returns false when add is empty
-// (no change to signal -- the caller still owes the user a no-op).
-func (s *State) extendLine(add string) bool {
-	if add == "" {
+// HandleKey routes one keydown into the terminal and reports whether the
+// caller should re-render (the output the key causes arrives later, through
+// Wake/Drain). A printable key without Ctrl or Meta is typed text; anything
+// else is a key press, which the Terminal turns into what a terminal sends
+// (Enter, arrows, Ctrl-C, Alt-b ...) or acts on itself (copy, paste, Shift+
+// PageUp scrollback). Meta+V and Ctrl+Shift+V paste, Meta+C and Ctrl+Shift+C
+// copy the selection; a plain Ctrl+V is ^V for the shell.
+func (s *State) HandleKey(k Key) bool {
+	if k.Key == "" {
 		return false
 	}
-	for i := 0; i < len(add); i++ {
-		b := add[i]
-		s.Shell.Line = append(s.Shell.Line, b)
-		s.Grid.Print(b)
+	ev := toolkit.Event{Kind: toolkit.EventKeyDown, Code: k.Key, Ctrl: k.Ctrl, Meta: k.Meta, Alt: k.Alt, Shift: k.Shift}
+	if len([]rune(k.Key)) == 1 && !k.Ctrl && !k.Meta {
+		ev = toolkit.Event{Kind: toolkit.EventChar, Code: k.Key, Alt: k.Alt}
 	}
+	s.ui.Lock()
+	defer s.ui.Unlock()
+	s.Term.OnEvent(ev)
 	return true
 }
+
+// HandleMouse routes a mouse event (kind "mousedown", "mousemove", "mouseup",
+// or "wheel"), with x, y relative to the window body, into the Terminal:
+// press and drag select text, the wheel scrolls the history. dy is the wheel's
+// vertical delta. A "mousemove" without a press in progress changes nothing
+// (and reports false, so a hovering pointer costs no repaint).
+// It reports whether the screen may have changed.
+func (s *State) HandleMouse(kind string, x, y int, dy float64) bool {
+	s.ui.Lock()
+	defer s.ui.Unlock()
+	b := s.Term.Bounds()
+	ev := toolkit.Event{X: x - b.X, Y: y - b.Y}
+	switch kind {
+	case "mousedown":
+		ev.Kind = toolkit.EventClick
+		s.pressed = true
+	case "mousemove":
+		if !s.pressed {
+			return false
+		}
+		ev.Kind = toolkit.EventMouseDrag
+	case "mouseup":
+		ev.Kind = toolkit.EventMouseUp
+		s.pressed = false
+	case "wheel":
+		// A downward wheel (dy > 0) moves toward the live bottom.
+		switch {
+		case dy > 0:
+			ev.Kind, ev.Delta = toolkit.EventScroll, wheelLines
+		case dy < 0:
+			ev.Kind, ev.Delta = toolkit.EventScroll, -wheelLines
+		default:
+			return false
+		}
+	default:
+		return false
+	}
+	s.Term.OnEvent(ev)
+	return true
+}
+
+// wheelLines is how many lines one wheel notch scrolls.
+const wheelLines = 3

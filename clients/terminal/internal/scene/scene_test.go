@@ -7,233 +7,14 @@ package scene
 import (
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/go-widgets/toolkit"
+	"github.com/wasmdesk/wasmbox/clients/clipboard"
 	"github.com/wasmdesk/wasmbox/clients/sharedvfs"
 )
 
-// newBuf allocates a buffer the right size for state s.
-func newBuf(s *State) []byte { return make([]byte, 4*s.W*s.H) }
-
-// New produces a state whose grid fits the chosen surface: the cols/rows are
-// the surface size divided by the TerminalView's (scaled-font) cell size.
-func TestNewSizesGrid(t *testing.T) {
-	s := New(640, 400)
-	cw, ch := s.Grid.CellWidth(), s.Grid.CellHeight()
-	wantCols, wantRows := 640/cw, 400/ch
-	if s.Grid.Cols != wantCols || s.Grid.Rows != wantRows {
-		t.Fatalf("New(640,400): grid = %dx%d, want %dx%d (cell %dx%d)",
-			s.Grid.Cols, s.Grid.Rows, wantCols, wantRows, cw, ch)
-	}
-	if s.W != 640 || s.H != 400 {
-		t.Fatalf("New stored dims = (%d,%d), want (640,400)", s.W, s.H)
-	}
-}
-
-// A tiny surface still produces at least a 1x1 grid.
-func TestNewClampsToMinimum(t *testing.T) {
-	s := New(1, 1)
-	if s.Grid.Cols != 1 || s.Grid.Rows != 1 {
-		t.Fatalf("New(1,1): grid = %dx%d, want 1x1", s.Grid.Cols, s.Grid.Rows)
-	}
-}
-
-// Render fills an exactly-sized buffer without panicking.
-func TestRenderFillsExactSize(t *testing.T) {
-	s := New(160, 100)
-	Render(s, newBuf(s))
-}
-
-// Render paints the panel background into the margin around the centred grid:
-// with a surface whose height is not a whole number of cells there is a top
-// margin, whose corner pixel must be the panel colour (not left unpainted).
-func TestRenderFillsMargin(t *testing.T) {
-	s := New(160, 100) // 100/16 = 6 rows -> gridH 96 -> 2px top margin
-	buf := newBuf(s)
-	Render(s, buf)
-	// Top-left corner is inside the top margin strip.
-	got := toolkit.RGBA{R: buf[0], G: buf[1], B: buf[2], A: buf[3]}
-	if got != panelBG {
-		t.Fatalf("margin corner = %+v, want panel %+v", got, panelBG)
-	}
-}
-
-// Render panics on a wrongly-sized buffer.
-func TestRenderPanicsOnSizeMismatch(t *testing.T) {
-	defer func() {
-		if recover() == nil {
-			t.Fatal("expected panic on size mismatch")
-		}
-	}()
-	s := New(16, 16)
-	Render(s, make([]byte, 4))
-}
-
-// HandleKey: a printable key appends to the edit line + paints into the grid.
-func TestHandleKeyPrintable(t *testing.T) {
-	s := New(160, 100)
-	startLine := len(s.Shell.Line)
-	if !s.HandleKey("a") {
-		t.Fatal("HandleKey('a') did not signal a change")
-	}
-	if len(s.Shell.Line) != startLine+1 || s.Shell.Line[len(s.Shell.Line)-1] != 'a' {
-		t.Fatalf("Shell.Line = %q, want trailing 'a'", string(s.Shell.Line))
-	}
-}
-
-// OnEvent (the widget event path): a keydown event routed through the
-// TerminalView's OnEvent reaches OnKey, which drives the shell via HandleKey.
-// This is the seam main.go's root.OnEvent would use.
-func TestOnEventDrivesShell(t *testing.T) {
-	s := New(160, 100)
-	s.Grid.OnEvent(toolkit.Event{Kind: toolkit.EventChar, Code: "z"})
-	if string(s.Shell.Line) != "z" {
-		t.Fatalf("after OnEvent 'z', Shell.Line = %q, want \"z\"", string(s.Shell.Line))
-	}
-}
-
-// The prompt is painted in cyan (pen index 1): the first prompt cell carries
-// the cyan ink, distinguishing it from green echoed input.
-func TestPromptPaintedInCyan(t *testing.T) {
-	s := New(320, 200)
-	// The prompt starts at (0,0). Its first glyph cell must be cyan ink.
-	c := s.Grid.Cell(0, 0)
-	if c.Rune == 0 {
-		t.Fatal("no prompt glyph at (0,0)")
-	}
-	if c.FG != inkCyan {
-		t.Fatalf("prompt cell (0,0) FG = %+v, want cyan", c.FG)
-	}
-	// Echoed input lands in green: type a char and check its cell.
-	s.HandleKey("x")
-	promptLen := len(s.Shell.PromptString())
-	xc := s.Grid.Cell(promptLen, 0)
-	if xc.Rune != 'x' || xc.FG != inkGreen {
-		t.Fatalf("echoed input cell = %+v, want 'x' in green", xc)
-	}
-}
-
-// HandleKey: empty string + non-printable returns false (no change).
-func TestHandleKeyEmpty(t *testing.T) {
-	s := New(160, 100)
-	if s.HandleKey("") {
-		t.Fatal("HandleKey('') unexpectedly reported a change")
-	}
-	if s.HandleKey("ArrowLeft") {
-		t.Fatal("HandleKey('ArrowLeft') unexpectedly reported a change")
-	}
-	// A single non-printable byte (e.g. tab) is also ignored.
-	if s.HandleKey("\x01") {
-		t.Fatal("HandleKey(0x01) unexpectedly reported a change")
-	}
-}
-
-// HandleKey: Backspace at an empty line is a no-op.
-func TestHandleKeyBackspaceEmpty(t *testing.T) {
-	s := New(160, 100)
-	if s.HandleKey("Backspace") {
-		t.Fatal("Backspace on empty line should not signal a change")
-	}
-}
-
-// HandleKey: Backspace shrinks the edit line + reverse-cursors the grid.
-func TestHandleKeyBackspaceNonEmpty(t *testing.T) {
-	s := New(160, 100)
-	s.HandleKey("a")
-	s.HandleKey("b")
-	if !s.HandleKey("Backspace") {
-		t.Fatal("Backspace on non-empty line should signal a change")
-	}
-	if string(s.Shell.Line) != "a" {
-		t.Fatalf("after Backspace, Shell.Line = %q, want \"a\"", string(s.Shell.Line))
-	}
-}
-
-// HandleKey: Enter executes the line + paints output into the grid.
-func TestHandleKeyEnterEcho(t *testing.T) {
-	s := New(320, 200)
-	for _, k := range []string{"e", "c", "h", "o", " ", "h", "i"} {
-		s.HandleKey(k)
-	}
-	if !s.HandleKey("Enter") {
-		t.Fatal("Enter should signal a change")
-	}
-	if len(s.Shell.Line) != 0 {
-		t.Fatalf("Shell.Line not reset after Enter: %q", string(s.Shell.Line))
-	}
-	// The grid should now contain "hi" somewhere -- find the 'h' followed by 'i'.
-	found := false
-	for i := 0; i+1 < len(s.Grid.Cells); i++ {
-		if s.Grid.Cells[i].Rune == 'h' && s.Grid.Cells[i+1].Rune == 'i' {
-			found = true
-			break
-		}
-	}
-	if !found {
-		t.Fatal("echo output 'hi' not present in grid after Enter")
-	}
-}
-
-// HandleKey: Enter on `clear` blanks the grid + paints a fresh prompt.
-func TestHandleKeyEnterClear(t *testing.T) {
-	s := New(320, 200)
-	for _, k := range []string{"c", "l", "e", "a", "r"} {
-		s.HandleKey(k)
-	}
-	s.HandleKey("Enter")
-	// After clear, only the prompt cells should carry ink. Count non-zero
-	// glyph cells -- should equal len(prompt).
-	nonZero := 0
-	for _, c := range s.Grid.Cells {
-		if c.Rune != 0 {
-			nonZero++
-		}
-	}
-	// The prompt the shell paints after a clear is the full PromptString()
-	// (cwd + trailing prompt), not just sh.Prompt.
-	if nonZero != len(s.Shell.PromptString()) {
-		t.Fatalf("after `clear`, non-zero cells = %d, want prompt-length %d",
-			nonZero, len(s.Shell.PromptString()))
-	}
-}
-
-// ExecuteForTest wraps Shell.Execute -- exercise it to keep it covered.
-func TestExecuteForTest(t *testing.T) {
-	s := New(160, 100)
-	out := s.ExecuteForTest("echo hi\n")
-	if len(out) != 1 || out[0] != "hi" {
-		t.Fatalf("ExecuteForTest('echo hi\\n') = %v, want [\"hi\"]", out)
-	}
-}
-
-// completionBuiltins merges the three local builtins with every coreutils
-// tool name. The list must (a) include "cd" (local) and "echo" (multicall)
-// and (b) be sorted -- the completion contract requires sorted input.
-func TestCompletionBuiltinsMerged(t *testing.T) {
-	got := completionBuiltins()
-	if len(got) < 4 {
-		t.Fatalf("completionBuiltins() too short: %d", len(got))
-	}
-	have := map[string]bool{}
-	for _, b := range got {
-		have[b] = true
-	}
-	for _, w := range []string{"cd", "clear", "help", "echo"} {
-		if !have[w] {
-			t.Errorf("completionBuiltins() missing %q (got %v)", w, got)
-		}
-	}
-	// Sorted invariant.
-	for i := 1; i < len(got); i++ {
-		if got[i] < got[i-1] {
-			t.Errorf("completionBuiltins() not sorted at %d: %q then %q", i, got[i-1], got[i])
-		}
-	}
-}
-
-// newSceneWithVFS spins up a State that owns a fresh InMemoryVFS the test
-// can pre-populate. Surface is large enough (640x400 => 40x25 cells) that
-// multi-match menus + the redrawn prompt all fit on screen.
+// newSceneWithVFS builds a 640x400 scene over a VFS seeded by seed.
 func newSceneWithVFS(t *testing.T, seed func(v sharedvfs.VFS)) *State {
 	t.Helper()
 	v := sharedvfs.NewInMemoryVFS()
@@ -243,466 +24,425 @@ func newSceneWithVFS(t *testing.T, seed func(v sharedvfs.VFS)) *State {
 	return NewWithVFS(640, 400, v)
 }
 
-// gridString joins the grid's glyphs row-by-row into a single string for
-// substring assertions. Empty cells (Glyph==0) become spaces so the result
-// reads like a screen dump.
-func gridString(s *State) string {
-	g := s.Grid
-	var b strings.Builder
-	for r := 0; r < g.Rows; r++ {
-		for c := 0; c < g.Cols; c++ {
-			ch := g.Cells[r*g.Cols+c].Rune
-			if ch == 0 {
-				b.WriteByte(' ')
-			} else {
-				b.WriteRune(ch)
+// screen is the visible text of the terminal, one line per row.
+func screen(s *State) string {
+	s.ui.Lock()
+	defer s.ui.Unlock()
+	return s.Term.A11y().Value
+}
+
+// waitFor drains the session's queue until cond holds or two seconds pass.
+func waitFor(t *testing.T, s *State, what string, cond func() bool) {
+	t.Helper()
+	deadline := time.Now().Add(2 * time.Second)
+	for {
+		s.Drain()
+		if cond() {
+			return
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("timed out waiting for %s; screen:\n%s", what, screen(s))
+		}
+		time.Sleep(2 * time.Millisecond)
+	}
+}
+
+// waitScreen waits for the screen to contain want.
+func waitScreen(t *testing.T, s *State, want string) {
+	t.Helper()
+	waitFor(t, s, "screen to contain "+want, func() bool { return strings.Contains(screen(s), want) })
+}
+
+// idle waits until no command is running (a paste while one runs is dropped).
+func idle(t *testing.T, s *State) {
+	t.Helper()
+	waitFor(t, s, "the command to finish", func() bool { return !s.Session.Running.Get() })
+}
+
+func key(s *State, k string) { s.HandleKey(Key{Key: k}) }
+
+// typeText types text, with "\n" as Enter.
+func typeText(s *State, text string) {
+	for _, r := range text {
+		if r == '\n' {
+			key(s, "Enter")
+		} else {
+			key(s, string(r))
+		}
+	}
+}
+
+// run types a command line and waits for it to finish.
+func run(t *testing.T, s *State, line string) {
+	t.Helper()
+	typeText(s, line+"\n")
+	waitFor(t, s, "the command to start", func() bool { return true })
+	// A command starts on the session's goroutine: wait for the prompt to
+	// come back after it (the line has been echoed by then).
+	idle(t, s)
+	time.Sleep(20 * time.Millisecond)
+	s.Drain()
+	idle(t, s)
+}
+
+func TestNewSizesGrid(t *testing.T) {
+	s := New(640, 400)
+	cols, rows := s.Term.Screen().Size()
+	if cols != 40 || rows != 25 {
+		t.Fatalf("grid = %dx%d, want 40x25", cols, rows)
+	}
+	if s.W != 640 || s.H != 400 {
+		t.Fatalf("surface = %dx%d", s.W, s.H)
+	}
+	if b := s.Term.Bounds(); b.X != 0 || b.Y != 0 || b.W != 640 || b.H != 400 {
+		t.Fatalf("bounds = %+v, want the whole surface", b)
+	}
+}
+
+func TestNewClampsToMinimum(t *testing.T) {
+	s := New(1, 1)
+	cols, rows := s.Term.Screen().Size()
+	if cols != 1 || rows != 1 {
+		t.Fatalf("grid = %dx%d, want 1x1", cols, rows)
+	}
+}
+
+// A surface that is not a multiple of the cell is centred; the margin is panel.
+func TestRenderFillsMargin(t *testing.T) {
+	s := New(650, 410) // 40x25 cells = 640x400, leaving 10px on each axis
+	buf := make([]byte, 4*s.W*s.H)
+	Render(s, buf)
+	for _, xy := range [][2]int{{0, 0}, {649, 409}, {2, 200}, {647, 200}, {300, 2}, {300, 407}} {
+		if got := pix(buf, s.W, xy[0], xy[1]); got != panelBG {
+			t.Errorf("margin pixel %v = %+v, want panel %+v", xy, got, panelBG)
+		}
+	}
+}
+
+func TestRenderPanicsOnSizeMismatch(t *testing.T) {
+	s := New(64, 64)
+	defer func() {
+		if recover() == nil {
+			t.Fatal("Render with a short buffer did not panic")
+		}
+	}()
+	Render(s, make([]byte, 10))
+}
+
+func pix(buf []byte, w, x, y int) toolkit.RGBA {
+	o := (y*w + x) * 4
+	return toolkit.RGBA{R: buf[o], G: buf[o+1], B: buf[o+2], A: buf[o+3]}
+}
+
+// count counts the pixels of colour c in the surface.
+func count(s *State, c toolkit.RGBA) int {
+	buf := make([]byte, 4*s.W*s.H)
+	Render(s, buf)
+	n := 0
+	for y := 0; y < s.H; y++ {
+		for x := 0; x < s.W; x++ {
+			if pix(buf, s.W, x, y) == c {
+				n++
 			}
 		}
-		b.WriteByte('\n')
 	}
-	return b.String()
+	return n
 }
 
-// TestHandleKeyTabSingleMatch: typing "ec" + Tab autocompletes to "echo"
-// (single match in command position) -- Line grows and the new bytes are
-// painted into the grid.
-func TestHandleKeyTabSingleMatch(t *testing.T) {
-	s := newSceneWithVFS(t, nil)
-	for _, k := range []string{"e", "c"} {
-		s.HandleKey(k)
+func TestBuildMonoFaceFallbackOnBadBlob(t *testing.T) {
+	if f := buildMonoFace([]byte("not a font"), termFontPx); f == nil {
+		t.Fatal("buildMonoFace returned nil on a bad blob; want bitmap fallback")
 	}
-	if !s.HandleKey("Tab") {
-		t.Fatal("Tab on 'ec' should signal a change")
-	}
-	if string(s.Shell.Line) != "echo" {
-		t.Fatalf("Shell.Line = %q, want %q", string(s.Shell.Line), "echo")
-	}
-	if !strings.Contains(gridString(s), "echo") {
-		t.Fatal("grid does not contain 'echo' after Tab autocompletion")
+	if f := termFace(); f == nil || f.Advance() <= 0 {
+		t.Fatalf("termFace() = %v, want a usable monospace face", f)
 	}
 }
 
-// TestHandleKeyTabMultiMatchLCPExtends: typing "b" + Tab in command
-// position has multiple matches (base32, base64, basename) whose longest
-// common prefix "base" is LONGER than the typed target -- bash silently
-// extends the line to "base" rather than printing the menu. We assert
-// Shell.Line grew to "base" and the grid does NOT show a separate
-// "basename" candidate row (no menu was drawn).
-func TestHandleKeyTabMultiMatchLCPExtends(t *testing.T) {
-	s := newSceneWithVFS(t, nil)
-	s.HandleKey("b")
-	if !s.HandleKey("Tab") {
-		t.Fatal("Tab on 'b' should signal a change (LCP extension)")
+// The look is declared through the Terminal: a 16x16 cell, not the face's own.
+func TestCellSizePinned(t *testing.T) {
+	s := New(640, 400)
+	if s.Term.CellWidth() != cellW || s.Term.CellHeight() != cellH {
+		t.Fatalf("cell = %dx%d, want %dx%d", s.Term.CellWidth(), s.Term.CellHeight(), cellW, cellH)
 	}
-	if string(s.Shell.Line) != "base" {
-		t.Fatalf("Shell.Line = %q, want LCP-extended %q", string(s.Shell.Line), "base")
-	}
-	// No menu should have been printed: the candidate row "basename" must
-	// not appear on the grid yet (only after a second Tab would the menu
-	// come up). We grep for "basename" specifically because "base" alone is
-	// now the edit-line prefix and will of course be on the screen.
-	grid := gridString(s)
-	if strings.Contains(grid, "basename") {
-		t.Fatal("grid unexpectedly contains 'basename' -- menu was drawn instead of LCP extension")
+	f := termFace()
+	if s.Term.CellWidth() == f.Advance() && s.Term.CellHeight() == f.Height() {
+		t.Fatal("cell size collapsed to raw font metrics; SetCellSize override lost")
 	}
 }
 
-// TestHandleKeyTabMultiMatchMenu: after LCP-extending to "rm", a second
-// Tab cannot make further progress (LCP == Target) so it falls through
-// to the column-packed menu. Both "rm" and "rmdir" should appear on the
-// grid; Shell.Line must stay "rm".
-func TestHandleKeyTabMultiMatchMenu(t *testing.T) {
-	s := newSceneWithVFS(t, nil)
-	for _, k := range []string{"r", "m"} {
-		s.HandleKey(k)
-	}
-	if !s.HandleKey("Tab") {
-		t.Fatal("Tab on 'rm' should signal a change (menu draw)")
-	}
-	if string(s.Shell.Line) != "rm" {
-		t.Fatalf("Shell.Line = %q, want unchanged %q", string(s.Shell.Line), "rm")
-	}
-	grid := gridString(s)
-	if !strings.Contains(grid, "rm") {
-		t.Fatal("grid missing 'rm' candidate after menu Tab")
-	}
-	if !strings.Contains(grid, "rmdir") {
-		t.Fatal("grid missing 'rmdir' candidate after menu Tab")
+func TestFaceIsMonospace(t *testing.T) {
+	f := termFace()
+	if f.Measure("iiii") != f.Measure("MMMM") {
+		t.Fatalf("non-monospace face: Measure(iiii)=%d != Measure(MMMM)=%d", f.Measure("iiii"), f.Measure("MMMM"))
 	}
 }
 
-// TestHandleKeyTabMultiMatchColumnPack: when matches DON'T share a prefix
-// longer than target, the menu uses column-packed layout. Seed a /scratch
-// directory with three same-prefix-truncated files (foo.txt, foobar.txt,
-// baz.txt) so the target "/scratch/" yields matches with no shared LCP
-// past Target. Assert that the menu appears AND lays out on ONE row when
-// the grid is wide enough to hold all three side-by-side.
-func TestHandleKeyTabMultiMatchColumnPack(t *testing.T) {
+func TestPromptShownAtStart(t *testing.T) {
+	s := New(640, 400)
+	if got := screen(s); !strings.HasPrefix(got, "/ $") {
+		t.Fatalf("no prompt on the fresh screen: %q", got)
+	}
+	if n := count(s, inkCyan); n == 0 {
+		t.Fatal("the prompt is not painted in cyan")
+	}
+}
+
+func TestTypedTextAndEcho(t *testing.T) {
+	s := New(640, 400)
+	typeText(s, "echo hello")
+	waitScreen(t, s, "$ echo hello")
+	key(s, "Enter")
+	waitFor(t, s, "hello on its own row", func() bool {
+		return strings.Contains(screen(s), "\nhello\n") || strings.Contains(screen(s), "\nhello ")
+	})
+	if n := count(s, inkGreen); n < 200 {
+		t.Fatalf("echo output painted %d ink pixels, want >= 200", n)
+	}
+}
+
+func TestBackspaceAndEmptyLine(t *testing.T) {
+	s := New(640, 400)
+	typeText(s, "echo xy")
+	key(s, "Backspace")
+	waitScreen(t, s, "$ echo x")
+	if strings.Contains(screen(s), "echo xy") {
+		t.Fatal("Backspace did not erase the last character")
+	}
+	if s.HandleKey(Key{}) {
+		t.Fatal("an empty key reported a change")
+	}
+}
+
+func TestLeftArrowAndInsertEdit(t *testing.T) {
+	s := New(640, 400)
+	typeText(s, "echo ac")
+	key(s, "ArrowLeft")
+	typeText(s, "b")
+	waitScreen(t, s, "$ echo abc")
+}
+
+func TestClearBuiltin(t *testing.T) {
+	s := New(640, 400)
+	run(t, s, "echo gone")
+	waitScreen(t, s, "gone")
+	run(t, s, "clear")
+	waitFor(t, s, "the screen to clear", func() bool { return !strings.Contains(screen(s), "gone") })
+	if !strings.HasPrefix(screen(s), "/ $") {
+		t.Fatalf("no prompt after clear: %q", screen(s))
+	}
+}
+
+// The prompt is the cwd and "$ " (the single source is Shell.Prompt): it
+// follows a cd, and carries no status prefix (shellterm shows the status).
+func TestPromptFollowsCwd(t *testing.T) {
+	s := New(640, 400)
+	run(t, s, "cd /Documents")
+	waitFor(t, s, "the new prompt", func() bool { return strings.Contains(screen(s), "\n/Documents $") })
+	run(t, s, "frobnicate")
+	waitScreen(t, s, "[exit status 127]")
+	waitFor(t, s, "the prompt after a failure", func() bool {
+		return strings.HasSuffix(strings.TrimRight(screen(s), " \n"), "/Documents $")
+	})
+	if strings.Contains(screen(s), "[127]") {
+		t.Fatal("the prompt carries a status prefix next to shellterm's status line")
+	}
+}
+
+func TestShellPrompt(t *testing.T) {
+	sh := newTestShell()
+	if got := sh.Prompt(); got != "/ $ " {
+		t.Fatalf("Prompt at root = %q", got)
+	}
+	sh.Cwd = "/Documents"
+	sh.LastExit = 7
+	if got := sh.Prompt(); got != "/Documents $ " {
+		t.Fatalf("Prompt after cd = %q", got)
+	}
+}
+
+func TestCommandExitStatusShown(t *testing.T) {
+	s := New(640, 400)
+	run(t, s, "frobnicate")
+	waitScreen(t, s, "frobnicate: command not found")
+	waitScreen(t, s, "[exit status 127]")
+}
+
+func TestTabCompletesCommand(t *testing.T) {
+	s := New(640, 400)
+	typeText(s, "ech")
+	key(s, "Tab")
+	waitScreen(t, s, "$ echo")
+}
+
+func TestTabCompletesFilename(t *testing.T) {
 	s := newSceneWithVFS(t, func(v sharedvfs.VFS) {
-		if err := v.Mkdir("/scratch"); err != nil {
+		if err := v.Write("/zebra-stripes.txt", []byte("x")); err != nil {
 			t.Fatal(err)
 		}
-		for _, p := range []string{"/scratch/foo.txt", "/scratch/foobar.txt", "/scratch/baz.txt"} {
+	})
+	typeText(s, "cat zeb")
+	key(s, "Tab")
+	waitScreen(t, s, "cat zebra-stripes.txt")
+}
+
+func TestTabListsAmbiguousMatches(t *testing.T) {
+	s := newSceneWithVFS(t, func(v sharedvfs.VFS) {
+		for _, p := range []string{"/aa.txt", "/ab.txt"} {
 			if err := v.Write(p, []byte("x")); err != nil {
 				t.Fatal(err)
 			}
 		}
 	})
-	for _, k := range []string{"c", "a", "t", " ", "/", "s", "c", "r", "a", "t", "c", "h", "/"} {
-		s.HandleKey(k)
-	}
-	if !s.HandleKey("Tab") {
-		t.Fatal("Tab on 'cat /scratch/' should signal a change (menu draw)")
-	}
-	if string(s.Shell.Line) != "cat /scratch/" {
-		t.Fatalf("Shell.Line = %q, want unchanged %q", string(s.Shell.Line), "cat /scratch/")
-	}
-	grid := gridString(s)
-	for _, want := range []string{"foo.txt", "foobar.txt", "baz.txt"} {
-		if !strings.Contains(grid, want) {
-			t.Fatalf("grid missing %q candidate after column-packed Tab", want)
-		}
-	}
-}
-
-// TestHandleKeyTabLCPThenMenu: replicates the bash UX flow from the
-// playwright probe -- "cat /scratch/f" + Tab autocompletes (LCP) to
-// "cat /scratch/foo" (no menu), then a second Tab prints the foo.txt /
-// foobar.txt menu.
-func TestHandleKeyTabLCPThenMenu(t *testing.T) {
-	s := newSceneWithVFS(t, func(v sharedvfs.VFS) {
-		if err := v.Mkdir("/scratch"); err != nil {
-			t.Fatal(err)
-		}
-		for _, p := range []string{"/scratch/foo.txt", "/scratch/foobar.txt", "/scratch/baz.txt"} {
-			if err := v.Write(p, []byte("x")); err != nil {
-				t.Fatal(err)
-			}
-		}
+	typeText(s, "ls a")
+	key(s, "Tab") // common prefix "a" adds nothing: the first Tab lists, as bash
+	key(s, "Tab")
+	waitFor(t, s, "both matches listed", func() bool {
+		return strings.Contains(screen(s), "aa.txt") && strings.Contains(screen(s), "ab.txt")
 	})
-	for _, k := range []string{"c", "a", "t", " ", "/", "s", "c", "r", "a", "t", "c", "h", "/", "f"} {
+}
+
+func TestHistoryRecall(t *testing.T) {
+	s := New(640, 400)
+	run(t, s, "echo one")
+	run(t, s, "echo two")
+	key(s, "ArrowUp")
+	waitFor(t, s, "echo two recalled", func() bool { return strings.Count(screen(s), "echo two") == 2 })
+	key(s, "ArrowUp")
+	waitFor(t, s, "echo one recalled", func() bool { return strings.HasSuffix(strings.TrimRight(screen(s), " \n"), "echo one") })
+}
+
+// A command's escape sequences reach the screen: the red text is painted in
+// the look's red, not as literal characters.
+func TestEscapeSequencesColourOutput(t *testing.T) {
+	s := New(640, 400)
+	if n := count(s, inkRed); n != 0 {
+		t.Fatalf("red ink on a fresh screen: %d", n)
+	}
+	run(t, s, `printf '\033[31mRED\033[0m plain\n'`)
+	waitScreen(t, s, "RED plain")
+	// The typed command line holds the text `\033[31m`; its OUTPUT must not.
+	if strings.Contains(screen(s), "RED\x1b") || strings.Contains(screen(s), "\nRED plain\x1b") ||
+		strings.Contains(screen(s), "\n[31mRED") {
+		t.Fatalf("escape sequence shown literally: %q", screen(s))
+	}
+	if n := count(s, inkRed); n < 20 { // 30 exact-colour pixels today; the rest is anti-aliasing
+		t.Fatalf("red text painted %d red pixels, want >= 20", n)
+	}
+}
+
+func TestPasteShortcuts(t *testing.T) {
+	clip := clipboard.New(nil)
+	toolkit.SetClipboard(clip)
+	defer toolkit.SetClipboard(nil)
+	for _, k := range []Key{
+		{Key: "V", Ctrl: true, Shift: true}, // Linux/Windows terminals
+		{Key: "v", Meta: true},              // macOS
+	} {
+		s := New(640, 400)
+		clip.Deliver("echo pasted")
 		s.HandleKey(k)
-	}
-	// First Tab: LCP "/scratch/foo" > target "/scratch/f" -> extend to
-	// "cat /scratch/foo", no menu.
-	if !s.HandleKey("Tab") {
-		t.Fatal("first Tab should LCP-extend")
-	}
-	if string(s.Shell.Line) != "cat /scratch/foo" {
-		t.Fatalf("after first Tab, Shell.Line = %q, want %q",
-			string(s.Shell.Line), "cat /scratch/foo")
-	}
-	gridAfter1 := gridString(s)
-	if strings.Contains(gridAfter1, "foobar.txt") {
-		t.Fatal("first Tab unexpectedly drew the menu (saw 'foobar.txt')")
-	}
-	// Second Tab: matches are foo.txt + foobar.txt, LCP "/scratch/foo"
-	// equals Target -> column-packed menu.
-	if !s.HandleKey("Tab") {
-		t.Fatal("second Tab should draw menu")
-	}
-	if string(s.Shell.Line) != "cat /scratch/foo" {
-		t.Fatalf("after second Tab, Shell.Line = %q, want unchanged %q",
-			string(s.Shell.Line), "cat /scratch/foo")
-	}
-	gridAfter2 := gridString(s)
-	for _, want := range []string{"foo.txt", "foobar.txt"} {
-		if !strings.Contains(gridAfter2, want) {
-			t.Fatalf("grid missing %q candidate after second-Tab menu", want)
-		}
+		waitScreen(t, s, "$ echo pasted")
+		key(s, "Enter")
+		waitFor(t, s, "the pasted command's output", func() bool {
+			return strings.Count(screen(s), "pasted") >= 2
+		})
 	}
 }
 
-// TestHandleKeyTabNoMatch: typing a prefix that matches nothing returns
-// false (no grid change) -- the user sees their line as-is.
-func TestHandleKeyTabNoMatch(t *testing.T) {
-	s := newSceneWithVFS(t, nil)
-	for _, k := range []string{"z", "z", "z"} {
-		s.HandleKey(k)
-	}
-	if s.HandleKey("Tab") {
-		t.Fatal("Tab on 'zzz' should NOT signal a change (no matches)")
-	}
-	if string(s.Shell.Line) != "zzz" {
-		t.Fatalf("Shell.Line = %q, want %q", string(s.Shell.Line), "zzz")
-	}
-}
-
-// TestHandleKeyTabArgFilenameSingle: typing "ls /scr" + Tab autocompletes
-// the directory to "/scratch/" -- the new bytes land in Line + grid.
-func TestHandleKeyTabArgFilenameSingle(t *testing.T) {
-	s := newSceneWithVFS(t, func(v sharedvfs.VFS) {
-		if err := v.Mkdir("/scratch"); err != nil {
-			t.Fatal(err)
-		}
-	})
-	for _, k := range []string{"l", "s", " ", "/", "s", "c", "r"} {
-		s.HandleKey(k)
-	}
-	if !s.HandleKey("Tab") {
-		t.Fatal("Tab on 'ls /scr' should signal a change")
-	}
-	if string(s.Shell.Line) != "ls /scratch/" {
-		t.Fatalf("Shell.Line = %q, want %q", string(s.Shell.Line), "ls /scratch/")
+// A plain Ctrl+V is not a paste: the shell gets ^V, the clipboard stays unread.
+func TestPlainCtrlVIsNotPaste(t *testing.T) {
+	clip := clipboard.New(nil)
+	toolkit.SetClipboard(clip)
+	defer toolkit.SetClipboard(nil)
+	s := New(640, 400)
+	clip.Deliver("never typed")
+	s.HandleKey(Key{Key: "v", Ctrl: true})
+	typeText(s, "x")
+	waitScreen(t, s, "x")
+	if strings.Contains(screen(s), "never typed") {
+		t.Fatal("Ctrl+V pasted the clipboard")
 	}
 }
 
-// TestHandleKeyTabSingleMatchNoExtension: the single match exactly equals
-// the target -- no bytes to add, so handleTab returns false (no change).
-func TestHandleKeyTabSingleMatchNoExtension(t *testing.T) {
-	s := newSceneWithVFS(t, nil)
-	for _, k := range []string{"e", "c", "h", "o"} {
-		s.HandleKey(k)
-	}
-	// "echo" matches exactly one builtin ("echo") with nothing to extend.
-	if s.HandleKey("Tab") {
-		t.Fatal("Tab on full 'echo' should NOT signal a change")
-	}
-}
-
-// typeLine pushes the bytes of one command line into HandleKey -- printable
-// chars + Enter. Helper for the history tests below.
-func typeLine(s *State, line string) {
-	for i := 0; i < len(line); i++ {
-		s.HandleKey(string(line[i]))
-	}
-	s.HandleKey("Enter")
-}
-
-// TestHandleKeyHistoryWalkAndStashRestore covers the headline Bash-style
-// sequence: push three commands, walk Up through the three (clamped at the
-// oldest), walk Down back through, and pop off the most-recent into the
-// empty stash (the user typed nothing before the first Up).
-func TestHandleKeyHistoryWalkAndStashRestore(t *testing.T) {
-	s := newSceneWithVFS(t, nil)
-	typeLine(s, "a")
-	typeLine(s, "b")
-	typeLine(s, "c")
-	if len(s.Shell.History) != 3 {
-		t.Fatalf("history len = %d, want 3", len(s.Shell.History))
-	}
-
-	// First Up: stash empty Line + jump to newest ("c").
-	if !s.HandleKey("ArrowUp") {
-		t.Fatal("ArrowUp #1 should signal a change")
-	}
-	if string(s.Shell.Line) != "c" {
-		t.Fatalf("after Up #1: Line = %q, want %q", s.Shell.Line, "c")
-	}
-	if !s.HandleKey("ArrowUp") || string(s.Shell.Line) != "b" {
-		t.Fatalf("after Up #2: Line = %q, want %q", s.Shell.Line, "b")
-	}
-	if !s.HandleKey("ArrowUp") || string(s.Shell.Line) != "a" {
-		t.Fatalf("after Up #3: Line = %q, want %q", s.Shell.Line, "a")
-	}
-	// Clamped: another Up at the oldest is a no-op (returns false).
-	if s.HandleKey("ArrowUp") {
-		t.Fatal("ArrowUp at oldest should NOT signal a change")
-	}
-	if string(s.Shell.Line) != "a" {
-		t.Fatalf("after Up-clamp: Line = %q, want unchanged %q", s.Shell.Line, "a")
-	}
-
-	// Walk back down: a -> b -> c -> stash ("").
-	if !s.HandleKey("ArrowDown") || string(s.Shell.Line) != "b" {
-		t.Fatalf("after Down #1: Line = %q, want %q", s.Shell.Line, "b")
-	}
-	if !s.HandleKey("ArrowDown") || string(s.Shell.Line) != "c" {
-		t.Fatalf("after Down #2: Line = %q, want %q", s.Shell.Line, "c")
-	}
-	// Past newest: HistIdx = -1, Line reverts to stash ("").
-	if !s.HandleKey("ArrowDown") || string(s.Shell.Line) != "" {
-		t.Fatalf("after Down #3 (pop to stash): Line = %q, want empty", s.Shell.Line)
-	}
-	// Down from a fresh line: no-op.
-	if s.HandleKey("ArrowDown") {
-		t.Fatal("ArrowDown on fresh line should NOT signal a change")
+// A paste with a control character is cleaned by the Terminal: no escape
+// sequence reaches the line editor.
+func TestPasteStripsEscapes(t *testing.T) {
+	clip := clipboard.New(nil)
+	toolkit.SetClipboard(clip)
+	defer toolkit.SetClipboard(nil)
+	s := New(640, 400)
+	clip.Deliver("echo a\x1b[31mb")
+	s.HandleKey(Key{Key: "V", Ctrl: true, Shift: true})
+	waitScreen(t, s, "echo a")
+	if strings.Contains(screen(s), "\x1b") {
+		t.Fatalf("escape reached the screen: %q", screen(s))
 	}
 }
 
-// TestHandleKeyHistoryDedupesAdjacent: typing the same command twice leaves
-// History at length 1 (Bash HISTCONTROL=ignoredups default).
-func TestHandleKeyHistoryDedupesAdjacent(t *testing.T) {
-	s := newSceneWithVFS(t, nil)
-	typeLine(s, "a")
-	typeLine(s, "a")
-	if len(s.Shell.History) != 1 || string(s.Shell.History[0]) != "a" {
-		t.Fatalf("history = %v, want [\"a\"] (dedup)", s.Shell.History)
+// Selecting output with the mouse and pressing the copy shortcut sends the
+// selected text to the clipboard (here, to the writer behind it).
+func TestSelectAndCopy(t *testing.T) {
+	var sent []string
+	toolkit.SetClipboard(clipboard.New(func(s string) { sent = append(sent, s) }))
+	defer toolkit.SetClipboard(nil)
+	s := New(640, 400)
+	run(t, s, "echo hello")
+	waitFor(t, s, "hello output", func() bool { return strings.Contains(screen(s), "\nhello") })
+	b := s.Term.Bounds()
+	y := b.Y + cellH + cellH/2 // row 1: the output line
+	s.HandleMouse("mousemove", b.X+10, y, 0)
+	if len(sent) != 0 {
+		t.Fatal("a hovering mouse selected something")
 	}
-	// A different command between two duplicates pushes both copies of "a"
-	// (only IMMEDIATELY-prior duplicates are suppressed, matching Bash).
-	typeLine(s, "b")
-	typeLine(s, "a")
-	if len(s.Shell.History) != 3 {
-		t.Fatalf("history len = %d, want 3 after non-adjacent dup", len(s.Shell.History))
-	}
-}
-
-// TestHandleKeyHistoryStashesInProgressEdit: typing "wip" then ArrowUp
-// stashes "wip"; walking back down past the newest entry restores it.
-func TestHandleKeyHistoryStashesInProgressEdit(t *testing.T) {
-	s := newSceneWithVFS(t, nil)
-	typeLine(s, "a")
-	typeLine(s, "b")
-	typeLine(s, "c")
-	for _, b := range "wip" {
-		s.HandleKey(string(b))
-	}
-	if string(s.Shell.Line) != "wip" {
-		t.Fatalf("pre-Up: Line = %q, want %q", s.Shell.Line, "wip")
-	}
-	s.HandleKey("ArrowUp")
-	if string(s.Shell.Line) != "c" {
-		t.Fatalf("after Up: Line = %q, want %q", s.Shell.Line, "c")
-	}
-	s.HandleKey("ArrowDown")
-	if string(s.Shell.Line) != "wip" {
-		t.Fatalf("after Down (stash restore): Line = %q, want %q", s.Shell.Line, "wip")
+	s.HandleMouse("mousedown", b.X+2, y, 0)
+	s.HandleMouse("mousemove", b.X+4*cellW+2, y, 0)
+	s.HandleMouse("mouseup", b.X+4*cellW+2, y, 0)
+	s.HandleKey(Key{Key: "C", Ctrl: true, Shift: true})
+	if len(sent) != 1 || sent[0] != "hello" {
+		t.Fatalf("copied %q, want [hello]", sent)
 	}
 }
 
-// TestHandleKeyHistoryCapsAt500: pushing more than historyCap entries
-// truncates the oldest, keeping len(History) == historyCap and the newest
-// at the tail.
-func TestHandleKeyHistoryCapsAt500(t *testing.T) {
-	s := newSceneWithVFS(t, nil)
-	for i := 0; i < 600; i++ {
-		// Each line is distinct so the dedup rule doesn't interfere.
-		s.Shell.Execute(itoa(i))
+func TestWheelScrollsWithoutPanic(t *testing.T) {
+	s := New(640, 400)
+	for i := 0; i < 40; i++ {
+		run(t, s, "echo line")
 	}
-	if got := len(s.Shell.History); got != historyCap {
-		t.Fatalf("history len = %d, want %d (cap)", got, historyCap)
+	if !s.HandleMouse("wheel", 10, 10, -1) {
+		t.Fatal("wheel up reported no change")
 	}
-	// The newest entry survived; the oldest 100 were trimmed off the front.
-	if string(s.Shell.History[historyCap-1]) != itoa(599) {
-		t.Fatalf("newest = %q, want %q", s.Shell.History[historyCap-1], itoa(599))
+	if s.Term.ScrollOffset().Get() == 0 {
+		t.Fatal("wheel up did not scroll back")
 	}
-	if string(s.Shell.History[0]) != itoa(100) {
-		t.Fatalf("oldest = %q, want %q (front trimmed)", s.Shell.History[0], itoa(100))
+	s.HandleMouse("wheel", 10, 10, 1)
+	if s.HandleMouse("wheel", 10, 10, 0) || s.HandleMouse("bogus", 0, 0, 0) {
+		t.Fatal("a zero wheel / an unknown kind reported a change")
 	}
 }
 
-// itoa is a tiny stdlib-free int-to-decimal helper so the cap test does not
-// pull in strconv just for fixture-building.
-func itoa(n int) string {
-	if n == 0 {
-		return "0"
-	}
-	var buf [20]byte
-	i := len(buf)
-	for n > 0 {
-		i--
-		buf[i] = byte('0' + n%10)
-		n /= 10
-	}
-	return string(buf[i:])
-}
-
-// TestHandleKeyHistoryEmpty: ArrowUp / ArrowDown with no history are
-// no-ops -- HandleKey returns false and Line is unchanged.
-func TestHandleKeyHistoryEmpty(t *testing.T) {
-	s := newSceneWithVFS(t, nil)
-	if s.HandleKey("ArrowUp") {
-		t.Fatal("ArrowUp with empty history should NOT signal a change")
-	}
-	if s.HandleKey("ArrowDown") {
-		t.Fatal("ArrowDown on fresh line should NOT signal a change")
-	}
-	if len(s.Shell.Line) != 0 {
-		t.Fatalf("Line mutated to %q on no-op nav", s.Shell.Line)
+func TestRenderIsDeterministic(t *testing.T) {
+	s := New(320, 160)
+	a, b := make([]byte, 4*s.W*s.H), make([]byte, 4*s.W*s.H)
+	Render(s, a)
+	Render(s, b)
+	if string(a) != string(b) {
+		t.Fatal("two renders of an unchanged scene differ")
 	}
 }
 
-// TestHandleKeyHistoryResetOnEdit: after walking into history, a printable
-// keystroke detaches navigation -- the displayed line is kept (now editable)
-// and the next ArrowUp restarts from the new top of stack (the just-edited
-// line is NOT in History until Enter, so Up jumps to the previous entry).
-func TestHandleKeyHistoryResetOnEdit(t *testing.T) {
-	s := newSceneWithVFS(t, nil)
-	typeLine(s, "a")
-	typeLine(s, "b")
-	s.HandleKey("ArrowUp") // Line = "b"
-	if s.Shell.HistIdx == -1 {
-		t.Fatal("HistIdx should be set after ArrowUp")
+// BenchmarkRenderScreenOfText is the keystroke cost: one full repaint of a
+// 640x400 terminal whose screen is full of text. toolkit v0.362.1 no longer
+// allocates once per cell in Terminal.Draw (toolkit#550); allocs/op stays flat.
+func BenchmarkRenderScreenOfText(b *testing.B) {
+	s := New(640, 400)
+	line := strings.Repeat("the quick brown fox ", 2)
+	for i := 0; i < 30; i++ {
+		_, _ = s.Term.Write([]byte(line + "\r\n"))
 	}
-	s.HandleKey("X") // edit: HistIdx resets, Line becomes "bX"
-	if s.Shell.HistIdx != -1 {
-		t.Fatalf("HistIdx = %d after edit, want -1", s.Shell.HistIdx)
-	}
-	if string(s.Shell.Line) != "bX" {
-		t.Fatalf("Line = %q after edit, want %q", s.Shell.Line, "bX")
-	}
-	// Up now restarts: stashes "bX" + jumps to newest ("b").
-	s.HandleKey("ArrowUp")
-	if string(s.Shell.Line) != "b" {
-		t.Fatalf("post-edit Up: Line = %q, want %q", s.Shell.Line, "b")
-	}
-	// Down past newest restores the stashed "bX".
-	s.HandleKey("ArrowDown")
-	if string(s.Shell.Line) != "bX" {
-		t.Fatalf("post-edit Down: Line = %q, want stashed %q", s.Shell.Line, "bX")
-	}
-}
-
-// TestHandleKeyHistoryBackspaceResetsCursor: Backspace after a history Up
-// resets navigation + shrinks the recalled line (proving Backspace flows
-// through the reset path AND the existing shrink logic).
-func TestHandleKeyHistoryBackspaceResetsCursor(t *testing.T) {
-	s := newSceneWithVFS(t, nil)
-	typeLine(s, "ab")
-	s.HandleKey("ArrowUp") // Line = "ab"
-	s.HandleKey("Backspace")
-	if s.Shell.HistIdx != -1 {
-		t.Fatalf("HistIdx = %d after Backspace, want -1", s.Shell.HistIdx)
-	}
-	if string(s.Shell.Line) != "a" {
-		t.Fatalf("Line = %q after Backspace, want %q", s.Shell.Line, "a")
-	}
-}
-
-// TestHandleKeyHistoryEnterResetsCursor: Enter on a recalled line executes
-// it (Bash semantics) AND detaches navigation so the next Up restarts.
-func TestHandleKeyHistoryEnterResetsCursor(t *testing.T) {
-	s := newSceneWithVFS(t, nil)
-	typeLine(s, "echo a")
-	s.HandleKey("ArrowUp") // Line = "echo a"
-	if s.Shell.HistIdx == -1 {
-		t.Fatal("HistIdx should be set after Up")
-	}
-	s.HandleKey("Enter")
-	if s.Shell.HistIdx != -1 {
-		t.Fatalf("HistIdx = %d after Enter, want -1", s.Shell.HistIdx)
-	}
-	// "echo a" deduped against the immediately-prior entry of the same name.
-	if len(s.Shell.History) != 1 {
-		t.Fatalf("history len = %d after Enter-on-recall, want 1 (dedup)", len(s.Shell.History))
-	}
-}
-
-// TestHandleKeyHistoryTabResetsCursor: Tab also detaches history navigation
-// (Bash treats Tab as a line edit for this purpose).
-func TestHandleKeyHistoryTabResetsCursor(t *testing.T) {
-	s := newSceneWithVFS(t, nil)
-	typeLine(s, "echo a")
-	s.HandleKey("ArrowUp") // Line = "echo a"
-	if s.Shell.HistIdx == -1 {
-		t.Fatal("HistIdx should be set after Up")
-	}
-	s.HandleKey("Tab")
-	if s.Shell.HistIdx != -1 {
-		t.Fatalf("HistIdx = %d after Tab, want -1", s.Shell.HistIdx)
-	}
-}
-
-// TestReplaceLinePaintsRecalledBytes: drive replaceLine through ArrowUp and
-// confirm the recalled bytes land in the grid (after the prompt).
-func TestReplaceLinePaintsRecalledBytes(t *testing.T) {
-	s := newSceneWithVFS(t, nil)
-	typeLine(s, "echo hi")
-	// After Enter, the grid has the executed line + output + a fresh
-	// prompt. ArrowUp should paint "echo hi" again on the prompt row.
-	s.HandleKey("ArrowUp")
-	if !strings.Contains(gridString(s), "echo hi") {
-		t.Fatal("grid missing recalled 'echo hi' after ArrowUp")
+	buf := make([]byte, 4*s.W*s.H)
+	b.ReportAllocs()
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		Render(s, buf)
 	}
 }
