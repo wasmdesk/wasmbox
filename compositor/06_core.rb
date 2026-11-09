@@ -486,6 +486,11 @@ class Compositor
       # (12_notifications.rb). `worker` is the poster, so a toast action can fire
       # back to it. The draw + auto-expiry run from render/tick.
       post_notification(msg, worker)
+    when :clipboard_write
+      # The window that has the keyboard copied text — hand it to the page,
+      # which writes it to the browser's clipboard (the compositor and the
+      # clients run in workers, which cannot reach navigator.clipboard).
+      JS.global.call("wasmboxClipboardWrite", msg[:text].to_s)
     when :tray_add
       # A client registered a status icon — add it to the tray strip
       # (13_tray.rb). `worker` is the poster, so a tray click can fire back to it.
@@ -649,7 +654,7 @@ class Compositor
     # see Window#inhibit_shortcuts).
     %w[window_id w h stride title role app index workspace name parent rel_x rel_y lock_aspect ratio
        inhibit_shortcuts body kind icon icon_w icon_h timeout action_label action actions id glyph tooltip
-       summary urgency expire_timeout app_icon image_data image_w image_h resident].each do |k|
+       summary urgency expire_timeout app_icon image_data image_w image_h resident text].each do |k|
       v = data.get(k)
       h[k.to_sym] = v unless v.nil?
     end
@@ -737,6 +742,34 @@ class Compositor
     @canvas.on("wheel")       { |e| mark_dirty; on_wheel(e) }
     JS.window.on("keydown")   { |e| mark_dirty; on_keydown(e) }
     JS.window.on("keyup")     { |e| mark_dirty; on_keyup(e) }
+    JS.window.on("paste")     { |e| mark_dirty; on_paste(e) }
+  end
+
+  # Clipboard text from the page (a `paste` dom_event: the page read the
+  # browser's clipboard on the user's paste shortcut, see docs/protocol.md
+  # "Clipboard"). It goes to the window that has the keyboard, as an input
+  # event of kind "paste", ahead of the shortcut's own keydown (the page sends
+  # the text first). It is NOT forwarded while a compositor overlay holds the
+  # keyboard grab (Exposé, Spotlight, the Alt-Tab switcher): the user is not
+  # pasting into a client then.
+  def on_paste(e)
+    return nil if EXPOSE && expose_active?
+    return nil if SPOTLIGHT && spotlight_active?
+    return nil if ALTTAB && alttab_active?
+    target = @wm.key_target
+    return nil unless target&.external?
+    return nil unless target.worker
+    text = e.get("text")
+    return nil if text.nil?
+    text = text.to_s
+    return nil if text.empty?
+    payload = JS.global.call("wasmboxMakeObject",
+      "type", "input",
+      "window_id", target.id,
+      "event", JS.global.call("wasmboxMakeObject",
+        "kind", "paste",
+        "text", text))
+    JS.global.call("wasmboxPostMessage", target.worker, payload)
   end
 
   # Scroll-wheel input. Forwarded to the panel under the pointer (the dock —
@@ -836,13 +869,19 @@ class Compositor
     return nil unless win.worker
     key  = e.get("key")
     code = e.get("code")
+    # The modifier state rides along (ctrl/meta/alt/shift booleans) so a client
+    # can tell Ctrl+C from c and Ctrl+Shift+V from V.
     payload = JS.global.call("wasmboxMakeObject",
       "type", "input",
       "window_id", win.id,
       "event", JS.global.call("wasmboxMakeObject",
         "kind", kind,
         "key",  key.nil? ? "" : key,
-        "code", code.nil? ? "" : code))
+        "code", code.nil? ? "" : code,
+        "ctrl",  e[:ctrlKey] ? true : false,
+        "meta",  e[:metaKey] ? true : false,
+        "alt",   e[:altKey] ? true : false,
+        "shift", e[:shiftKey] ? true : false))
     JS.global.call("wasmboxPostMessage", win.worker, payload)
   end
 

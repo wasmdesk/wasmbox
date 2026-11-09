@@ -1434,6 +1434,15 @@ globalThis.wasmboxIframeDetach = function (windowID) {
   self.postMessage({ type: B.C2M_IFRAME_DETACH, window_id: windowID });
 };
 
+// Clipboard copy: the Ruby compositor hands over the text the focused client
+// copied; the page writes it to the browser's clipboard (a worker cannot reach
+// navigator.clipboard). Bounded here too, so a client cannot post an unbounded
+// string at the page.
+const MAX_CLIPBOARD = 1 << 20;
+globalThis.wasmboxClipboardWrite = function (text) {
+  self.postMessage({ type: B.C2M_CLIPBOARD_WRITE, text: String(text).slice(0, MAX_CLIPBOARD) });
+};
+
 // Route a dom_event message to the right shim target. Synthesises an event
 // object whose fields cover everything compositor.rb reads through e.get(...):
 //   key, code            -- keydown / keyup
@@ -1457,6 +1466,7 @@ function dispatchDomEvent(m) {
     ctrlKey: m.ctrlKey ?? false,
     altKey: m.altKey ?? false,
     shiftKey: m.shiftKey ?? false,
+    text: m.text ?? "",      // paste: the clipboard text the page read
     preventDefault() {},
   };
   // The Ruby `e.get("foo")` path goes through syscall/js .Get, which reads a

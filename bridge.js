@@ -79,6 +79,13 @@ const WASMBOX_BRIDGE = Object.freeze({
   C2M_IFRAME_ATTACH:     "iframe_attach",
   C2M_IFRAME_MOVE:       "iframe_move",
   C2M_IFRAME_DETACH:     "iframe_detach",
+  // Clipboard copy (docs/protocol.md "Clipboard"). A client in a worker cannot
+  // reach navigator.clipboard, so the text the window that has the keyboard
+  // copied goes to the page, which writes it to the browser's clipboard. The
+  // paste direction rides the existing dom_event relay (kind "paste", with a
+  // `text` field) so it stays ordered with the keydown that caused it.
+  //   { type:"clipboard_write", text }
+  C2M_CLIPBOARD_WRITE:   "clipboard_write",
 
   // dom_event.target values
   TARGET_WINDOW: "window",

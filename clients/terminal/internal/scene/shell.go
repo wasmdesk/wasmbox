@@ -3,9 +3,11 @@
 // found in the LICENSE file at the root of this repository.
 
 // Package scene's shell.go is the in-process "shell" the terminal client
-// runs. v1 was a Fields-split builtin dispatcher; v2 layers a real POSIX-ish
-// front-end (clients/terminal/internal/shellparse) on top, so the terminal
-// now supports:
+// runs: a go-widgets/shellterm Shell. The line editor, history and Tab
+// completion live in go-widgets/lineedit (driven by shellterm.Session); this
+// file only runs a finished line. It layers a real POSIX-ish front-end
+// (clients/terminal/internal/shellparse) over wasmdesk/coreutils, so the
+// terminal supports:
 //
 //   - pipelines via '|' (each stage's stdout becomes the next stage's stdin)
 //   - I/O redirection '<' / '>' / '>>'
@@ -13,18 +15,17 @@
 //   - '$?' expansion to the previous command's exit code
 //   - single- + double-quoted words and backslash escapes
 //
-// Built-ins that mutate shell state (cd / clear / help) STILL stay local
-// because they aren't per-process tools; everything else routes through
+// Built-ins that mutate shell state (cd / clear / help) stay local because
+// they aren't per-process tools; everything else routes through
 // wasmdesk/coreutils via multicall.Dispatch using a per-stage fsx.Env.
-//
-// The prompt is decorated with the previous command's exit code when
-// non-zero (e.g. "[1] /tmp $ "), so a failed command is visible at a glance
-// without typing `echo $?`.
+// Command output is written to the terminal as given, escape sequences
+// included, so a tool may colour its output.
 
 package scene
 
 import (
 	"bytes"
+	"context"
 	"fmt"
 	"io"
 	"strings"
@@ -52,35 +53,10 @@ func stdinBridgePath() string {
 	return fmt.Sprintf("/.shellstdin.%d", n)
 }
 
-// historyCap caps the in-memory command history at the same order of
-// magnitude as Bash's default HISTSIZE (500). Older entries fall off the
-// front when the cap is reached -- bounded memory, newest-wins.
-const historyCap = 500
-
-// Shell is the per-window terminal state. LastExit carries the most recent
-// command's exit code so the prompt can paint "[N]" and the lexer can
-// expand $? on the next line.
-//
-// Bash-style history recall: every successful Execute pushes the trimmed
-// line into History (subject to dedup + cap). The HistIdx cursor and Stash
-// support the Up / Down arrow navigation wired in scene.HandleKey:
-//
-//   - HistIdx == -1 means "user is editing a fresh line"; Up jumps the
-//     cursor to the most recent entry after first stashing Line into Stash
-//     so Down can restore it.
-//   - HistIdx in [0, len(History)-1] points at the entry currently echoed
-//     back into Line; Up decrements, Down increments, clamping at 0; Down
-//     past the newest pops back to -1 and restores Stash.
-//
-// Any non-arrow key edit (printable / Backspace / Enter / Tab) resets
-// HistIdx to -1 so the next Up restarts navigation from the new line --
-// matches Bash's "edit detaches you from history" behaviour.
+// Shell is the per-window shell state: the working directory, the VFS and
+// LastExit, the most recent command's exit code (the lexer expands $? from
+// it). It implements shellterm.Shell.
 type Shell struct {
-	Prompt   string
-	Line     []byte
-	History  [][]byte
-	HistIdx  int    // -1 = fresh line; otherwise index into History.
-	Stash    []byte // saved Line when navigation started from a non-empty edit.
 	Cwd      string
 	VFS      sharedvfs.VFS
 	LastExit int
@@ -95,137 +71,75 @@ func NewShell() *Shell {
 	return NewShellWithVFS(v)
 }
 
-// NewShellWithVFS returns a Shell that speaks the supplied VFS. HistIdx is
-// seeded to -1 (the "fresh line" sentinel) so a first Up arrow correctly
-// jumps to the newest entry rather than into a zero-valued slot.
+// NewShellWithVFS returns a Shell that speaks the supplied VFS.
 func NewShellWithVFS(v sharedvfs.VFS) *Shell {
-	return &Shell{Prompt: " $ ", Cwd: "/", VFS: v, HistIdx: -1}
+	return &Shell{Cwd: "/", VFS: v}
 }
 
-// PromptString returns the rendered prompt. When the last command failed
-// we prepend "[N] " so the failure is visible without typing echo $?.
-func (sh *Shell) PromptString() string {
-	if sh.LastExit != 0 {
-		return fmt.Sprintf("[%d] %s%s", sh.LastExit, sh.Cwd, sh.Prompt)
+// Run runs one command line for a shellterm.Session: the output goes to out
+// (with a closing newline, so the next prompt starts a fresh line), the
+// returned code is the exit status, and clear asks the session to wipe the
+// screen (the `clear` builtin). ctx is not consulted: a command here runs to
+// completion in memory.
+func (sh *Shell) Run(_ context.Context, line string, out io.Writer) (code int, clear bool) {
+	if IsClear(line) {
+		sh.LastExit = 0
+		return 0, true
 	}
-	return sh.Cwd + sh.Prompt
+	text := sh.execute(line)
+	if text != "" {
+		if !strings.HasSuffix(text, "\n") {
+			text += "\n"
+		}
+		_, _ = io.WriteString(out, text)
+	}
+	return sh.LastExit, false
 }
 
 // Execute parses one command line (with pipes/redirects/&&/||/;/$?) and
-// runs it. The returned slice is the lines the renderer paints; LastExit
-// is updated so the next prompt + the next line's $? expansion are right.
+// runs it. The returned slice is the output split into lines; LastExit is
+// updated so the next line's $? expansion is right. It is Run without the
+// terminal: the unit tests drive the shell through it.
+func (sh *Shell) Execute(line string) []string {
+	return splitLines(sh.execute(line))
+}
+
+// execute is the shared core of Run and Execute: it returns the raw output
+// (stdout then stderr).
 //
 // Pure-shell builtins (cd / clear / help) short-circuit BEFORE the parser
 // because they mutate Shell state and don't fit the per-stage tool model.
-// `clear` is handled by the scene above (via IsClear); we keep a no-op
-// branch so a Shell driven outside the scene (e.g. tests) still does the
-// right thing.
-func (sh *Shell) Execute(line string) []string {
+func (sh *Shell) execute(line string) string {
 	trimmed := strings.TrimSpace(line)
 	if trimmed == "" {
-		return nil
+		return ""
 	}
-	sh.pushHistory(trimmed)
 
 	// Local builtins that mutate shell state -- only intercept when the
 	// line is JUST that builtin (no pipes/redirects/chains). A user typing
 	// `cd /tmp && ls` should still hit the parser; `cd /tmp` alone takes
 	// the fast path.
 	if out, ok := sh.tryLocalBuiltin(trimmed); ok {
-		return out
+		if len(out) == 0 {
+			return ""
+		}
+		return strings.Join(out, "\n") + "\n"
 	}
 
 	toks, err := shellparse.Lex(trimmed)
 	if err != nil {
 		sh.LastExit = 2
-		return []string{err.Error()}
+		return err.Error() + "\n"
 	}
 	tree, err := shellparse.Parse(toks)
 	if err != nil {
 		sh.LastExit = 2
-		return []string{err.Error()}
+		return err.Error() + "\n"
 	}
 
 	res := shellparse.Run(tree, sh.LastExit, &vfsExecAdapter{v: sh.VFS, cwd: sh.Cwd}, sh.dispatch)
 	sh.LastExit = res.LastExit
-	return splitLines(string(res.Stdout) + string(res.Stderr))
-}
-
-// pushHistory appends trimmed to History with two Bash-style rules:
-//
-//   - HISTCONTROL=ignoredups (the Bash default): if trimmed is identical to
-//     the immediately previous entry, drop it -- repeated Enter on the same
-//     command leaves history at the same size.
-//   - HISTSIZE=historyCap: once the slice reaches the cap, drop the oldest
-//     entry before appending so memory is bounded and newest-wins.
-//
-// We do NOT touch HistIdx here; it is the caller's job (HandleKey at Enter
-// time) to reset navigation state, because pushHistory is also called from
-// codepaths that may want to keep the cursor (none today, but the seam is
-// useful for a future :history-merge / readline-style reload).
-func (sh *Shell) pushHistory(trimmed string) {
-	if n := len(sh.History); n > 0 && string(sh.History[n-1]) == trimmed {
-		return
-	}
-	if len(sh.History) >= historyCap {
-		// Drop the oldest entry. We could use sh.History[1:] but that
-		// keeps the backing array growing without bound across many
-		// rollovers; copy-in-place keeps the slice header stable.
-		copy(sh.History, sh.History[1:])
-		sh.History = sh.History[:len(sh.History)-1]
-	}
-	sh.History = append(sh.History, []byte(trimmed))
-}
-
-// HistoryUp moves the recall cursor one step further into the past and
-// returns the line the caller should display in Line. When called from
-// HistIdx == -1 it first stashes the current Line into Stash so a matching
-// Down can restore it. ok=false means "no change" (history empty, already
-// at oldest, etc.) -- HandleKey forwards that into a false return so the
-// renderer skips a no-op repaint.
-func (sh *Shell) HistoryUp() (line []byte, ok bool) {
-	if len(sh.History) == 0 {
-		return nil, false
-	}
-	if sh.HistIdx == -1 {
-		// Stash a copy so subsequent Line mutations don't alias it.
-		sh.Stash = append(sh.Stash[:0], sh.Line...)
-		sh.HistIdx = len(sh.History) - 1
-		return append([]byte(nil), sh.History[sh.HistIdx]...), true
-	}
-	if sh.HistIdx == 0 {
-		// Clamped at oldest -- Bash beeps; we just no-op.
-		return nil, false
-	}
-	sh.HistIdx--
-	return append([]byte(nil), sh.History[sh.HistIdx]...), true
-}
-
-// HistoryDown moves the recall cursor one step toward the present. From a
-// fresh line (HistIdx == -1) it no-ops; from the newest entry it falls back
-// to -1 + the stashed line (which is the empty string when the user pressed
-// Up from an empty Line). ok=false means "no change".
-func (sh *Shell) HistoryDown() (line []byte, ok bool) {
-	if sh.HistIdx == -1 {
-		return nil, false
-	}
-	if sh.HistIdx < len(sh.History)-1 {
-		sh.HistIdx++
-		return append([]byte(nil), sh.History[sh.HistIdx]...), true
-	}
-	// At newest entry: pop back to the fresh-line slot + return the stash.
-	sh.HistIdx = -1
-	out := append([]byte(nil), sh.Stash...)
-	sh.Stash = sh.Stash[:0]
-	return out, true
-}
-
-// HistoryReset detaches the recall cursor without touching Line. Called by
-// HandleKey on any input event other than ArrowUp / ArrowDown so the next
-// Up restarts navigation from the just-edited line (Bash semantics).
-func (sh *Shell) HistoryReset() {
-	sh.HistIdx = -1
-	sh.Stash = sh.Stash[:0]
+	return string(res.Stdout) + string(res.Stderr)
 }
 
 // tryLocalBuiltin handles the three lines that don't compose with the
@@ -382,9 +296,8 @@ type vfsErr struct{ msg string }
 // Error returns the wrapped suffix (the executor prepends "shell: <path>:").
 func (e *vfsErr) Error() string { return e.msg }
 
-// splitLines turns a captured stdout/stderr blob into the slice the
-// renderer paints. Trailing newlines are dropped (they would otherwise emit
-// an empty row that reads as a gap).
+// splitLines turns a captured stdout/stderr blob into lines. Trailing
+// newlines are dropped (they would otherwise emit an empty final element).
 func splitLines(s string) []string {
 	if s == "" {
 		return nil

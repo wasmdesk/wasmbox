@@ -277,6 +277,19 @@
       send({ type: "set_frame", name: name });
     }
 
+    // Copy `text` to the user's clipboard: the compositor hands it to the page,
+    // which writes the browser's clipboard (a worker cannot reach it). Only the
+    // window that has the keyboard may copy -- call it while handling the key
+    // press that asked for the copy; from a window in the background it is
+    // dropped. Text past 1 MiB is cut. The paste direction needs no call: when
+    // the user pastes, the compositor sends this window an onInput event
+    // { kind: "paste", text } ahead of the shortcut's own keydown
+    // (docs/protocol.md "Clipboard").
+    writeClipboard(text) {
+      if (this.windowId === null) return;
+      send({ type: "clipboard_write", window_id: this.windowId, text: String(text) });
+    }
+
     // Post a DESKTOP notification: the compositor shows an auto-expiring toast in
     // the top-right corner of the screen (wasmbox/compositor/12_notifications.rb),
     // independent of this window's own surface. opts:

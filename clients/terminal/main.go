@@ -3,10 +3,15 @@
 // found in the LICENSE file at the root of this repository.
 
 // Command terminal is the wasmbox external client spawned when the dock's
-// "terminal" icon is clicked. It hosts a real interactive shell: printable
-// ASCII extends the edit line, Backspace shrinks it, Enter executes a small
-// builtin (echo / help / clear / date / pwd / ls / cd / cat / mkdir / touch
-// / rm / `echo TEXT > PATH`) and the output is painted above a fresh prompt.
+// "terminal" icon is clicked. It hosts a real interactive shell on
+// go-widgets/shellterm (the terminal shared with the go-wasmcontainers
+// dashboard): a line editor with cursor motion, kill/yank, history, Tab
+// completion and Ctrl-R, in front of a POSIX-ish shell (pipes, redirection,
+// &&/||/;, $?) over the wasmdesk/coreutils tools. Output may carry escape
+// sequences (colours, cursor motion). Text is selected with the mouse and
+// copied with Meta+C / Ctrl+Shift+C; Meta+V / Ctrl+Shift+V pastes (a plain
+// Ctrl+V is ^V for the shell). The clipboard is the browser's, through the
+// wasmbox clipboard protocol (docs/protocol.md "Clipboard").
 //
 // The filesystem is the SAME clients/sharedvfs the files browser paints; in
 // the browser it is IndexedDB-backed (database "wasmbox.vfs"), so writes
@@ -25,6 +30,7 @@ package main
 import (
 	"syscall/js"
 
+	"github.com/wasmdesk/wasmbox/clients/clipboard"
 	"github.com/wasmdesk/wasmbox/clients/sharedvfs"
 	"github.com/wasmdesk/wasmbox/clients/terminal/internal/scene"
 )
@@ -53,6 +59,9 @@ func main() {
 		return
 	}
 
+	// The browser's clipboard, through the compositor, is the toolkit's.
+	clip := clipboard.Install(client)
+
 	// Open the persistent IndexedDB-backed VFS shared with clients/files.
 	// Falls back to a fresh InMemoryVFS when `indexedDB` is unavailable
 	// (non-browser host or disabled by the page).
@@ -79,42 +88,55 @@ func main() {
 	}
 
 	// Initial paint so the compositor has something to blit immediately.
+	state.Drain()
 	render()
 
-	// Input handler: routes keydown events into the shell. The compositor
-	// sends one event per keystroke with kind=="keydown" + key=="<char>" for
-	// printable keys, "Enter" / "Backspace" for the control keys we care
-	// about. It repaints directly whenever HandleKey reports a change.
-	//
-	// Earlier this path coalesced repaints through a setTimeout(0) task: the
-	// toolkit's TerminalView.Draw span-filled the whole grid background twice
-	// per frame, so a keystroke burst could queue N blocking renders behind the
-	// input events and the canvas trailed the shell by the whole backlog. The
-	// v0.74 Draw does a single background pass (cells that match the clear
-	// colour are skipped), so a per-keystroke render is cheap enough to run
-	// synchronously and the coalescing shim is no longer needed -- direct
-	// rendering keeps the canvas exactly in step with the shell with no
-	// stale-capture backlog.
+	// Input handler: routes the compositor's input events into the terminal.
+	//   keydown  -- key + ctrl/meta/alt/shift: typed text, or a key press
+	//   paste    -- the clipboard text, sent ahead of the paste shortcut's keydown
+	//   mouse*   -- selection (press + drag), wheel -- scrollback
+	// Keys, completion and commands run on shellterm's own goroutines; what they
+	// show comes back through the state's queue (the Wake loop below), so a key
+	// handler never blocks the event loop and never touches the screen.
 	cb := js.FuncOf(func(_ js.Value, args []js.Value) any {
 		if len(args) == 0 {
 			return nil
 		}
 		ev := args[0]
-		kind := ev.Get("kind").String()
-		if kind != "keydown" {
-			return nil
+		changed := false
+		switch ev.Get("kind").String() {
+		case "keydown":
+			changed = state.HandleKey(scene.Key{
+				Key:   ev.Get("key").String(),
+				Ctrl:  ev.Get("ctrl").Truthy(),
+				Meta:  ev.Get("meta").Truthy(),
+				Alt:   ev.Get("alt").Truthy(),
+				Shift: ev.Get("shift").Truthy(),
+			})
+		case "paste":
+			if t := ev.Get("text"); t.Type() == js.TypeString {
+				clip.Deliver(t.String())
+			}
+		case "mousedown", "mousemove", "mouseup":
+			changed = state.HandleMouse(ev.Get("kind").String(), ev.Get("x").Int(), ev.Get("y").Int(), 0)
+		case "wheel":
+			changed = state.HandleMouse("wheel", ev.Get("x").Int(), ev.Get("y").Int(), ev.Get("deltaY").Float())
 		}
-		key := ev.Get("key").String()
-		if state.HandleKey(key) {
+		if changed {
 			render()
 		}
 		return nil
 	})
 	client.Call("onInput", cb)
 
-	// Park forever so the Go runtime keeps the FuncOf callback alive. Without
-	// a live root the wasm Go runtime would free the callback on the next GC.
-	select {}
+	// The UI loop: the session queues what the screen must show (output, the
+	// prompt, a clear) and wakes us; we run it and repaint once. This also
+	// parks main forever, so the Go runtime keeps the FuncOf callback alive.
+	for range state.Wake() {
+		if state.Drain() > 0 {
+			render()
+		}
+	}
 }
 
 // openVFS opens the IndexedDB-backed VFS, falling back to an in-memory VFS
