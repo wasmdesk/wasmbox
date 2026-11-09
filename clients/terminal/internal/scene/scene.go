@@ -86,7 +86,7 @@ func NewWithVFS(width, height int, v sharedvfs.VFS) *State {
 		theme: newTheme(),
 		wake:  make(chan struct{}, 1),
 	}
-	s.Session = shellterm.New(shellterm.Options{Post: s.post})
+	s.Session = shellterm.New(shellterm.Options{Post: s.post, Prompt: s.Shell.Prompt})
 	s.Session.SetShell(s.Shell, s.Shell.Completer())
 	// Wire the Terminal and the session together: typed bytes go to the
 	// session, its output comes back through the Post queue. The grid was

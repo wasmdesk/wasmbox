@@ -119,9 +119,9 @@ Delete, Ctrl-W (kill a word), Ctrl-U and Ctrl-K (kill to the start / end), ↑/�
 (Ctrl-P / Ctrl-N) for the history, **Ctrl-R** to search it, **Tab** to complete a
 command or a path (a first Tab completes the common prefix; a second one lists
 the matches, as readline does), Ctrl-L to clear, Ctrl-C to interrupt.
-Shift+PageUp/PageDown or the wheel scroll the screen's history. The prompt is a
-plain `$` (use `pwd` for the directory), and a failed command is followed by a
-dim `[exit status N]` line.
+Shift+PageUp/PageDown or the wheel scroll the screen's history. The prompt is
+the working directory and `$` in cyan, and a failed command is followed by a dim
+`[exit status N]` line.
 
 **Clipboard.** Select text with the mouse, then **⌘C** (or Ctrl+Shift+C) copies
 it; **⌘V** (or Ctrl+Shift+V) pastes. A plain Ctrl+V is `^V` for the shell. Pasted

@@ -179,7 +179,7 @@ func TestFaceIsMonospace(t *testing.T) {
 
 func TestPromptShownAtStart(t *testing.T) {
 	s := New(640, 400)
-	if got := screen(s); !strings.HasPrefix(got, "$") {
+	if got := screen(s); !strings.HasPrefix(got, "/ $") {
 		t.Fatalf("no prompt on the fresh screen: %q", got)
 	}
 	if n := count(s, inkCyan); n == 0 {
@@ -227,8 +227,36 @@ func TestClearBuiltin(t *testing.T) {
 	waitScreen(t, s, "gone")
 	run(t, s, "clear")
 	waitFor(t, s, "the screen to clear", func() bool { return !strings.Contains(screen(s), "gone") })
-	if !strings.HasPrefix(screen(s), "$") {
+	if !strings.HasPrefix(screen(s), "/ $") {
 		t.Fatalf("no prompt after clear: %q", screen(s))
+	}
+}
+
+// The prompt is the cwd and "$ " (the single source is Shell.Prompt): it
+// follows a cd, and carries no status prefix (shellterm shows the status).
+func TestPromptFollowsCwd(t *testing.T) {
+	s := New(640, 400)
+	run(t, s, "cd /Documents")
+	waitFor(t, s, "the new prompt", func() bool { return strings.Contains(screen(s), "\n/Documents $") })
+	run(t, s, "frobnicate")
+	waitScreen(t, s, "[exit status 127]")
+	waitFor(t, s, "the prompt after a failure", func() bool {
+		return strings.HasSuffix(strings.TrimRight(screen(s), " \n"), "/Documents $")
+	})
+	if strings.Contains(screen(s), "[127]") {
+		t.Fatal("the prompt carries a status prefix next to shellterm's status line")
+	}
+}
+
+func TestShellPrompt(t *testing.T) {
+	sh := newTestShell()
+	if got := sh.Prompt(); got != "/ $ " {
+		t.Fatalf("Prompt at root = %q", got)
+	}
+	sh.Cwd = "/Documents"
+	sh.LastExit = 7
+	if got := sh.Prompt(); got != "/Documents $ " {
+		t.Fatalf("Prompt after cd = %q", got)
 	}
 }
 

@@ -76,6 +76,12 @@ func NewShellWithVFS(v sharedvfs.VFS) *Shell {
 	return &Shell{Cwd: "/", VFS: v}
 }
 
+// Prompt is the prompt: the working directory and "$ ", handed to shellterm as
+// Options.Prompt (the single source of the prompt). It carries no exit-status
+// prefix: shellterm shows a failed command's status itself, as a dim
+// "[exit status N]" line.
+func (sh *Shell) Prompt() string { return sh.Cwd + " $ " }
+
 // Run runs one command line for a shellterm.Session: the output goes to out
 // (with a closing newline, so the next prompt starts a fresh line), the
 // returned code is the exit status, and clear asks the session to wipe the
