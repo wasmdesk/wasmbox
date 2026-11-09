@@ -260,6 +260,11 @@ try {
   {
     const rowsBefore = await countInkedRows();
     await page.keyboard.type("cat /scratch/", { delay: 4 });
+    // go-widgets/lineedit completes like readline's default: the first Tab
+    // with no common-prefix progress rings (does nothing), the second lists
+    // (the previous hand-written editor listed on the first).
+    await page.keyboard.press("Tab");
+    await page.waitForTimeout(150);
     await page.keyboard.press("Tab");
     await page.waitForTimeout(180);
     const rowsAfter = await countInkedRows();

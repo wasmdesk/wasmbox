@@ -401,3 +401,20 @@ func TestRenderIsDeterministic(t *testing.T) {
 		t.Fatal("two renders of an unchanged scene differ")
 	}
 }
+
+// BenchmarkRenderScreenOfText is the keystroke cost: one full repaint of a
+// 640x400 terminal whose screen is full of text. toolkit v0.362.1 no longer
+// allocates once per cell in Terminal.Draw (toolkit#550); allocs/op stays flat.
+func BenchmarkRenderScreenOfText(b *testing.B) {
+	s := New(640, 400)
+	line := strings.Repeat("the quick brown fox ", 2)
+	for i := 0; i < 30; i++ {
+		_, _ = s.Term.Write([]byte(line + "\r\n"))
+	}
+	buf := make([]byte, 4*s.W*s.H)
+	b.ReportAllocs()
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		Render(s, buf)
+	}
+}

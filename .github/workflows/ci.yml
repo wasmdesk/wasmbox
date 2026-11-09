@@ -328,6 +328,14 @@ jobs:
         working-directory: test
         run: node probe-terminal-coreutils.mjs
 
+      - name: Run headless Terminal escape-sequence probe (SGR colours from a coreutils command)
+        working-directory: test
+        run: node probe-terminal-escapes.mjs
+
+      - name: Run headless Terminal clipboard probe (paste shortcuts, plain Ctrl+V negative, pasted newline runs, mouse select + copy)
+        working-directory: test
+        run: node probe-terminal-clipboard.mjs
+
       - name: Run headless shell-pipes probe
         working-directory: test
         run: node probe-shell-pipes.mjs

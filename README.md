@@ -91,7 +91,8 @@ toolkit consumers; one is authored entirely in Ruby:
 |--------|------------|
 | `hello` | reference minimal external client (the protocol smoke test) |
 | `dock` | the [`wasmdock`](https://github.com/wasmdesk/wasmdock) dock, built from the sibling repo |
-| `terminal`, `files` | placeholder app windows with distinct surfaces/titles |
+| `terminal` | a shell on [go-widgets/shellterm](https://github.com/go-widgets/shellterm) over the coreutils tools (see [Terminal](#terminal)) |
+| `files` | the file browser over the shared IndexedDB VFS |
 | `code` | a VS Code-styled editor shell |
 | `showcase` | a 7-tab Notebook exercising every toolkit widget family |
 | `calculator` | Entry + 5×4 Button grid — a small focused toolkit consumer |
@@ -101,6 +102,40 @@ toolkit consumers; one is authored entirely in Ruby:
 | `rubytk` | a Tip Calculator whose **whole UI + logic are Ruby** via `require "widgets"` |
 | `quake` | pure-Go Quake 1 from the sibling [`go-quake1`](https://github.com/go-quake1) repo, streaming its assets from an OCI registry |
 | `doom` | pure-Go Doom from the sibling [`go-doom`](https://github.com/go-doom/engine) repo (software renderer, 4:3-locked window), streaming the [Freedoom](https://freedoom.github.io) IWAD (BSD-3-Clause, sha256-pinned) from the same-origin `/v2/doom-assets` mirror |
+
+### Terminal
+
+*Applications → Terminal*. The terminal is
+[go-widgets/shellterm](https://github.com/go-widgets/shellterm), the one the
+go-wasmcontainers dashboard shares: a `toolkit.Terminal` screen (a VT model, so
+command output may carry colours and cursor motion), a
+[go-widgets/lineedit](https://github.com/go-widgets/lineedit) line editor, and
+this client's shell (`internal/shellparse` + [wasmdesk/coreutils](https://github.com/wasmdesk/coreutils)
+over the same IndexedDB filesystem the Files client shows: pipes, `<` `>` `>>`,
+`&&` `||` `;`, `$?`). The look is unchanged: 16×16 cells, JetBrains Mono.
+
+Editing keys: ←/→ (Ctrl-B / Ctrl-F), Home/End (Ctrl-A / Ctrl-E), Backspace and
+Delete, Ctrl-W (kill a word), Ctrl-U and Ctrl-K (kill to the start / end), ↑/↓
+(Ctrl-P / Ctrl-N) for the history, **Ctrl-R** to search it, **Tab** to complete a
+command or a path (a first Tab completes the common prefix; a second one lists
+the matches, as readline does), Ctrl-L to clear, Ctrl-C to interrupt.
+Shift+PageUp/PageDown or the wheel scroll the screen's history. The prompt is a
+plain `$` (use `pwd` for the directory), and a failed command is followed by a
+dim `[exit status N]` line.
+
+**Clipboard.** Select text with the mouse, then **⌘C** (or Ctrl+Shift+C) copies
+it; **⌘V** (or Ctrl+Shift+V) pastes. A plain Ctrl+V is `^V` for the shell. Pasted
+control characters (an escape sequence smuggled in the text) are stripped, and a
+pasted newline runs the line. A paste while a command runs is dropped. The
+clipboard is the browser's, through the new `clipboard_write` message and `paste`
+input event: see *Clipboard* in [`docs/protocol.md`](docs/protocol.md); any client
+can use it (`client.writeClipboard(text)`, `onInput` kind `paste`, or
+`clients/clipboard` in Go). Browser permissions: a copy needs no prompt; a paste
+reads the clipboard through the browser's `paste` event, and falls back to
+`navigator.clipboard.readText()`, which may ask once.
+
+Probes: `test/probe-terminal*.mjs` (typing, completion, history, coreutils,
+escape sequences, clipboard).
 
 ### Doom
 

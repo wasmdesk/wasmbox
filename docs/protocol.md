@@ -311,15 +311,20 @@ Coordinates are translated from screen-space to surface-local space.
   type: "input",
   window_id: 7,
   event: {
-    kind: "mousedown",    // mousedown | mouseup | mousemove | wheel | keydown | keyup
+    kind: "mousedown",    // mousedown | mouseup | mousemove | wheel | keydown | keyup | paste
     x: 42, y: 17,         // surface-local pixels (mouse only)
     button: 0,            // 0=left 1=middle 2=right (mouse only)
     key: "a",             // KeyboardEvent.key (keyboard only)
     code: "KeyA",         // KeyboardEvent.code (keyboard only)
-    dx: 0, dy: -1,        // wheel delta (wheel only)
+    ctrl: false, meta: false, alt: false, shift: false,  // modifier state (keydown / keyup)
+    deltaX: 0, deltaY: -1,  // wheel delta (wheel only)
+    text: "…",            // the clipboard text (paste only, see Clipboard)
   }
 }
 ```
+
+The modifier flags let a client tell Ctrl+C from `c` and Ctrl+Shift+V from `V`
+(they were added with the clipboard; a client that ignores them is unaffected).
 
 Only events that land on the focused window are dispatched. Decoration hits
 (titlebar drag, close box, resize grip) are intercepted by the compositor
@@ -339,6 +344,65 @@ any other key (it is Doom's menu key).
 ```
 
 Sent once. After this the worker may shut itself down (`self.close()`).
+
+## Clipboard
+
+Text only. The compositor and the clients run in workers, which cannot reach the
+browser's clipboard, so the **page** (`index.html`, the main thread) does the
+browser work and the compositor relays. The model is go-widgets/webcanvas's
+clipboard bridge; the difference is the transport.
+
+### `clipboard_write`  (C → S, then S → page)
+
+```js
+{ type: "clipboard_write", window_id: 7, text: "hello" }       // client → compositor
+{ type: "clipboard_write", text: "hello" }                     // compositor → page (bridge.js C2M_CLIPBOARD_WRITE)
+```
+
+The client copied `text` (SDK: `client.writeClipboard(text)`). The page calls
+`navigator.clipboard.writeText(text)`, which the Clipboard API allows during a
+user activation: a copy is made while handling the key press that asked for it,
+a few milliseconds earlier, so it is inside the activation window. A refused write
+(no activation, a denied permission, an insecure context) is swallowed: the text
+stays in the client for its own paste.
+
+The compositor accepts it **only from the window that has the keyboard** (the
+focused window, or the popup holding the grab); from any other window it is
+dropped, so a background window cannot overwrite what the user copied. An empty
+text is dropped. The text is cut to 1 MiB (`clipboard.MaxBytes`) by the
+compositor worker, the page and the Go client alike.
+
+### `paste`  (page → S → C, an `input` event)
+
+```js
+{ type: "input", window_id: 7, event: { kind: "paste", text: "hello" } }   // S → C
+{ type: "dom_event", target: "window", kind: "paste", text: "hello" }     // page → compositor
+```
+
+The only synchronous, prompt-free read of the browser's clipboard is a `paste`
+event's `clipboardData`. So the page **holds** a paste shortcut (V with Ctrl or
+Meta, not Alt) at `keydown` — not relayed, not prevented — until the browser
+fires `paste`; it then sends the compositor the text, and only then relays the
+held key. If no `paste` event comes within 200 ms (Chromium's Ctrl+Shift+V on a
+non-editable page), the page falls back to `navigator.clipboard.readText()`
+(which may prompt the user once); if that fails too, the key is relayed alone.
+Whatever happens the key is relayed exactly once and unchanged — only its
+timing moves (a few ms in the normal case).
+
+The compositor forwards the `paste` event to the window that has the keyboard,
+**ahead of** the shortcut's own `keydown` (both travel the same ordered
+channels). The client records the text; its own paste action, triggered by the
+`keydown`, then finds it. A paste is not forwarded while an Exposé / Spotlight /
+Alt-Tab overlay holds the keyboard. A paste with no held key (the browser's Edit
+menu) only refreshes the text.
+
+In Go, `clients/clipboard` is a `toolkit.Clipboard` over these two messages:
+`clipboard.Install(client)` (js/wasm) installs it with `toolkit.SetClipboard`;
+route `paste` input events to its `Deliver`. `toolkit.Terminal` then copies with
+Meta+C / Ctrl+Shift+C and pastes with Meta+V / Ctrl+Shift+V (a plain Ctrl+V is
+`^V`, for the shell) and strips control characters from the pasted text.
+
+Probe: `test/probe-terminal-clipboard.mjs`.
 
 ## Coordinate system
 
@@ -447,4 +511,5 @@ closes it.
 * `request_resize` (would need a fresh SAB) + surface-size clamping negotiation.
 * GPU offload (everything blits through 2D `putImageData`; no dmabuf/WebGPU).
 * Client-side decorations (decorations are always compositor-drawn).
-* IME / clipboard / drag-and-drop.
+* IME / drag-and-drop. (Text clipboard: see *Clipboard*; images and rich text
+  are not carried.)
