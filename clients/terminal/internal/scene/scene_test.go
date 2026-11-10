@@ -5,6 +5,7 @@
 package scene
 
 import (
+	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -460,12 +461,19 @@ func BenchmarkKeystrokeRender(b *testing.B) {
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
 		s.HandleKey(Key{Key: "a"})
-		for s.Drain() == 0 {
-		}
+		drainWait(s)
 		Render(s, buf)
 		s.HandleKey(Key{Key: "Backspace"})
-		for s.Drain() == 0 {
-		}
+		drainWait(s)
 		Render(s, buf)
+	}
+}
+
+// drainWait runs the session's queue once it has something. It yields while it
+// waits: on js/wasm there is one thread and no preemption, so a spin without
+// Gosched would starve the session goroutine it waits for.
+func drainWait(s *State) {
+	for s.Drain() == 0 {
+		runtime.Gosched()
 	}
 }
