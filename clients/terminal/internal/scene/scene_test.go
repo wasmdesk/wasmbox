@@ -435,7 +435,7 @@ func TestRenderIsDeterministic(t *testing.T) {
 // allocates once per cell in Terminal.Draw (toolkit#550); allocs/op stays flat.
 func BenchmarkRenderScreenOfText(b *testing.B) {
 	s := New(640, 400)
-	line := strings.Repeat("the quick brown fox ", 2)
+	line := strings.Repeat("the quick brown fox ", 2)[:39]
 	for i := 0; i < 30; i++ {
 		_, _ = s.Term.Write([]byte(line + "\r\n"))
 	}
@@ -443,6 +443,29 @@ func BenchmarkRenderScreenOfText(b *testing.B) {
 	b.ReportAllocs()
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
+		Render(s, buf)
+	}
+}
+
+// BenchmarkKeystrokeRender: a keystroke (type a, erase it) each followed by a
+// full Render, after the session's output has been drained.
+func BenchmarkKeystrokeRender(b *testing.B) {
+	s := New(640, 400)
+	line := strings.Repeat("the quick brown fox ", 2)[:39]
+	for i := 0; i < 30; i++ {
+		_, _ = s.Term.Write([]byte(line + "\r\n"))
+	}
+	buf := make([]byte, 4*s.W*s.H)
+	b.ReportAllocs()
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		s.HandleKey(Key{Key: "a"})
+		for s.Drain() == 0 {
+		}
+		Render(s, buf)
+		s.HandleKey(Key{Key: "Backspace"})
+		for s.Drain() == 0 {
+		}
 		Render(s, buf)
 	}
 }
