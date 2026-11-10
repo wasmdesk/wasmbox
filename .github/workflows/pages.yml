@@ -278,3 +278,10 @@ jobs:
       - name: Deploy
         id: deployment
         uses: actions/deploy-pages@v5
+        # The site carries ~75 MB of game assets plus every client wasm, and
+        # GitHub's side can spend minutes queued and then syncing files. On
+        # 2026-11-10 three deploys in a row sat ~4 min in deployment_queued
+        # and ~6 min in syncing_files, then hit the 10-minute default and were
+        # cancelled, with nothing wrong in the site. 20 minutes covers that.
+        with:
+          timeout: 1200000
