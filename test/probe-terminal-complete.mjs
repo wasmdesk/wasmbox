@@ -138,7 +138,24 @@ try {
   // is a weak signal but combined with the ink-delta it gives us
   // reasonable confidence.
 
-  async function countInk() {
+  // Read until two consecutive samples agree. Since the move to shellterm a
+  // key is handled on the session goroutine and painted later, so a fixed
+  // sleep can sample a frame that is still changing: on main 4d3a2e3, T2's
+  // "before" read 4508 inked pixels right after clearLine's 80 Backspaces,
+  // and the "after" read 460.
+  async function settled(read) {
+    let prev = await read();
+    for (let i = 0; i < 60; i++) {
+      await page.waitForTimeout(50);
+      const cur = await read();
+      if (cur === prev) return cur;
+      prev = cur;
+    }
+    throw new Error("terminal did not settle within 3 s");
+  }
+  const countInk = () => settled(countInkOnce);
+
+  async function countInkOnce() {
     const shot = await page.screenshot({ type: "png", fullPage: false });
     const png = PNG.sync.read(shot);
     const { width } = png;
