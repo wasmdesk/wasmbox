@@ -24,7 +24,7 @@
 
 "use strict";
 
-const H_WRITE = 0, H_READ = 1, H_UNDERRUN = 2, H_PLAYED = 3, H_STATE = 5;
+const H_WRITE = 0, H_READ = 1, H_UNDERRUN = 2, H_PLAYED = 3, H_STATE = 5, H_HBEAT = 6;
 
 class WasmboxRing extends AudioWorkletProcessor {
   constructor(options) {
@@ -46,6 +46,11 @@ class WasmboxRing extends AudioWorkletProcessor {
   process(_inputs, outputs) {
     const out = outputs[0];
     const n = out[0].length;
+    // Heartbeat: one tick per render quantum, whatever the ring holds. It
+    // measures the CONSUMER (the context runs and this node is pulled), so a
+    // producer can tell "the page plays" from "nobody reads" (a context still
+    // suspended before a gesture, a page that has gone).
+    Atomics.add(this.hdr, H_HBEAT, 1);
     if (Atomics.load(this.hdr, H_STATE) !== 0) return false;   // closed: let the node be collected
     const w = Atomics.load(this.hdr, H_WRITE) >>> 0;
     let r = this.r;

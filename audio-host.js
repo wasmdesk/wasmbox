@@ -2,7 +2,7 @@
 //
 // wasmbox audio relay, page half. The page (main thread) is the only place an
 // AudioContext can live. It owns ONE context; every client ring becomes an
-// AudioWorkletNode (audio-worklet.js, reading the ring on the audio thread)
+// AudioWorkletNode (audioring/audio-worklet.js, served as /audio-worklet.js, reading the ring on the audio thread)
 // -> a per-window GainNode -> the destination, so the browser mixes them.
 //
 // Mixing policy: every open window is mixed at gain 1. Unfocused windows are
@@ -115,6 +115,7 @@
         played: Atomics.load(e.hdr, A.H_PLAYED) >>> 0,
         underruns: Atomics.load(e.hdr, A.H_UNDERRUN) >>> 0,
         overruns: Atomics.load(e.hdr, A.H_OVERRUN) >>> 0,
+        heartbeat: Atomics.load(e.hdr, A.H_HBEAT) >>> 0,
         buffered: (Atomics.load(e.hdr, A.H_WRITE) - Atomics.load(e.hdr, A.H_READ)) >>> 0,
       }));
     },

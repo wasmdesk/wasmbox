@@ -156,6 +156,15 @@ func main() {
 			http.StripPrefix("", http.FileServer(http.Dir("clients/loom/dist"))).ServeHTTP(w, r)
 			return
 		}
+		// The worklet lives in the audioring module (go:embed), not at the
+		// repository root: a dev server rooted here serves that one file for
+		// the page. A built site directory carries its own copy.
+		if r.URL.Path == "/audio-worklet.js" {
+			if _, err := os.Stat(filepath.Join(*dir, "audio-worklet.js")); err != nil {
+				http.ServeFile(w, r, filepath.Join(*dir, "audioring", "audio-worklet.js"))
+				return
+			}
+		}
 		fs.ServeHTTP(w, r)
 	})
 

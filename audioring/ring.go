@@ -3,8 +3,8 @@
 // Package audioring is the producer half of the wasmbox audio relay: a
 // single-producer / single-consumer ring of interleaved float32 PCM that lives
 // in a SharedArrayBuffer. The consumer is the AudioWorkletProcessor in
-// audio-worklet.js, which reads the ring on the audio thread; nothing is
-// posted per buffer.
+// audio-worklet.js (embedded here as WorkletJS), which reads the ring on the
+// audio thread; nothing is posted per buffer.
 //
 // AudioContext does not exist in a DedicatedWorker, so a wasmbox client cannot
 // play sound itself. It writes into this ring and the compositor page plays it.
@@ -18,6 +18,7 @@
 //	  [3] played      consumer: frames output
 //	  [4] overruns    producer: frames dropped because the ring was full
 //	  [5] state       0 open, 1 closed (set by either side; the consumer then stops)
+//	  [6] heartbeat   consumer: +1 on every process() call (free-running)
 //	bytes 64..    capacityFrames*channels float32, interleaved
 //
 // capacityFrames is a power of two, so the free-running counters stay correct
@@ -46,6 +47,7 @@ const (
 	HPlayed   = 3
 	HOverrun  = 4
 	HState    = 5
+	HBeat     = 6
 
 	StateOpen   = 0
 	StateClosed = 1
@@ -187,6 +189,12 @@ func (w *Writer) Stats() Stats {
 		Overruns:  uint32(w.m.Load(HOverrun)),
 	}
 }
+
+// Heartbeat is the consumer's render-quantum counter (free-running uint32). It
+// advances while the worklet runs, whatever the ring holds, so a producer
+// samples it twice to learn whether anything consumes: a suspended context or a
+// page that has gone leaves it still. It measures the consumer, not the writer.
+func (w *Writer) Heartbeat() uint32 { return uint32(w.m.Load(HBeat)) }
 
 // Close tells the consumer to stop. Further writes are refused.
 func (w *Writer) Close() { w.m.Store(HState, StateClosed) }
