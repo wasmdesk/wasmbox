@@ -250,6 +250,7 @@ channels` interleaved `float32` (nominal -1..1):
 | 3 played | worklet | frames output |
 | 4 overruns | client | frames dropped because the ring was full |
 | 5 state | either | 0 open, 1 closed (the worklet stops; writers refuse) |
+| 6 heartbeat | worklet | `+1` on every `process()` call, free-running; measures the consumer, not the producer: it stands still while the context is suspended or the page is gone (`audioring.Writer.Heartbeat`, since `audioring/v0.2.0`) |
 
 Single producer, single consumer, no locks: the client stores the samples and
 then the write index (`Atomics.store`, a release); the worklet loads the write

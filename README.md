@@ -196,6 +196,17 @@ hostile opens); with `AUDIO_CLIENT=quake` or `doom` it runs against the real
 engines, which both use the relay (Quake 11025 Hz, Doom 44.1 kHz). Unfocused windows
 are not ducked: all open windows mix at unity gain.
 
+The worklet is an asset of the `audioring` module, `audioring/audio-worklet.js`,
+embedded as `audioring.WorkletJS` (`audioring/v0.2.0`), so that every page plays a ring
+with the same file: wasmbox's, and the
+[wasmcontainers playground](https://go-wasmcontainers.github.io/playground/)'s, which
+plays the sound of containers run with `wctr run --audio`. Header word 6 is a
+heartbeat the worklet advances every render quantum (`Writer.Heartbeat()`): a
+producer can tell "the page plays" from "nobody consumes" (a context still suspended
+before the first gesture, a page that has gone). `test/probe-audio.mjs` checks that it
+is 0 before the gesture, moves after it, and still moves in the planted negative where
+nothing is played.
+
 ## Pick a window decoration
 
 Wasmbox ships **16 registered decoration presets** (2 layouts × 7 GTK palettes,
