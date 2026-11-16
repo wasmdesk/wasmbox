@@ -79,6 +79,11 @@ async function measure(p, NEGATIVE = false) {
   }
   out.stateBeforeGesture = await ev(p, "globalThis.__wasmboxAudio.state()");
   if (out.stateBeforeGesture !== "suspended") { out.why = `AudioContext was ${out.stateBeforeGesture} before any gesture (autoplay policy not enforced: the gesture check would be vacuous)`; return out; }
+  // The heartbeat measures the consumer: the context is suspended, so the
+  // worklet does not run and the word stays 0 (this holds in the planted
+  // negative too, whose producer is off but whose consumer is the same).
+  out.heartbeatBeforeGesture = await ev(p, "globalThis.__wasmboxAudio.stats()[0].heartbeat");
+  if (out.heartbeatBeforeGesture !== 0) { out.why = `heartbeat ${out.heartbeatBeforeGesture} before any gesture (the worklet ran while the context was suspended)`; return out; }
   // One synthetic gesture: a trusted click on empty desktop (user activation;
   // a lone modifier key does not count as activation).
   await p.mouse.click(1270, 400);
@@ -98,12 +103,16 @@ async function measure(p, NEGATIVE = false) {
   await wait(WINDOW_MS);
   const b = await p.evaluate(() => globalThis.__wasmboxAudio.stats()[0]);
   out.playedFrames = (b.played - a.played) >>> 0;
+  out.heartbeatTicks = (b.heartbeat - a.heartbeat) >>> 0;
   out.underruns = (b.underruns - a.underruns) >>> 0;
   out.overruns = b.overruns;
   out.capacityFrames = b.capacityFrames;
   out.buffered = b.buffered;
   out.clientRate = b.sampleRate;
   const expect = out.contextRate * (WINDOW_MS / 1000);
+  // 128-frame quanta: a window of WINDOW_MS holds about rate*s/128 of them; accept half.
+  const quanta = out.contextRate * (WINDOW_MS / 1000) / 128;
+  if (!(out.heartbeatTicks >= 0.5 * quanta)) { out.why = `heartbeat advanced ${out.heartbeatTicks}, expected about ${Math.round(quanta)} quanta`; return out; }
   if (!(out.playedFrames > 0)) { out.why = "worklet played 0 frames"; return out; }
   if (out.playedFrames < 0.5 * expect) { out.why = `played ${out.playedFrames} < half of ${expect}`; return out; }
   if (out.underruns >= UNDERRUN_BOUND) { out.why = `underruns ${out.underruns} >= bound ${UNDERRUN_BOUND}`; return out; }
@@ -156,6 +165,7 @@ try {
     const r = await measure(p, true);
     console.log("negative:", JSON.stringify(r));
     check(!r.ok && r.playedFrames === 0 && r.why === "worklet played 0 frames", "planted negative (ring writer disabled) is DETECTED: played stays 0 and the assertions fail", r.why);
+    check(r.heartbeatBeforeGesture === 0 && r.heartbeatTicks > 0, "heartbeat is 0 before the gesture and advances after it even though nothing is played (it measures the consumer)", `before=${r.heartbeatBeforeGesture} ticks=${r.heartbeatTicks}`);
     await p.close();
   }
   // --- hostile (the synthetic client only: real engines never send malformed opens) ---

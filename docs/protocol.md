@@ -218,7 +218,7 @@ buffer and no main-thread work in steady state.
 ```
 client worker ── audio_open{sab,…} ──► compositor worker ── validate ──► page
       │ writes PCM into the ring           (audio-relay.js)      (audio-host.js)
-      └──────────── SharedArrayBuffer ◄──── AudioWorkletNode reads it (audio-worklet.js)
+      └──────────── SharedArrayBuffer ◄──── AudioWorkletNode reads it (audioring/audio-worklet.js, embedded as audioring.WorkletJS)
 ```
 
 ```js
