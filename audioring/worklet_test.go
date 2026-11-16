@@ -30,6 +30,14 @@ func TestHeartbeatWord(t *testing.T) {
 	if got := w.Heartbeat(); got != 0 {
 		t.Fatalf("heartbeat moved without the consumer: %d", got)
 	}
+	if w.Closed() {
+		t.Fatal("open ring reports closed")
+	}
+	w.Close()
+	if !w.Closed() {
+		t.Fatal("closed ring reports open")
+	}
+	m.hdr[HState] = StateOpen
 	m.Add(HBeat, 5)
 	if got := w.Heartbeat(); got != 5 {
 		t.Fatalf("heartbeat = %d, want 5", got)

@@ -196,5 +196,9 @@ func (w *Writer) Stats() Stats {
 // page that has gone leaves it still. It measures the consumer, not the writer.
 func (w *Writer) Heartbeat() uint32 { return uint32(w.m.Load(HBeat)) }
 
+// Closed reports whether either side has closed the ring (the state word is no
+// longer StateOpen): the consumer's node was dropped, or Close was called.
+func (w *Writer) Closed() bool { return w.m.Load(HState) != StateOpen }
+
 // Close tells the consumer to stop. Further writes are refused.
 func (w *Writer) Close() { w.m.Store(HState, StateClosed) }
