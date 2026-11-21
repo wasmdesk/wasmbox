@@ -78,6 +78,7 @@ import (
 	"github.com/go-widgets/mvvm"
 	"github.com/go-widgets/painter"
 	"github.com/go-widgets/toolkit"
+	"github.com/go-widgets/toolkit/iconoir"
 	"github.com/wasmdesk/wasmbox/clients/dock/internal/theme"
 )
 
@@ -725,7 +726,7 @@ func (s *State) applyTheme(th theme.Theme) {
 // if (x, y) does not fall inside any launcher button. Window task buttons (which
 // follow the launcher row in the same AppDock) are probed with HitTestWindow.
 func (s *State) HitTest(x, y int) int {
-	i := s.dock.HitTest(x, y)
+	i := s.dock.ItemAt(x, y)
 	if i >= 0 && i < len(s.Apps) {
 		return i
 	}
@@ -737,7 +738,7 @@ func (s *State) HitTest(x, y int) int {
 // window row sits after the launcher row in the same AppDock, so a hit index at
 // or past len(Apps) maps to window index (index - len(Apps)).
 func (s *State) HitTestWindow(x, y int) int {
-	i := s.dock.HitTest(x, y)
+	i := s.dock.ItemAt(x, y)
 	if i >= len(s.Apps) {
 		return i - len(s.Apps)
 	}
@@ -824,7 +825,7 @@ func drawGlyph(p painter.Painter, g Glyph, r toolkit.Rect) {
 	case GlyphFiles:
 		toolkit.DrawIconOpen(p, r, ink)
 	default:
-		toolkit.DrawIconoir(p, toolkit.Rect(r), glyphStem(g), ink)
+		iconoir.Draw(p, toolkit.Rect(r), glyphStem(g), ink)
 	}
 }
 

@@ -35,6 +35,7 @@ import (
 
 	"github.com/go-widgets/painter"
 	"github.com/go-widgets/toolkit"
+	"github.com/go-widgets/toolkit/iconoir"
 )
 
 // aaOnce flips the toolkit's active font to anti-aliased, shaped OpenType text
@@ -208,7 +209,7 @@ func (s *State) buildTree() {
 	// resolved ink (OnSurface, or the accent-on ink when selected).
 	s.list.ItemRenderer = func(p painter.Painter, th *toolkit.Theme, rc toolkit.Rect, index int, item string, selected bool, ink toolkit.RGBA) {
 		ir := toolkit.Rect{X: rc.X + catIconPad, Y: rc.Y + (rc.H-catIconSize)/2, W: catIconSize, H: catIconSize}
-		toolkit.DrawIconoir(p, toolkit.Rect(ir), catIcons[index], ink)
+		iconoir.Draw(p, toolkit.Rect(ir), catIcons[index], ink)
 		tx := ir.X + ir.W + catTextGap
 		s.itemLabel.Text().Set(item)
 		s.itemLabel.Ink = ink
