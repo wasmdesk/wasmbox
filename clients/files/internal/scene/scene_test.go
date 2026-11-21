@@ -10,6 +10,7 @@ import (
 	icons "github.com/go-icons/iconoir"
 	"github.com/go-widgets/painter"
 	"github.com/go-widgets/toolkit"
+	"github.com/go-widgets/toolkit/iconoir"
 	"github.com/wasmdesk/wasmbox/clients/sharedvfs"
 )
 
@@ -775,7 +776,7 @@ func TestIconStemsRender(t *testing.T) {
 		if !icons.Has(stem) {
 			t.Errorf("iconoir stem %q not found", stem)
 		}
-		toolkit.DrawIconoir(p, r, stem, ColorFolderFill)
+		iconoir.Draw(p, r, stem, ColorFolderFill)
 		if c := coverageIn(buf, w, 4, 4, toolkit.TableIconSize, toolkit.TableIconSize, ColorFolderFill, toolkit.RGBA{}); c < 20 {
 			t.Errorf("iconoir stem %q inked %.1f px of coverage, want >= 20", stem, c)
 		}
