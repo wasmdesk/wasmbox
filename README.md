@@ -207,6 +207,11 @@ before the first gesture, a page that has gone). `test/probe-audio.mjs` checks t
 is 0 before the gesture, moves after it, and still moves in the planted negative where
 nothing is played.
 
+The same file registers `wasmbox-voices` (`audioring/v0.3.0`), a game's channel mixer
+on the audio thread: the producer uploads samples once and sends start/stop/volume
+commands, and sounds already playing keep playing through a producer stall (see
+`docs/protocol.md`, "Voices").
+
 ## Pick a window decoration
 
 Wasmbox ships **16 registered decoration presets** (2 layouts × 7 GTK palettes,
