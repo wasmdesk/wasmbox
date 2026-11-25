@@ -9,7 +9,8 @@ import _ "embed"
 // wasmcontainers playground). Register it with
 // audioWorklet.addModule(URL of these bytes); it registers the processor
 // "wasmbox-ring", whose processorOptions are {sab, sampleRate, channels,
-// capacityFrames}.
+// capacityFrames}, and "wasmbox-voices" (the mixer described in voices.go),
+// whose processorOptions are {ctl, bank, aheadFrames, mixRate}.
 //
 //go:embed audio-worklet.js
 var WorkletJS []byte

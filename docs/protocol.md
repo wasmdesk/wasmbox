@@ -266,6 +266,24 @@ gap rather than a stutter), and resamples with linear interpolation when the
 client rate differs from the context rate. Latency is the ring's fill level,
 bounded by `capacityFrames`; clients aim for about half of it.
 
+**Voices (a mixer that survives a stalled producer).** `audio-worklet.js` registers
+a second processor, `wasmbox-voices` (processorOptions `{ctl, bank, aheadFrames,
+mixRate}`, two SharedArrayBuffers), for producers that cannot be trusted to run on
+time. The producer loads PCM samples once into the bank (a table of 1024 entries,
+then the data: 8-bit signed or 16-bit little-endian), and sends 16-byte commands
+(`START`, `STOP`, `STOPALL`, `SETVOL`, each stamped with the slot's generation) over a
+1024-entry single-producer ring. The worklet paints up to 128 voices `aheadFrames`
+(Quake: 1103 = 0.1 s at 11025 Hz) in front of the play cursor into an int32 paint
+buffer, clamps to 16 bits at transfer (as WinQuake's `S_TransferPaintBuffer`, so loud
+mixes saturate instead of wrapping) and resamples linearly. A producer stall of any
+length leaves sounds that are already playing, loops included, uninterrupted. The
+control buffer also carries a snapshot of the voice table (generation, active,
+frames remaining) that the producer allocates channels from, and the counters
+`played`, `painted`, `starved` (always 0 unless the paint buffer cannot be topped up)
+and `badcmd`. The layout is in `audioring/voices.go` (`Command.Encode`,
+`DecodeCommand`; the decoder is fuzzed) and is tested against a closed-form oracle
+under node by `audioring/voices_js_test.go`.
+
 **Mixing policy.** All open windows are mixed at unity gain. Unfocused windows
 are **not** ducked or muted: focus lives in the Ruby window manager, and the
 per-window `GainNode` is already there (`__wasmboxAudio.setGain(id, v)`) for a
