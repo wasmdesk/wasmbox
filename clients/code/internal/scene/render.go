@@ -48,8 +48,10 @@ const (
 	TabStripHeight = 28
 	// StatusBarHeight is the height of the bottom signature-blue strip.
 	StatusBarHeight = 24
-	// SidebarRowHeight is the height of one file-tree row in the sidebar.
-	SidebarRowHeight = 20
+	// SidebarRowHeight is the height of one file-tree row in the sidebar. It
+	// matches the 20px JetBrains Mono face's line height (26px): the toolkit
+	// ListBox never lays a row out under the active font's height.
+	SidebarRowHeight = 26
 	// DialogW / DialogH are the centred "Connect to Live Server" popup size.
 	DialogW = 400
 	DialogH = 180
