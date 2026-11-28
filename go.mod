@@ -10,9 +10,9 @@ require (
 	github.com/go-webengine/browserproxy v0.3.0
 	github.com/go-widgets/lineedit v0.1.1
 	github.com/go-widgets/mvvm v0.15.0
-	github.com/go-widgets/painter v0.20.3
+	github.com/go-widgets/painter v0.21.0
 	github.com/go-widgets/shellterm v0.1.2
-	github.com/go-widgets/toolkit v0.403.0
+	github.com/go-widgets/toolkit v0.407.0
 	github.com/go-widgets/toolkit/rougelex v0.2.0
 	github.com/grpc-transports/websocket v0.4.0
 	github.com/wasmdesk/coreutils v0.6.0
